@@ -282,3 +282,28 @@ def register(app):
             await message.reply(f"Failed to get user info: {e}")
             logging.error(f"Error in /userinfo: {e}", exc_info=True)
 
+    # Minimal mute test command for debugging environment
+    @app.on_message(filters.command("testmute") & filters.group)
+    async def test_mute(client, message: Message):
+        user = message.from_user
+        permissions = ChatPermissions(
+            can_send_messages=False,
+            can_send_media_messages=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+        try:
+            logging.debug(f"Attempting to mute user {user.id} in chat {message.chat.id}")
+            await client.restrict_chat_member(
+                chat_id=message.chat.id,
+                user_id=user.id,
+                permissions=permissions,
+                until_date=0  # Indefinite mute
+            )
+            await message.reply(f"Muted {user.mention} successfully.")
+        except Exception as e:
+            await message.reply(f"Failed to mute: {e}")
+            logging.error(f"Error in /testmute: {e}", exc_info=True)
