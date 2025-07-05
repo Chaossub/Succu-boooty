@@ -97,51 +97,70 @@ def register(app):
 
     @app.on_message(filters.command("mute") & filters.group)
     async def mute_user(client, message: Message):
-        logging.debug(f"Received /mute from {message.from_user.id} in {message.chat.id}")
+        logging.info(f"Received /mute from {message.from_user.id} in chat {message.chat.id}")
+
+        if not await is_admin(client, message.chat.id, message.from_user.id):
+            await message.reply("Only admins can mute users.")
+            return
+
+        target_user = None
+
+        # Get target user from reply or argument
+        if message.reply_to_message:
+            target_user = message.reply_to_message.from_user
+            logging.info(f"Target user from reply: {target_user.id if target_user else None}")
+        else:
+            args = message.text.split()
+            if len(args) < 2:
+                await message.reply("Reply to a user or specify username/ID to mute.")
+                return
+            user_arg = args[1]
+            try:
+                target_user = await client.get_users(user_arg)
+                logging.info(f"Target user from argument: {target_user.id}")
+            except Exception as e:
+                logging.error(f"Failed to get user from argument '{user_arg}': {e}", exc_info=True)
+                await message.reply("Could not find the specified user.")
+                return
+
+        if not target_user or not hasattr(target_user, "id"):
+            await message.reply("Target user not found or invalid.")
+            logging.error(f"Target user is invalid or None.")
+            return
+
+        # Prevent muting bots, self, or owner
+        if target_user.is_bot:
+            await message.reply("Cannot mute a bot.")
+            return
+        if target_user.id == message.from_user.id:
+            await message.reply("You cannot mute yourself.")
+            return
+        if target_user.id == OWNER_ID:
+            await message.reply("You cannot mute the bot owner.")
+            return
+
+        # Prepare mute permissions
+        permissions = ChatPermissions(
+            can_send_messages=False,
+            can_send_media_messages=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False,
+            can_change_info=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+        )
+
+        logging.debug(f"Muting user {target_user.id} with permissions: {permissions}")
+
         try:
-            chat_id = message.chat.id
-            from_user = message.from_user
-            chat_member = await client.get_chat_member(chat_id, from_user.id)
-            if not (chat_member.status in ["administrator", "creator"] or from_user.id == OWNER_ID):
-                return await message.reply("Only admins can mute users.")
-
-            target_user = None
-            if message.reply_to_message:
-                target_user = message.reply_to_message.from_user
-            else:
-                args = message.text.split()
-                if len(args) < 2:
-                    return await message.reply("Reply to a user or specify username/ID to mute.")
-                try:
-                    target_user = await client.get_users(args[1])
-                except Exception:
-                    return await message.reply("Could not find the specified user.")
-
-            if not target_user:
-                return await message.reply("Target user not found or invalid.")
-
-            if target_user.is_bot:
-                return await message.reply("Cannot mute a bot.")
-            if target_user.id == from_user.id:
-                return await message.reply("You cannot mute yourself.")
-            if target_user.id == OWNER_ID:
-                return await message.reply("You cannot mute the bot owner.")
-
-            permissions = ChatPermissions(
-                can_send_messages=False,
-                can_send_media_messages=False,
-                can_send_other_messages=False,
-                can_add_web_page_previews=False
-            )
-
             await client.restrict_chat_member(
-                chat_id=chat_id,
+                chat_id=message.chat.id,
                 user_id=target_user.id,
                 permissions=permissions,
-                until_date=None  # Indefinite mute
+                until_date=None  # indefinite mute
             )
-
             await message.reply(f"{target_user.mention} has been muted.")
+            logging.info(f"Muted user {target_user.id} successfully.")
         except Exception as e:
             await message.reply(f"Failed to mute: {e}")
             logging.error(f"Error in /mute: {e}", exc_info=True)
