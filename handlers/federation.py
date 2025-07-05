@@ -3,11 +3,16 @@ from pyrogram import filters
 from pyrogram.types import Message
 from pymongo import MongoClient
 
-MONGO_URI = os.getenv("MONGO_URI")  # Or set manually if testing
+# Load Mongo URI from environment variable
+MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    raise ValueError("MONGO_URI environment variable is not set!")
+
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["SuccuBot"]
 feds = db["federations"]
 groups = db["groups"]
+
 SUPER_ADMIN_ID = 6964994611
 
 def is_fed_admin(user_id, fed_id):
@@ -99,13 +104,10 @@ def register(app):
                 if mention.startswith("@"):
                     user = await client.get_users(mention)
                 else:
-                    # Try to parse as int for Telegram user IDs
                     user_id_int = int(mention)
                     user = await client.get_users(user_id_int)
             except Exception as e:
-                return await message.reply(
-                    f"Invalid user! Use /fedban as reply, /fedban @username, or /fedban user_id.\n\n<code>{e}</code>"
-                )
+                return await message.reply(f"Invalid user! Use /fedban as reply, /fedban @username, or /fedban user_id.\n\n<code>{e}</code>")
 
         if not user:
             return await message.reply("Couldn't find user to fedban.")
@@ -142,9 +144,7 @@ def register(app):
                 else:
                     user = await client.get_users(int(mention))
             except Exception as e:
-                return await message.reply(
-                    f"Invalid user! Use /fedunban as reply, /fedunban @username, or /fedunban user_id.\n\n<code>{e}</code>"
-                )
+                return await message.reply(f"Invalid user! Use /fedunban as reply, /fedunban @username, or /fedunban user_id.\n\n<code>{e}</code>")
 
         if not user:
             return await message.reply("Couldn't find user to fedunban.")
