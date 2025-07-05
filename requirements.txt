@@ -1,4 +1,4 @@
-git+https://github.com/pyrogram/pyrogram@master#egg=pyrogram
+git+https://github.com/pyrogram/pyrogram.git@master#egg=pyrogram
 tgcrypto==1.2.5
 python-dotenv==1.0.1
 pymongo==4.7.2
