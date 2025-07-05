@@ -4,10 +4,14 @@ from pyrogram.types import Message, ChatPermissions
 
 logging.basicConfig(level=logging.DEBUG)
 
-def register(app):
+OWNER_ID = 6964994611
 
-    def is_admin(chat_member):
-        return chat_member and chat_member.status in ("administrator", "creator")
+def is_admin(chat_member, user_id):
+    if user_id == OWNER_ID:
+        return True
+    return chat_member and chat_member.status in ("administrator", "creator")
+
+def register(app):
 
     async def get_target_user(message: Message):
         if not message.reply_to_message:
@@ -25,7 +29,7 @@ def register(app):
     async def warn_user(client, message: Message):
         logging.debug(f"Received /warn from {message.from_user.id} in {message.chat.id}")
         chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member):
+        if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can issue warnings.")
             return
         user = await get_target_user(message)
@@ -38,7 +42,7 @@ def register(app):
     async def mute_user(client, message: Message):
         logging.debug(f"Received /mute from {message.from_user.id} in {message.chat.id}")
         chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member):
+        if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can mute users.")
             return
         user = await get_target_user(message)
@@ -66,7 +70,7 @@ def register(app):
     async def unmute_user(client, message: Message):
         logging.debug(f"Received /unmute from {message.from_user.id} in {message.chat.id}")
         chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member):
+        if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can unmute users.")
             return
         user = await get_target_user(message)
@@ -93,7 +97,7 @@ def register(app):
     async def kick_user(client, message: Message):
         logging.debug(f"Received /kick from {message.from_user.id} in {message.chat.id}")
         chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member):
+        if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can kick users.")
             return
         user = await get_target_user(message)
@@ -112,7 +116,7 @@ def register(app):
     async def ban_user(client, message: Message):
         logging.debug(f"Received /ban from {message.from_user.id} in {message.chat.id}")
         chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member):
+        if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can ban users.")
             return
         user = await get_target_user(message)
@@ -130,7 +134,7 @@ def register(app):
     async def unban_user(client, message: Message):
         logging.debug(f"Received /unban from {message.from_user.id} in {message.chat.id}")
         chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member):
+        if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can unban users.")
             return
         args = message.text.split()
