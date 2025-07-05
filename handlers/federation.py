@@ -3,10 +3,9 @@ from pyrogram import filters
 from pyrogram.types import Message
 from pymongo import MongoClient
 
-# Load Mongo URI from environment variable
 MONGO_URI = os.getenv("MONGO_URI")
 if not MONGO_URI:
-    raise ValueError("MONGO_URI environment variable is not set!")
+    raise ValueError("MONGO_URI environment variable not set")
 
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["SuccuBot"]
@@ -36,7 +35,8 @@ def register(app):
             return await message.reply("Usage: /createfed <fed_name>")
         fed_name = args[1].strip()
         fed_id = f"fed-{message.chat.id}"
-        if feds.find_one({"fed_id": fed_id}):
+        existing = feds.find_one({"fed_id": fed_id})
+        if existing:
             return await message.reply("A federation for this group already exists.")
         feds.insert_one({
             "fed_id": fed_id,
@@ -46,6 +46,16 @@ def register(app):
             "bans": []
         })
         await message.reply(f"✅ Federation <b>{fed_name}</b> created!\nFedID: <code>{fed_id}</code>")
+
+    @app.on_message(filters.command("fedlist") & filters.group)
+    async def fed_list(client, message: Message):
+        feds_list = list(feds.find({}))
+        if not feds_list:
+            return await message.reply("No federations found.")
+        text = "<b>Federations:</b>\n"
+        for fed in feds_list:
+            text += f"- <code>{fed['fed_id']}</code>: {fed.get('name', 'No name')}\n"
+        await message.reply(text)
 
     @app.on_message(filters.command("delfed") & filters.group)
     async def delete_fed(client, message: Message):
