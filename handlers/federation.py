@@ -11,7 +11,7 @@ if not MONGO_URI:
     raise ValueError("MONGO_URI environment variable not set")
 
 mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["succubot"]  # use lowercase db name
+db = mongo_client["succubot"]  # lowercase db name
 feds = db["federations"]
 groups = db["groups"]
 
@@ -33,7 +33,7 @@ def register(app):
 
     @app.on_message(filters.command("createfed") & filters.group)
     async def create_fed(client, message: Message):
-        logging.info(f"Received /createfed command from user {message.from_user.id} in chat {message.chat.id}")
+        logging.info(f"/createfed by {message.from_user.id} in {message.chat.id}")
         args = message.text.split(maxsplit=1)
         if len(args) < 2 or not args[1].strip():
             await message.reply("Usage: /createfed <name>")
@@ -59,7 +59,7 @@ def register(app):
 
     @app.on_message(filters.command("fedlist") & filters.group)
     async def fed_list(client, message: Message):
-        logging.info(f"Received /fedlist command from user {message.from_user.id} in chat {message.chat.id}")
+        logging.info(f"/fedlist by {message.from_user.id} in {message.chat.id}")
         fed_list = list(feds.find({}))
         if not fed_list:
             await message.reply("No federations found.")
@@ -105,6 +105,20 @@ def register(app):
     async def leave_fed(client, message: Message):
         groups.update_one({"chat_id": message.chat.id}, {"$unset": {"fed_id": ""}})
         await message.reply("✅ Group unlinked from its federation.")
+
+    @app.on_message(filters.command("linkgroup") & filters.group)
+    async def link_group(client, message: Message):
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            await message.reply("Usage: /linkgroup <fed_id>")
+            return
+        fed_id = args[1].strip()
+        fed = feds.find_one({"fed_id": fed_id})
+        if not fed:
+            await message.reply("No federation found with that ID.")
+            return
+        groups.update_one({"chat_id": message.chat.id}, {"$set": {"fed_id": fed_id}}, upsert=True)
+        await message.reply(f"✅ Group linked to federation <b>{fed_id}</b>.")
 
     @app.on_message(filters.command("fedban") & filters.group)
     async def fedban_user(client, message: Message):
@@ -287,3 +301,4 @@ def register(app):
                 except Exception:
                     text += f"- <code>{admin_id}</code>\n"
         await message.reply(text)
+
