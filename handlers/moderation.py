@@ -2,6 +2,7 @@ import logging
 import random
 from pyrogram import filters
 from pyrogram.types import Message, ChatPermissions
+import time
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -155,7 +156,7 @@ def register(app):
                 chat_id=message.chat.id,
                 user_id=target_user.id,
                 permissions=permissions,
-                until_date=0  # indefinite mute
+                until_date=None  # indefinite mute fixed here
             )
             await message.reply(f"{target_user.mention} has been muted.")
             logging.info(f"[MUTE] User {target_user.id} muted successfully.")
@@ -183,7 +184,7 @@ def register(app):
                     can_send_other_messages=True,
                     can_add_web_page_previews=True
                 ),
-                until_date=0
+                until_date=None  # indefinite unmute
             )
             await message.reply(f"{user.mention} has been unmuted.")
             logging.debug(f"User {user.id} unmuted successfully")
@@ -301,7 +302,7 @@ def register(app):
                 chat_id=message.chat.id,
                 user_id=user.id,
                 permissions=permissions,
-                until_date=0  # Indefinite mute
+                until_date=None  # Indefinite mute
             )
             await message.reply(f"Muted {user.mention} successfully.")
         except Exception as e:
