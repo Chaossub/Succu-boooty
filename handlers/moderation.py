@@ -3,6 +3,19 @@ import random
 from pyrogram import filters
 from pyrogram.types import Message, ChatPermissions
 
+# ─── Monkey-patch to avoid the NoneType.to_bytes bug in Pyrogram 2.0.106 ───
+from pyrogram.raw.types.chat_banned_rights import ChatBannedRights
+
+_orig_cbr_write = ChatBannedRights.write
+def _patched_cbr_write(self, *args, **kwargs):
+    # If until_date is falsy or None, force it to the 32-bit max timestamp
+    if not getattr(self, "until_date", None):
+        self.until_date = 2147483647
+    return _orig_cbr_write(self, *args, **kwargs)
+
+ChatBannedRights.write = _patched_cbr_write
+# ────────────────────────────────────────────────────────────────────────────
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s'
@@ -100,7 +113,7 @@ def register(app):
             chat_id=message.chat.id,
             user_id=user.id,
             permissions=perms,
-            until_date=2147483647  # indefinite mute
+            until_date=None  # patched above to become 2147483647
         )
         await message.reply(f"{user.mention} has been muted indefinitely.")
 
@@ -127,7 +140,7 @@ def register(app):
             chat_id=message.chat.id,
             user_id=user.id,
             permissions=perms,
-            until_date=2147483647  # restore default indefinitely
+            until_date=None
         )
         await message.reply(f"{user.mention} has been unmuted.")
 
@@ -140,12 +153,7 @@ def register(app):
         user = await resolve_target(client, message)
         if not user:
             return
-        logging.debug("Banning then unbanning %s", user.id)
-        await client.ban_chat_member(
-            chat_id=message.chat.id,
-            user_id=user.id,
-            until_date=2147483647  # use max for indefinite
-        )
+        await client.ban_chat_member(message.chat.id, user.id, until_date=None)
         await client.unban_chat_member(message.chat.id, user.id)
         await message.reply(f"{user.mention} has been kicked from the group.")
 
@@ -158,11 +166,7 @@ def register(app):
         user = await resolve_target(client, message)
         if not user:
             return
-        await client.ban_chat_member(
-            chat_id=message.chat.id,
-            user_id=user.id,
-            until_date=2147483647  # indefinite ban
-        )
+        await client.ban_chat_member(message.chat.id, user.id, until_date=None)
         await message.reply(f"{user.mention} has been banned from the group.")
 
     @app.on_message(filters.command("unban") & filters.group)
