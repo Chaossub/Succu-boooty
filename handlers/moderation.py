@@ -2,16 +2,48 @@ import logging
 from pyrogram import filters
 from pyrogram.types import Message, ChatPermissions
 
+logging.basicConfig(level=logging.DEBUG)
+
 def register(app):
+
+    def is_admin(chat_member):
+        return chat_member and chat_member.status in ("administrator", "creator")
+
+    async def get_target_user(message: Message):
+        if not message.reply_to_message:
+            await message.reply("You must reply to the user for this command.")
+            logging.debug("Command failed: no reply_to_message")
+            return None
+        user = message.reply_to_message.from_user
+        if not user or not user.id:
+            await message.reply("Could not find the user to target.")
+            logging.debug("Command failed: reply_to_message has no valid user")
+            return None
+        return user
+
+    @app.on_message(filters.command("warn") & filters.group)
+    async def warn_user(client, message: Message):
+        logging.debug(f"Received /warn from {message.from_user.id} in {message.chat.id}")
+        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+        if not is_admin(chat_member):
+            await message.reply("Only admins can issue warnings.")
+            return
+        user = await get_target_user(message)
+        if not user:
+            return
+        # TODO: Implement warning increment and storage here
+        await message.reply(f"{user.mention} has been warned.")
 
     @app.on_message(filters.command("mute") & filters.group)
     async def mute_user(client, message: Message):
-        logging.debug(f"Received /mute command from user {message.from_user.id} in chat {message.chat.id}")
-        if not message.reply_to_message:
-            await message.reply("Reply to a user to mute them.")
-            logging.debug("Mute failed: no reply_to_message")
+        logging.debug(f"Received /mute from {message.from_user.id} in {message.chat.id}")
+        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+        if not is_admin(chat_member):
+            await message.reply("Only admins can mute users.")
             return
-        user = message.reply_to_message.from_user
+        user = await get_target_user(message)
+        if not user:
+            return
         try:
             await client.restrict_chat_member(
                 message.chat.id,
@@ -32,12 +64,14 @@ def register(app):
 
     @app.on_message(filters.command("unmute") & filters.group)
     async def unmute_user(client, message: Message):
-        logging.debug(f"Received /unmute command from user {message.from_user.id} in chat {message.chat.id}")
-        if not message.reply_to_message:
-            await message.reply("Reply to a user to unmute them.")
-            logging.debug("Unmute failed: no reply_to_message")
+        logging.debug(f"Received /unmute from {message.from_user.id} in {message.chat.id}")
+        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+        if not is_admin(chat_member):
+            await message.reply("Only admins can unmute users.")
             return
-        user = message.reply_to_message.from_user
+        user = await get_target_user(message)
+        if not user:
+            return
         try:
             await client.restrict_chat_member(
                 message.chat.id,
@@ -57,12 +91,14 @@ def register(app):
 
     @app.on_message(filters.command("kick") & filters.group)
     async def kick_user(client, message: Message):
-        logging.debug(f"Received /kick command from user {message.from_user.id} in chat {message.chat.id}")
-        if not message.reply_to_message:
-            await message.reply("Reply to a user to kick them.")
-            logging.debug("Kick failed: no reply_to_message")
+        logging.debug(f"Received /kick from {message.from_user.id} in {message.chat.id}")
+        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+        if not is_admin(chat_member):
+            await message.reply("Only admins can kick users.")
             return
-        user = message.reply_to_message.from_user
+        user = await get_target_user(message)
+        if not user:
+            return
         try:
             await client.ban_chat_member(message.chat.id, user.id)
             await client.unban_chat_member(message.chat.id, user.id)
@@ -74,12 +110,14 @@ def register(app):
 
     @app.on_message(filters.command("ban") & filters.group)
     async def ban_user(client, message: Message):
-        logging.debug(f"Received /ban command from user {message.from_user.id} in chat {message.chat.id}")
-        if not message.reply_to_message:
-            await message.reply("Reply to a user to ban them.")
-            logging.debug("Ban failed: no reply_to_message")
+        logging.debug(f"Received /ban from {message.from_user.id} in {message.chat.id}")
+        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+        if not is_admin(chat_member):
+            await message.reply("Only admins can ban users.")
             return
-        user = message.reply_to_message.from_user
+        user = await get_target_user(message)
+        if not user:
+            return
         try:
             await client.ban_chat_member(message.chat.id, user.id)
             await message.reply(f"{user.mention} has been banned from the group.")
@@ -90,7 +128,11 @@ def register(app):
 
     @app.on_message(filters.command("unban") & filters.group)
     async def unban_user(client, message: Message):
-        logging.debug(f"Received /unban command from user {message.from_user.id} in chat {message.chat.id}")
+        logging.debug(f"Received /unban from {message.from_user.id} in {message.chat.id}")
+        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+        if not is_admin(chat_member):
+            await message.reply("Only admins can unban users.")
+            return
         args = message.text.split()
         if len(args) < 2:
             await message.reply("Usage: /unban <user_id>")
