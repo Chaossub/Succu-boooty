@@ -22,8 +22,7 @@ def is_admin(chat_member, user_id):
     return user_id == OWNER_ID or (chat_member and chat_member.status in ("administrator", "creator"))
 
 async def get_user(client, chat_id, identifier):
-    """Resolve a user by reply, @username or ID."""
-    # Try reply case handled by caller; here just parse identifier
+    """Resolve @username or ID to a User object."""
     try:
         if identifier.isdigit():
             member = await client.get_chat_member(chat_id, int(identifier))
@@ -39,7 +38,7 @@ async def get_user(client, chat_id, identifier):
         return None
 
 async def resolve_target(client, message: Message):
-    """Get target user from reply or first argument."""
+    """Get target user from reply or argument."""
     if message.reply_to_message:
         return message.reply_to_message.from_user
     parts = message.text.split(maxsplit=1)
@@ -101,7 +100,7 @@ def register(app):
             chat_id=message.chat.id,
             user_id=user.id,
             permissions=perms,
-            until_date=0  # indefinite mute
+            until_date=2147483647  # indefinite mute
         )
         await message.reply(f"{user.mention} has been muted indefinitely.")
 
@@ -128,7 +127,7 @@ def register(app):
             chat_id=message.chat.id,
             user_id=user.id,
             permissions=perms,
-            until_date=0
+            until_date=2147483647  # restore default indefinitely
         )
         await message.reply(f"{user.mention} has been unmuted.")
 
@@ -141,7 +140,12 @@ def register(app):
         user = await resolve_target(client, message)
         if not user:
             return
-        await client.ban_chat_member(message.chat.id, user.id, until_date=0)
+        logging.debug("Banning then unbanning %s", user.id)
+        await client.ban_chat_member(
+            chat_id=message.chat.id,
+            user_id=user.id,
+            until_date=2147483647  # use max for indefinite
+        )
         await client.unban_chat_member(message.chat.id, user.id)
         await message.reply(f"{user.mention} has been kicked from the group.")
 
@@ -154,7 +158,11 @@ def register(app):
         user = await resolve_target(client, message)
         if not user:
             return
-        await client.ban_chat_member(message.chat.id, user.id, until_date=0)
+        await client.ban_chat_member(
+            chat_id=message.chat.id,
+            user_id=user.id,
+            until_date=2147483647  # indefinite ban
+        )
         await message.reply(f"{user.mention} has been banned from the group.")
 
     @app.on_message(filters.command("unban") & filters.group)
