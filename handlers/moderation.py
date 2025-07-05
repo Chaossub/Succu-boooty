@@ -97,39 +97,41 @@ def register(app):
 
     @app.on_message(filters.command("mute") & filters.group)
     async def mute_user(client, message: Message):
-        logging.info(f"Processing /mute from {message.from_user.id} in chat {message.chat.id}")
-
+        logging.info(f"[MUTE] Command received from user {message.from_user.id} in chat {message.chat.id}")
         try:
             chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+            logging.debug(f"[MUTE] Command issuer status: {chat_member.status}")
             if not (chat_member.status in ["administrator", "creator"] or message.from_user.id == OWNER_ID):
                 await message.reply("Only admins can mute users.")
+                logging.info(f"[MUTE] User {message.from_user.id} is not admin, aborting.")
                 return
 
             target_user = None
             if message.reply_to_message:
                 target_user = message.reply_to_message.from_user
-                logging.info(f"Target user from reply: {target_user.id if target_user else None}")
+                logging.debug(f"[MUTE] Target user from reply: {target_user.id if target_user else 'None'}")
             else:
                 args = message.text.split()
                 if len(args) < 2:
                     await message.reply("Reply to a user or specify username/ID to mute.")
+                    logging.info("[MUTE] No user specified.")
                     return
-                user_arg = args[1]
                 try:
-                    target_user = await client.get_users(user_arg)
-                    logging.info(f"Target user from argument: {target_user.id}")
+                    target_user = await client.get_users(args[1])
+                    logging.debug(f"[MUTE] Target user from argument: {target_user.id}")
                 except Exception as e:
-                    logging.error(f"Failed to get user from argument '{user_arg}': {e}", exc_info=True)
+                    logging.error(f"[MUTE] Failed to fetch user '{args[1]}': {e}", exc_info=True)
                     await message.reply("Could not find the specified user.")
                     return
 
             if not target_user or not hasattr(target_user, "id"):
                 await message.reply("Target user not found or invalid.")
-                logging.error(f"Target user is invalid or None.")
+                logging.error("[MUTE] Target user invalid or None.")
                 return
 
             if target_user.is_bot:
                 await message.reply("Cannot mute a bot.")
+                logging.info(f"[MUTE] Tried to mute bot user {target_user.id}.")
                 return
             if target_user.id == message.from_user.id:
                 await message.reply("You cannot mute yourself.")
@@ -147,20 +149,19 @@ def register(app):
                 can_invite_users=False,
                 can_pin_messages=False,
             )
-            logging.debug(f"Muting user {target_user.id} with permissions: {permissions}")
+            logging.debug(f"[MUTE] Restricting user {target_user.id} with permissions: {permissions}")
 
             await client.restrict_chat_member(
                 chat_id=message.chat.id,
                 user_id=target_user.id,
                 permissions=permissions,
-                until_date=0  # Fixed here: 0 means indefinite mute
+                until_date=0  # indefinite mute
             )
             await message.reply(f"{target_user.mention} has been muted.")
-            logging.info(f"Muted user {target_user.id} successfully.")
-
+            logging.info(f"[MUTE] User {target_user.id} muted successfully.")
         except Exception as e:
+            logging.error(f"[MUTE] Exception: {e}", exc_info=True)
             await message.reply(f"Failed to mute: {e}")
-            logging.error(f"Exception in /mute: {e}", exc_info=True)
 
     @app.on_message(filters.command("unmute") & filters.group)
     async def unmute_user(client, message: Message):
@@ -182,7 +183,7 @@ def register(app):
                     can_send_other_messages=True,
                     can_add_web_page_previews=True
                 ),
-                until_date=0  # Fix applied here as well
+                until_date=0
             )
             await message.reply(f"{user.mention} has been unmuted.")
             logging.debug(f"User {user.id} unmuted successfully")
@@ -280,3 +281,4 @@ def register(app):
         except Exception as e:
             await message.reply(f"Failed to get user info: {e}")
             logging.error(f"Error in /userinfo: {e}", exc_info=True)
+
