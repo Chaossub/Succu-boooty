@@ -1,10 +1,19 @@
 import logging
+import random
 from pyrogram import filters
 from pyrogram.types import Message, ChatPermissions
 
 logging.basicConfig(level=logging.DEBUG)
 
 OWNER_ID = 6964994611
+
+FLIRTY_WARN_MESSAGES = [
+    "Oh naughty! {mention}, that’s a little spicy for the Sanctuary 😉",
+    "{mention}, watch out! The succubi are watching your every move 😈",
+    "Careful, {mention}… temptation isn’t always kind 😘",
+    "Flirty warning for {mention}! Time to behave… or not 😜",
+    "{mention}, you’re treading on thin ice… but we like it 🔥"
+]
 
 def is_admin(chat_member, user_id):
     if user_id == OWNER_ID:
@@ -35,8 +44,21 @@ def register(app):
         user = await get_target_user(message)
         if not user:
             return
-        # TODO: Implement warning increment and storage here
+        # TODO: implement warning increment in storage
         await message.reply(f"{user.mention} has been warned.")
+
+    @app.on_message(filters.command("flirtywarn") & filters.group)
+    async def flirty_warn(client, message: Message):
+        logging.debug(f"Received /flirtywarn from {message.from_user.id} in {message.chat.id}")
+        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+        if not is_admin(chat_member, message.from_user.id):
+            await message.reply("Only admins can send flirty warnings.")
+            return
+        user = await get_target_user(message)
+        if not user:
+            return
+        msg = random.choice(FLIRTY_WARN_MESSAGES).format(mention=user.mention)
+        await message.reply(msg)
 
     @app.on_message(filters.command("mute") & filters.group)
     async def mute_user(client, message: Message):
