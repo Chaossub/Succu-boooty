@@ -214,9 +214,13 @@ def register(app):
         user_id = message.from_user.id
         user_feds = feds.find({"owner_id": user_id})
         fed_list_text = "Your Federations:\n"
-        async for fed in user_feds:
+        found = False
+        for fed in user_feds:
             fed_list_text += f"• <b>{fed['name']}</b> (<code>{fed['fed_id']}</code>)\n"
-        await message.reply(fed_list_text or "You don't own any federations.")
+            found = True
+        if not found:
+            fed_list_text = "You don't own any federations."
+        await message.reply(fed_list_text)
 
     @app.on_message(filters.command("fedinfo") & filters.group)
     async def fed_info(_, message: Message):
@@ -259,3 +263,4 @@ def register(app):
             return await message.reply(f"🚫 {target_user.mention} is federation banned in this group.")
         else:
             return await message.reply(f"{target_user.mention} is <b>not</b> federation banned in this group.")
+
