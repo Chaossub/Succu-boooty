@@ -31,11 +31,11 @@ def extract_file_id(msg):
 
 def register(app):
 
-    @app.on_message(filters.command("createflyer") & filters.group)
+    @app.on_message((filters.command("createflyer") | filters.caption_command("createflyer")) & filters.group)
     async def create_flyer(client, message: Message):
         if not is_admin(client, message.from_user.id, message.chat.id):
             return await message.reply("Only admins can add flyers.")
-        args = message.text.split(maxsplit=1)
+        args = (message.text or message.caption).split(maxsplit=1)
         if len(args) < 2:
             return await message.reply("Usage: /createflyer <name> (send with image/file as caption or reply)")
         flyer_name = args[1].strip().lower()
@@ -54,11 +54,11 @@ def register(app):
         save_flyers(data)
         await message.reply(f"✅ Flyer '{flyer_name}' saved!")
 
-    @app.on_message(filters.command("changeflyer") & filters.group)
+    @app.on_message((filters.command("changeflyer") | filters.caption_command("changeflyer")) & filters.group)
     async def change_flyer(client, message: Message):
         if not is_admin(client, message.from_user.id, message.chat.id):
             return await message.reply("Only admins can change flyers.")
-        args = message.text.split(maxsplit=1)
+        args = (message.text or message.caption).split(maxsplit=1)
         if len(args) < 2:
             return await message.reply("Usage: /changeflyer <name> (send with image/file as caption or reply)")
         flyer_name = args[1].strip().lower()
