@@ -263,4 +263,3 @@ def register(app):
             return await message.reply(f"🚫 {target_user.mention} is federation banned in this group.")
         else:
             return await message.reply(f"{target_user.mention} is <b>not</b> federation banned in this group.")
-
