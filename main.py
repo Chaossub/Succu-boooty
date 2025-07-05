@@ -6,13 +6,15 @@ import pyrogram
 from pyrogram import Client
 from pyrogram.raw.types.chat_banned_rights import ChatBannedRights
 
-# ─── Monkey‐patch ChatBannedRights to avoid the NoneType.to_bytes bug ───
+# ─── Monkey-patch ChatBannedRights to avoid the NoneType.to_bytes bug ───
 _orig_write = ChatBannedRights.write
 def _patched_write(self, *args, **kwargs):
-    # If until_date is falsy/None, force it to 32-bit max for “never expire”
+    # If until_date is falsy or None, force it to 32-bit max (never expire)
     if not getattr(self, "until_date", None):
+        logging.debug("Monkey-patch: setting ChatBannedRights.until_date → 2147483647")
         self.until_date = 2147483647
     return _orig_write(self, *args, **kwargs)
+
 ChatBannedRights.write = _patched_write
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -21,7 +23,7 @@ from handlers import help_cmd, welcome, moderation, federation, summon, fun, fly
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # debug so we see our patch log
     format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s'
 )
 logger = logging.getLogger()
@@ -31,7 +33,7 @@ def main():
     logger.info("Loading environment variables...")
     load_dotenv()
 
-    # 2. Log exact Pyrogram version (should show +g… if from GitHub)
+    # 2. Log exact Pyrogram version
     logger.info(f"▶️ Running Pyrogram v{pyrogram.__version__}")
 
     # 3. Read credentials
