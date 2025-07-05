@@ -1,17 +1,30 @@
 import os
-import json
+import logging
 from pyrogram import Client
 from pyrogram.enums import ParseMode
-from dotenv import load_dotenv
 
-# Load environment variables from .env or Railway variables
-load_dotenv()
+# Setup basic logging to stdout
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='[%(levelname)s] %(asctime)s - %(message)s'
+)
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+logger = logging.getLogger(__name__)
 
-# Initialize the bot client
+try:
+    API_ID = int(os.getenv("API_ID"))
+    API_HASH = os.getenv("API_HASH")
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+    if not API_HASH or not BOT_TOKEN:
+        raise ValueError("API_HASH or BOT_TOKEN is missing in environment variables")
+
+    logger.info("Environment variables loaded successfully")
+
+except Exception as e:
+    logger.error(f"Error loading environment variables: {e}")
+    raise
+
 app = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -20,41 +33,53 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# Create data folders/files if not exist
-os.makedirs("data", exist_ok=True)
-for fname in ["warnings.json", "xp.json", "summon.json", "flyers.json"]:
-    fpath = os.path.join("data", fname)
-    if not os.path.exists(fpath):
-        with open(fpath, "w") as f:
-            json.dump({}, f)
+# Import handlers
+try:
+    from handlers import (
+        welcome,
+        help_cmd,
+        moderation,
+        federation,
+        summon,
+        xp,
+        fun,
+        flyer
+    )
+    logger.info("Handlers imported successfully")
+except Exception as e:
+    logger.error(f"Failed to import handlers: {e}")
+    raise
 
-# Import handlers (do not register yet)
-from handlers import (
-    welcome,
-    help_cmd,
-    moderation,
-    federation,
-    summon,
-    fun,
-    flyer
-)
+# Register handlers with debug logs
+try:
+    welcome.register(app)
+    logger.info("Registered welcome handler")
 
-def debug_register(name, func):
-    try:
-        print(f"Registering {name}...")
-        func(app)
-        print(f"Registered {name} successfully.")
-    except Exception as e:
-        print(f"ERROR registering {name}: {e}")
+    help_cmd.register(app)
+    logger.info("Registered help_cmd handler")
 
-# Register handlers with debugging
-debug_register("welcome", welcome.register)
-debug_register("help_cmd", help_cmd.register)
-debug_register("moderation", moderation.register)
-debug_register("federation", federation.register)
-debug_register("summon", summon.register)
-debug_register("fun", fun.register)
-debug_register("flyer", flyer.register)
+    moderation.register(app)
+    logger.info("Registered moderation handler")
 
-print("✅ SuccuBot is running...")
+    federation.register(app)
+    logger.info("Registered federation handler")
+
+    summon.register(app)
+    logger.info("Registered summon handler")
+
+    xp.register(app)
+    logger.info("Registered xp handler")
+
+    fun.register(app)
+    logger.info("Registered fun handler")
+
+    flyer.register(app)
+    logger.info("Registered flyer handler")
+
+except Exception as e:
+    logger.error(f"Error registering handlers: {e}")
+    raise
+
+logger.info("✅ SuccuBot is starting...")
+
 app.run()
