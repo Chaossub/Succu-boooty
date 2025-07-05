@@ -1,199 +1,40 @@
-import logging
-import random
-from pyrogram import filters
-from pyrogram.types import Message, ChatPermissions
+@app.on_message(filters.command("mute") & filters.group)
+async def mute_user(client, message: Message):
+    chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+    if not is_admin(chat_member, message.from_user.id):
+        await message.reply("Only admins can mute users.")
+        return
 
-logging.basicConfig(level=logging.DEBUG)
+    user = await get_target_user(client, message)
+    if not user:
+        return
 
-OWNER_ID = 6964994611
+    if user.is_bot:
+        await message.reply("Cannot mute a bot.")
+        return
 
-FLIRTY_WARN_MESSAGES = [
-    "Oh naughty! {mention}, that’s a little spicy for the Sanctuary 😉",
-    "{mention}, watch out! The succubi are watching your every move 😈",
-    "Careful, {mention}… temptation isn’t always kind 😘",
-    "Flirty warning for {mention}! Time to behave… or not 😜",
-    "{mention}, you’re treading on thin ice… but we like it 🔥"
-]
+    if user.id == message.from_user.id:
+        await message.reply("You cannot mute yourself.")
+        return
 
-def is_admin(chat_member, user_id):
-    if user_id == OWNER_ID:
-        return True
-    return chat_member and chat_member.status in ("administrator", "creator")
+    if user.id == OWNER_ID:
+        await message.reply("You cannot mute the bot owner.")
+        return
 
-async def get_user_from_username_or_id(client, chat_id, user_arg):
     try:
-        clean_user_arg = user_arg.lstrip("@")
-        chat_member = None
-        if clean_user_arg.isdigit():
-            chat_member = await client.get_chat_member(chat_id, int(clean_user_arg))
-        else:
-            chat_member = await client.get_chat_member(chat_id, clean_user_arg)
-
-        if chat_member and chat_member.user:
-            return chat_member.user
-
-        # Fallback to global get_users()
-        return await client.get_users(user_arg)
+        logging.debug(f"Muting user: {user.id} - {user.first_name}")
+        await client.restrict_chat_member(
+            message.chat.id,
+            user.id,
+            permissions=ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False
+            ),
+            until_date=None
+        )
+        await message.reply(f"{user.mention} has been muted.")
     except Exception as e:
-        logging.debug(f"get_user_from_username_or_id error: {e}")
-        return None
-
-async def get_target_user(client, message: Message):
-    args = message.text.split()
-    if len(args) >= 2:
-        user_arg = args[1]
-        user = await get_user_from_username_or_id(client, message.chat.id, user_arg)
-        if not user:
-            await message.reply("User not found in this chat.")
-        return user
-    elif message.reply_to_message:
-        user = message.reply_to_message.from_user
-        if user and user.id:
-            return user
-        else:
-            await message.reply("Replied message has no valid user.")
-            return None
-    else:
-        await message.reply("Please specify a user by username, ID, or reply to their message.")
-        return None
-
-def register(app):
-
-    @app.on_message(filters.command("flirtywarn") & filters.group)
-    async def flirty_warn(client, message: Message):
-        logging.debug(f"Received /flirtywarn from {message.from_user.id} in {message.chat.id}")
-        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member, message.from_user.id):
-            await message.reply("Only admins can send flirty warnings.")
-            return
-        user = await get_target_user(client, message)
-        if not user:
-            return
-        msg = random.choice(FLIRTY_WARN_MESSAGES).format(mention=user.mention)
-        await message.reply(msg)
-
-    @app.on_message(filters.command("warn") & filters.group)
-    async def warn_user(client, message: Message):
-        logging.debug(f"Received /warn from {message.from_user.id} in {message.chat.id}")
-        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member, message.from_user.id):
-            await message.reply("Only admins can issue warnings.")
-            return
-        user = await get_target_user(client, message)
-        if not user:
-            return
-        # TODO: implement persistent warning count increment
-        await message.reply(f"{user.mention} has been warned.")
-
-    @app.on_message(filters.command("mute") & filters.group)
-    async def mute_user(client, message: Message):
-        logging.debug(f"Received /mute from {message.from_user.id} in {message.chat.id}")
-        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member, message.from_user.id):
-            await message.reply("Only admins can mute users.")
-            return
-        user = await get_target_user(client, message)
-        if not user:
-            return
-        try:
-            await client.restrict_chat_member(
-                message.chat.id,
-                user.id,
-                permissions=ChatPermissions(
-                    can_send_messages=False,
-                    can_send_media_messages=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False
-                ),
-                until_date=None
-            )
-            await message.reply(f"{user.mention} has been muted.")
-            logging.debug(f"User {user.id} muted successfully")
-        except Exception as e:
-            logging.error(f"Failed to mute user {user.id}: {e}", exc_info=True)
-            await message.reply(f"Failed to mute: {e}")
-
-    @app.on_message(filters.command("unmute") & filters.group)
-    async def unmute_user(client, message: Message):
-        logging.debug(f"Received /unmute from {message.from_user.id} in {message.chat.id}")
-        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member, message.from_user.id):
-            await message.reply("Only admins can unmute users.")
-            return
-        user = await get_target_user(client, message)
-        if not user:
-            return
-        try:
-            await client.restrict_chat_member(
-                message.chat.id,
-                user.id,
-                permissions=ChatPermissions(
-                    can_send_messages=True,
-                    can_send_media_messages=True,
-                    can_send_other_messages=True,
-                    can_add_web_page_previews=True
-                )
-            )
-            await message.reply(f"{user.mention} has been unmuted.")
-            logging.debug(f"User {user.id} unmuted successfully")
-        except Exception as e:
-            logging.error(f"Failed to unmute user {user.id}: {e}", exc_info=True)
-            await message.reply(f"Failed to unmute: {e}")
-
-    @app.on_message(filters.command("kick") & filters.group)
-    async def kick_user(client, message: Message):
-        logging.debug(f"Received /kick from {message.from_user.id} in {message.chat.id}")
-        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member, message.from_user.id):
-            await message.reply("Only admins can kick users.")
-            return
-        user = await get_target_user(client, message)
-        if not user:
-            return
-        try:
-            await client.ban_chat_member(message.chat.id, user.id)
-            await client.unban_chat_member(message.chat.id, user.id)
-            await message.reply(f"{user.mention} has been kicked from the group.")
-            logging.debug(f"User {user.id} kicked successfully")
-        except Exception as e:
-            logging.error(f"Failed to kick user {user.id}: {e}", exc_info=True)
-            await message.reply(f"Failed to kick: {e}")
-
-    @app.on_message(filters.command("ban") & filters.group)
-    async def ban_user(client, message: Message):
-        logging.debug(f"Received /ban from {message.from_user.id} in {message.chat.id}")
-        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member, message.from_user.id):
-            await message.reply("Only admins can ban users.")
-            return
-        user = await get_target_user(client, message)
-        if not user:
-            return
-        try:
-            await client.ban_chat_member(message.chat.id, user.id)
-            await message.reply(f"{user.mention} has been banned from the group.")
-            logging.debug(f"User {user.id} banned successfully")
-        except Exception as e:
-            logging.error(f"Failed to ban user {user.id}: {e}", exc_info=True)
-            await message.reply(f"Failed to ban: {e}")
-
-    @app.on_message(filters.command("unban") & filters.group)
-    async def unban_user(client, message: Message):
-        logging.debug(f"Received /unban from {message.from_user.id} in {message.chat.id}")
-        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member, message.from_user.id):
-            await message.reply("Only admins can unban users.")
-            return
-        args = message.text.split()
-        if len(args) < 2:
-            await message.reply("Usage: /unban <user_id>")
-            logging.debug("Unban failed: no user_id argument")
-            return
-        try:
-            user_id = int(args[1])
-            await client.unban_chat_member(message.chat.id, user_id)
-            await message.reply(f"User with ID <code>{user_id}</code> has been unbanned.")
-            logging.debug(f"User {user_id} unbanned successfully")
-        except Exception as e:
-            logging.error(f"Failed to unban user {args[1]}: {e}", exc_info=True)
-            await message.reply(f"Failed to unban: {e}")
+        logging.error(f"Failed to mute user {user.id}: {e}", exc_info=True)
+        await message.reply(f"Failed to mute: {e}")
