@@ -57,7 +57,7 @@ def register(app):
         user = await get_target_user(message)
         if not user:
             return
-        # TODO: implement warning increment in storage
+        # TODO: implement warning increment in storage here
         await message.reply(f"{user.mention} has been warned.")
 
     @app.on_message(filters.command("mute") & filters.group)
@@ -172,4 +172,3 @@ def register(app):
         except Exception as e:
             logging.error(f"Failed to unban user {args[1]}: {e}", exc_info=True)
             await message.reply(f"Failed to unban: {e}")
-
