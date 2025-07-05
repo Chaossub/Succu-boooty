@@ -6,36 +6,41 @@ import pyrogram
 from pyrogram import Client
 from pyrogram.raw.types.chat_banned_rights import ChatBannedRights
 
-# ─── Monkey-patch ChatBannedRights.write to avoid NoneType.to_bytes ───
+# ─── Monkey-patch ChatBannedRights.write to avoid the NoneType.to_bytes bug ───
 _orig_write = ChatBannedRights.write
 def _patched_write(self, *args, **kwargs):
+    # If until_date is falsy or None, force it to max-int (never expire)
     if not getattr(self, "until_date", None):
+        logging.getLogger("patch").info("Monkey-patch: setting until_date → 2147483647")
         self.until_date = 2147483647
     return _orig_write(self, *args, **kwargs)
 ChatBannedRights.write = _patched_write
+# ──────────────────────────────────────────────────────────────────────────────
 
-# Log that the patch has been applied
+# Configure root logger
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s'
 )
-logging.getLogger("patch").info("✅ Monkey-patch for ChatBannedRights.write applied")
+logger = logging.getLogger()
 
-# Import your handler modules
-from handlers import help_cmd, welcome, moderation, federation, summon, fun, flyer
-
-logger = logging.getLogger(__name__)
+# Import handler modules
+from handlers import help_cmd, welcome, moderation, federation, summon, fun, flyer, xp
 
 def main():
+    # 1. Load environment variables
     logger.info("Loading environment variables...")
     load_dotenv()
 
+    # 2. Log Pyrogram version
     logger.info(f"▶️ Running Pyrogram v{pyrogram.__version__}")
 
+    # 3. Read credentials
     API_ID   = int(os.getenv("API_ID"))
     API_HASH = os.getenv("API_HASH")
     BOT_TOKEN= os.getenv("BOT_TOKEN")
 
+    # 4. Initialize the bot client
     app = Client(
         "succubot",
         api_id=API_ID,
@@ -43,15 +48,17 @@ def main():
         bot_token=BOT_TOKEN
     )
 
-    # Register handlers
+    # 5. Register all handlers
     help_cmd.register(app)
     welcome .register(app)
     moderation.register(app)
     federation.register(app)
     summon.register(app)
-    fun    .register(app)
-    flyer  .register(app)
+    fun     .register(app)
+    flyer   .register(app)
+    xp      .register(app)
 
+    # 6. Start the bot
     logger.info("Starting SuccuBot client...")
     app.run()
 
