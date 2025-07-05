@@ -20,20 +20,29 @@ def is_admin(chat_member, user_id):
         return True
     return chat_member and chat_member.status in ("administrator", "creator")
 
-async def get_user_from_arg_or_reply(client, message: Message):
+async def get_user_from_username_or_id(client, chat_id, user_arg):
+    try:
+        if user_arg.startswith("@"):
+            # Search chat members first for better reliability
+            async for member in client.iter_chat_members(chat_id):
+                if member.user.username and ("@" + member.user.username.lower()) == user_arg.lower():
+                    return member.user
+            # Fallback to global get_users
+            return await client.get_users(user_arg)
+        else:
+            user_id = int(user_arg)
+            return await client.get_users(user_id)
+    except Exception:
+        return None
+
+async def get_target_user(client, message: Message):
     args = message.text.split()
     if len(args) >= 2:
         user_arg = args[1]
-        try:
-            if user_arg.startswith("@"):
-                user = await client.get_users(user_arg)
-            else:
-                user_id = int(user_arg)
-                user = await client.get_users(user_id)
-            return user
-        except Exception:
-            await message.reply("Could not find the specified user.")
-            return None
+        user = await get_user_from_username_or_id(client, message.chat.id, user_arg)
+        if not user:
+            await message.reply("User not found in this chat.")
+        return user
     elif message.reply_to_message:
         user = message.reply_to_message.from_user
         if user and user.id:
@@ -42,7 +51,7 @@ async def get_user_from_arg_or_reply(client, message: Message):
             await message.reply("Replied message has no valid user.")
             return None
     else:
-        await message.reply("You must specify a user by username, user ID, or reply to their message.")
+        await message.reply("Please specify a user by username, ID, or reply to their message.")
         return None
 
 def register(app):
@@ -54,7 +63,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can send flirty warnings.")
             return
-        user = await get_user_from_arg_or_reply(client, message)
+        user = await get_target_user(client, message)
         if not user:
             return
         msg = random.choice(FLIRTY_WARN_MESSAGES).format(mention=user.mention)
@@ -67,10 +76,10 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can issue warnings.")
             return
-        user = await get_user_from_arg_or_reply(client, message)
+        user = await get_target_user(client, message)
         if not user:
             return
-        # TODO: implement warning increment in storage here
+        # TODO: implement persistent warning count increment
         await message.reply(f"{user.mention} has been warned.")
 
     @app.on_message(filters.command("mute") & filters.group)
@@ -80,7 +89,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can mute users.")
             return
-        user = await get_user_from_arg_or_reply(client, message)
+        user = await get_target_user(client, message)
         if not user:
             return
         try:
@@ -108,7 +117,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can unmute users.")
             return
-        user = await get_user_from_arg_or_reply(client, message)
+        user = await get_target_user(client, message)
         if not user:
             return
         try:
@@ -135,7 +144,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can kick users.")
             return
-        user = await get_user_from_arg_or_reply(client, message)
+        user = await get_target_user(client, message)
         if not user:
             return
         try:
@@ -154,7 +163,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can ban users.")
             return
-        user = await get_user_from_arg_or_reply(client, message)
+        user = await get_target_user(client, message)
         if not user:
             return
         try:
