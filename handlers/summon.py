@@ -66,7 +66,11 @@ def register(app):
             return await message.reply("No tracked users! Use /trackall first.")
         mentions = []
         for uid in tracked:
-            mentions.append(f"<a href='tg://user?id={uid}'>User</a>")
+            try:
+                user = await client.get_users(int(uid))
+                mentions.append(user.mention)
+            except Exception:
+                mentions.append(f"<a href='tg://user?id={uid}'>User</a>")
         text = "Summoning everyone!\n" + " ".join(mentions)
         await message.reply(text)
 
@@ -97,7 +101,11 @@ def register(app):
             return await message.reply("No tracked users! Use /trackall first.")
         mentions = []
         for uid in tracked:
-            mentions.append(f"<a href='tg://user?id={uid}'>User</a>")
+            try:
+                user = await client.get_users(int(uid))
+                mentions.append(user.mention)
+            except Exception:
+                mentions.append(f"<a href='tg://user?id={uid}'>User</a>")
         text = random.choice(flirty_lines) + "\n" + " ".join(mentions)
         await message.reply(text)
 
@@ -110,7 +118,11 @@ def register(app):
             return await message.reply("No tracked users! Use /trackall first.")
         mentions = []
         for uid in tracked:
-            mentions.append(f"<a href='tg://user?id={uid}'>User</a>")
+            try:
+                user = await client.get_users(int(uid))
+                mentions.append(user.mention)
+            except Exception:
+                mentions.append(f"<a href='tg://user?id={uid}'>User</a>")
         text = "Summoning everyone!\n" + " ".join(mentions)
         await message.reply(text)
 
@@ -129,6 +141,10 @@ def register(app):
             return await message.reply("No tracked users! Use /trackall first.")
         mentions = []
         for uid in tracked:
-            mentions.append(f"<a href='tg://user?id={uid}'>User</a>")
+            try:
+                user = await client.get_users(int(uid))
+                mentions.append(user.mention)
+            except Exception:
+                mentions.append(f"<a href='tg://user?id={uid}'>User</a>")
         text = random.choice(flirty_lines) + "\n" + " ".join(mentions)
         await message.reply(text)
