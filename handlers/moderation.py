@@ -153,7 +153,7 @@ def register(app):
                 chat_id=message.chat.id,
                 user_id=target_user.id,
                 permissions=permissions,
-                until_date=None  # indefinite mute
+                until_date=0  # Fixed here: 0 means indefinite mute
             )
             await message.reply(f"{target_user.mention} has been muted.")
             logging.info(f"Muted user {target_user.id} successfully.")
@@ -181,7 +181,8 @@ def register(app):
                     can_send_media_messages=True,
                     can_send_other_messages=True,
                     can_add_web_page_previews=True
-                )
+                ),
+                until_date=0  # Fix applied here as well
             )
             await message.reply(f"{user.mention} has been unmuted.")
             logging.debug(f"User {user.id} unmuted successfully")
@@ -279,4 +280,3 @@ def register(app):
         except Exception as e:
             await message.reply(f"Failed to get user info: {e}")
             logging.error(f"Error in /userinfo: {e}", exc_info=True)
-
