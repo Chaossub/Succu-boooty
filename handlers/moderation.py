@@ -127,17 +127,20 @@ def register(app):
             if target_user.id == OWNER_ID:
                 return await message.reply("You cannot mute the bot owner.")
 
-            await client.restrict_chat_member(
-                chat_id,
-                target_user.id,
-                permissions=ChatPermissions(
-                    can_send_messages=False,
-                    can_send_media_messages=False,
-                    can_send_other_messages=False,
-                    can_add_web_page_previews=False
-                ),
-                until_date=None
+            permissions = ChatPermissions(
+                can_send_messages=False,
+                can_send_media_messages=False,
+                can_send_other_messages=False,
+                can_add_web_page_previews=False
             )
+
+            await client.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=target_user.id,
+                permissions=permissions,
+                until_date=None  # Indefinite mute
+            )
+
             await message.reply(f"{target_user.mention} has been muted.")
         except Exception as e:
             await message.reply(f"Failed to mute: {e}")
