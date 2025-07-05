@@ -1,8 +1,9 @@
+import os
 from pyrogram import filters
 from pyrogram.types import Message
 from pymongo import MongoClient
 
-MONGO_URI = "your_mongo_uri_here"  # <-- replace with your actual MongoDB URI!
+MONGO_URI = os.getenv("MONGO_URI")  # Or set manually if testing
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["SuccuBot"]
 feds = db["federations"]
@@ -93,14 +94,21 @@ def register(app):
             if len(args) < 2:
                 return await message.reply("Reply to a user or use /fedban @username or user_id [reason]")
             mention = args[1]
+            reason = args[2] if len(args) > 2 else ""
             try:
                 if mention.startswith("@"):
                     user = await client.get_users(mention)
                 else:
-                    user = await client.get_users(int(mention))
-            except Exception:
-                return await message.reply("Invalid user! Use /fedban as reply, /fedban @username, or /fedban user_id.")
-            reason = args[2] if len(args) > 2 else ""
+                    # Try to parse as int for Telegram user IDs
+                    user_id_int = int(mention)
+                    user = await client.get_users(user_id_int)
+            except Exception as e:
+                return await message.reply(
+                    f"Invalid user! Use /fedban as reply, /fedban @username, or /fedban user_id.\n\n<code>{e}</code>"
+                )
+
+        if not user:
+            return await message.reply("Couldn't find user to fedban.")
 
         user_id = user.id
         fed = feds.find_one({"fed_id": fed_id})
@@ -133,8 +141,13 @@ def register(app):
                     user = await client.get_users(mention)
                 else:
                     user = await client.get_users(int(mention))
-            except Exception:
-                return await message.reply("Invalid user! Use /fedunban as reply, /fedunban @username, or /fedunban user_id.")
+            except Exception as e:
+                return await message.reply(
+                    f"Invalid user! Use /fedunban as reply, /fedunban @username, or /fedunban user_id.\n\n<code>{e}</code>"
+                )
+
+        if not user:
+            return await message.reply("Couldn't find user to fedunban.")
 
         user_id = user.id
         fed = feds.find_one({"fed_id": fed_id})
@@ -183,8 +196,8 @@ def register(app):
                 user = await client.get_users(mention)
             else:
                 user = await client.get_users(int(mention))
-        except Exception:
-            return await message.reply("Could not find that user.")
+        except Exception as e:
+            return await message.reply(f"Could not find that user.\n\n<code>{e}</code>")
         if user.id in fed.get("admins", []):
             return await message.reply("User is already a federation admin.")
         feds.update_one({"fed_id": fed_id}, {"$push": {"admins": user.id}})
@@ -207,8 +220,8 @@ def register(app):
                 user = await client.get_users(mention)
             else:
                 user = await client.get_users(int(mention))
-        except Exception:
-            return await message.reply("Could not find that user.")
+        except Exception as e:
+            return await message.reply(f"Could not find that user.\n\n<code>{e}</code>")
         if user.id not in fed.get("admins", []):
             return await message.reply("User is not a federation admin.")
         feds.update_one({"fed_id": fed_id}, {"$pull": {"admins": user.id}})
