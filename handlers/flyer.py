@@ -6,8 +6,11 @@ FLYERS_PATH = "data/flyers.json"
 SUPER_ADMIN_ID = 6964994611
 
 def load_flyers():
-    with open(FLYERS_PATH, "r") as f:
-        return json.load(f)
+    try:
+        with open(FLYERS_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 def save_flyers(data):
     with open(FLYERS_PATH, "w") as f:
@@ -29,27 +32,41 @@ def extract_file_id(msg):
         return msg.document.file_id
     return None
 
+def get_flyer_name(message):
+    # For command as caption or text, returns the flyer name or None
+    text = message.text or message.caption
+    if not text:
+        return None
+    parts = text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return None
+    return parts[1].strip().lower()
+
 def register(app):
 
     @app.on_message((filters.command("createflyer") | filters.caption_command("createflyer")) & filters.group)
     async def create_flyer(client, message: Message):
         if not is_admin(client, message.from_user.id, message.chat.id):
             return await message.reply("Only admins can add flyers.")
-        args = (message.text or message.caption).split(maxsplit=1)
-        if len(args) < 2:
+
+        flyer_name = get_flyer_name(message)
+        if not flyer_name:
             return await message.reply("Usage: /createflyer <name> (send with image/file as caption or reply)")
-        flyer_name = args[1].strip().lower()
+
+        # Try to get file from current message or reply
         file_id = extract_file_id(message)
         if not file_id and message.reply_to_message:
             file_id = extract_file_id(message.reply_to_message)
         if not file_id:
             return await message.reply("Attach a photo/file, or reply to one, with this command!")
+
         data = load_flyers()
         chat_id = str(message.chat.id)
         if chat_id not in data:
             data[chat_id] = {}
         if flyer_name in data[chat_id]:
             return await message.reply("A flyer with that name already exists! Use /changeflyer to update it.")
+
         data[chat_id][flyer_name] = file_id
         save_flyers(data)
         await message.reply(f"✅ Flyer '{flyer_name}' saved!")
@@ -58,19 +75,22 @@ def register(app):
     async def change_flyer(client, message: Message):
         if not is_admin(client, message.from_user.id, message.chat.id):
             return await message.reply("Only admins can change flyers.")
-        args = (message.text or message.caption).split(maxsplit=1)
-        if len(args) < 2:
+
+        flyer_name = get_flyer_name(message)
+        if not flyer_name:
             return await message.reply("Usage: /changeflyer <name> (send with image/file as caption or reply)")
-        flyer_name = args[1].strip().lower()
+
         file_id = extract_file_id(message)
         if not file_id and message.reply_to_message:
             file_id = extract_file_id(message.reply_to_message)
         if not file_id:
             return await message.reply("Attach a photo/file, or reply to one, with this command!")
+
         data = load_flyers()
         chat_id = str(message.chat.id)
         if chat_id not in data or flyer_name not in data[chat_id]:
             return await message.reply("No flyer with that name. Use /createflyer first.")
+
         data[chat_id][flyer_name] = file_id
         save_flyers(data)
         await message.reply(f"✅ Flyer '{flyer_name}' updated!")
