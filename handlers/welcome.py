@@ -1,6 +1,6 @@
 import random
 from pyrogram import filters
-from pyrogram.types import Message
+from pyrogram.types import Message, ChatMemberUpdated
 
 def register(app):
 
@@ -26,9 +26,18 @@ def register(app):
             msg = random.choice(WELCOMES).format(mention=mention)
             await message.reply(msg)
 
-    @app.on_message(filters.left_chat_member)
-    async def goodbye_member(client, message: Message):
-        user = message.left_chat_member
-        mention = user.mention
-        msg = random.choice(GOODBYES).format(mention=mention)
-        await message.reply(msg)
+    @app.on_chat_member_updated()
+    async def goodbye_handler(client, update: ChatMemberUpdated):
+        old = update.old_chat_member
+        new = update.new_chat_member
+        user = update.new_chat_member.user
+
+        # User left or was kicked/banned
+        if old.status in ("member", "restricted") and new.status in ("left", "kicked"):
+            mention = user.mention if user else "A user"
+            msg = random.choice(GOODBYES).format(mention=mention)
+            try:
+                await client.send_message(update.chat.id, msg)
+            except Exception as e:
+                print(f"Failed to send goodbye: {e}")
+
