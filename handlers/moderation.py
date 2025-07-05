@@ -34,19 +34,6 @@ def register(app):
             return None
         return user
 
-    @app.on_message(filters.command("warn") & filters.group)
-    async def warn_user(client, message: Message):
-        logging.debug(f"Received /warn from {message.from_user.id} in {message.chat.id}")
-        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(chat_member, message.from_user.id):
-            await message.reply("Only admins can issue warnings.")
-            return
-        user = await get_target_user(message)
-        if not user:
-            return
-        # TODO: implement warning increment in storage
-        await message.reply(f"{user.mention} has been warned.")
-
     @app.on_message(filters.command("flirtywarn") & filters.group)
     async def flirty_warn(client, message: Message):
         logging.debug(f"Received /flirtywarn from {message.from_user.id} in {message.chat.id}")
@@ -59,6 +46,19 @@ def register(app):
             return
         msg = random.choice(FLIRTY_WARN_MESSAGES).format(mention=user.mention)
         await message.reply(msg)
+
+    @app.on_message(filters.command("warn") & filters.group)
+    async def warn_user(client, message: Message):
+        logging.debug(f"Received /warn from {message.from_user.id} in {message.chat.id}")
+        chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+        if not is_admin(chat_member, message.from_user.id):
+            await message.reply("Only admins can issue warnings.")
+            return
+        user = await get_target_user(message)
+        if not user:
+            return
+        # TODO: implement warning increment in storage
+        await message.reply(f"{user.mention} has been warned.")
 
     @app.on_message(filters.command("mute") & filters.group)
     async def mute_user(client, message: Message):
