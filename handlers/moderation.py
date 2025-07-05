@@ -22,47 +22,71 @@ def is_admin(chat_member, user_id):
     return user_id == OWNER_ID or (chat_member and chat_member.status in ("administrator", "creator"))
 
 async def get_user(client, chat_id, identifier):
-    """Resolve a user by @username or ID, falling back to get_users."""
+    """Resolve a user by reply, @username or ID."""
+    # Try reply case handled by caller; here just parse identifier
     try:
         if identifier.isdigit():
-            cm = await client.get_chat_member(chat_id, int(identifier))
-            return cm.user
+            member = await client.get_chat_member(chat_id, int(identifier))
+            return member.user
         if identifier.startswith("@"):
-            cm = await client.get_chat_member(chat_id, identifier)
-            return cm.user
-    except:
+            member = await client.get_chat_member(chat_id, identifier)
+            return member.user
+    except Exception:
         pass
     try:
         return await client.get_users(identifier)
-    except:
+    except Exception:
         return None
 
 async def resolve_target(client, message: Message):
-    """Get target user from reply or command arg."""
+    """Get target user from reply or first argument."""
     if message.reply_to_message:
         return message.reply_to_message.from_user
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        await message.reply("Reply to someone or specify @username/ID.")
+        await message.reply("📢 Reply to someone or specify @username/ID.")
         return None
     user = await get_user(client, message.chat.id, parts[1].strip())
     if not user:
-        await message.reply("Could not find that user.")
+        await message.reply("❌ Could not find that user.")
     return user
 
 def register(app):
+
+    @app.on_message(filters.command("warn") & filters.group)
+    async def warn_user(client, message: Message):
+        logging.debug("‹WARN› from %s in %s", message.from_user.id, message.chat.id)
+        cm = await client.get_chat_member(message.chat.id, message.from_user.id)
+        if not is_admin(cm, message.from_user.id):
+            return await message.reply("❌ Only admins can warn.")
+        user = await resolve_target(client, message)
+        if not user:
+            return
+        await message.reply(f"{user.mention} has been warned. 😉")
+
+    @app.on_message(filters.command("flirtywarn") & filters.group)
+    async def flirty_warn(client, message: Message):
+        logging.debug("‹FLIRTYWARN› from %s in %s", message.from_user.id, message.chat.id)
+        cm = await client.get_chat_member(message.chat.id, message.from_user.id)
+        if not is_admin(cm, message.from_user.id):
+            return await message.reply("❌ Only admins can flirty-warn.")
+        user = await resolve_target(client, message)
+        if not user:
+            return
+        text = random.choice(FLIRTY_WARN_MESSAGES).format(mention=user.mention)
+        await message.reply(text)
 
     @app.on_message(filters.command("mute") & filters.group)
     async def mute_user(client, message: Message):
         logging.info("‹MUTE› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
-            return await message.reply("Only admins can mute.")
+            return await message.reply("❌ Only admins can mute.")
         user = await resolve_target(client, message)
         if not user:
             return
         if user.is_bot or user.id == OWNER_ID or user.id == message.from_user.id:
-            return await message.reply("Cannot mute that user.")
+            return await message.reply("❌ Cannot mute that user.")
         perms = ChatPermissions(
             can_send_messages=False,
             can_send_media_messages=False,
@@ -86,7 +110,7 @@ def register(app):
         logging.info("‹UNMUTE› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
-            return await message.reply("Only admins can unmute.")
+            return await message.reply("❌ Only admins can unmute.")
         user = await resolve_target(client, message)
         if not user:
             return
@@ -104,7 +128,7 @@ def register(app):
             chat_id=message.chat.id,
             user_id=user.id,
             permissions=perms,
-            until_date=0  # restore normal
+            until_date=0
         )
         await message.reply(f"{user.mention} has been unmuted.")
 
@@ -113,16 +137,11 @@ def register(app):
         logging.info("‹KICK› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
-            return await message.reply("Only admins can kick.")
+            return await message.reply("❌ Only admins can kick.")
         user = await resolve_target(client, message)
         if not user:
             return
-        logging.debug("Banning then unbanning %s", user.id)
-        await client.ban_chat_member(
-            chat_id=message.chat.id,
-            user_id=user.id,
-            until_date=0  # required to avoid None
-        )
+        await client.ban_chat_member(message.chat.id, user.id, until_date=0)
         await client.unban_chat_member(message.chat.id, user.id)
         await message.reply(f"{user.mention} has been kicked from the group.")
 
@@ -131,16 +150,11 @@ def register(app):
         logging.info("‹BAN› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
-            return await message.reply("Only admins can ban.")
+            return await message.reply("❌ Only admins can ban.")
         user = await resolve_target(client, message)
         if not user:
             return
-        logging.debug("Banning %s indefinitely", user.id)
-        await client.ban_chat_member(
-            chat_id=message.chat.id,
-            user_id=user.id,
-            until_date=0  # indefinite ban
-        )
+        await client.ban_chat_member(message.chat.id, user.id, until_date=0)
         await message.reply(f"{user.mention} has been banned from the group.")
 
     @app.on_message(filters.command("unban") & filters.group)
@@ -148,7 +162,7 @@ def register(app):
         logging.info("‹UNBAN› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
-            return await message.reply("Only admins can unban.")
+            return await message.reply("❌ Only admins can unban.")
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2 or not parts[1].isdigit():
             return await message.reply("Usage: /unban <user_id>")
@@ -156,35 +170,12 @@ def register(app):
         await client.unban_chat_member(message.chat.id, user_id)
         await message.reply(f"User <code>{user_id}</code> has been unbanned.")
 
-    @app.on_message(filters.command("warn") & filters.group)
-    async def warn_user(client, message: Message):
-        logging.info("‹WARN› %s in %s", message.from_user.id, message.chat.id)
-        cm = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(cm, message.from_user.id):
-            return await message.reply("Only admins can warn.")
-        user = await resolve_target(client, message)
-        if not user:
-            return
-        await message.reply(f"{user.mention} has been warned. 😉
-
-    @app.on_message(filters.command("flirtywarn") & filters.group)
-    async def flirty_warn(client, message: Message):
-        logging.info("‹FLIRTYWARN› %s in %s", message.from_user.id, message.chat.id)
-        cm = await client.get_chat_member(message.chat.id, message.from_user.id)
-        if not is_admin(cm, message.from_user.id):
-            return await message.reply("Only admins can flirty-warn.")
-        user = await resolve_target(client, message)
-        if not user:
-            return
-        text = random.choice(FLIRTY_WARN_MESSAGES).format(mention=user.mention)
-        await message.reply(text)
-
     @app.on_message(filters.command("userinfo") & filters.group)
     async def userinfo(client, message: Message):
         logging.info("‹USERINFO› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
-            return await message.reply("Only admins can use /userinfo.")
+            return await message.reply("❌ Only admins can use /userinfo.")
         user = await resolve_target(client, message)
         if not user:
             return
