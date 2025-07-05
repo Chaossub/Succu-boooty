@@ -2,7 +2,7 @@ from pyrogram import filters
 from pyrogram.types import Message
 from pymongo import MongoClient
 
-MONGO_URI = "your_mongo_uri_here"  # Set from your environment/secret!
+MONGO_URI = "your_mongo_uri_here"  # <-- replace with your actual MongoDB URI!
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["SuccuBot"]
 feds = db["federations"]
@@ -22,13 +22,14 @@ def is_fed_admin(user_id, fed_id):
     return False
 
 def register(app):
+
     @app.on_message(filters.command("createfed") & filters.group)
     async def create_fed(client, message: Message):
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
             return await message.reply("Usage: /createfed <fed_name>")
         fed_name = args[1].strip()
-        fed_id = f"fed{message.chat.id}"
+        fed_id = f"fed-{message.chat.id}"
         if feds.find_one({"fed_id": fed_id}):
             return await message.reply("A federation for this group already exists.")
         feds.insert_one({
@@ -81,13 +82,16 @@ def register(app):
         if not is_fed_admin(message.from_user.id, fed_id):
             return await message.reply("Only federation admins/owner/superadmin can fedban.")
 
-        # Get user by reply, username, or ID
+        user = None
+        reason = ""
         if message.reply_to_message:
             user = message.reply_to_message.from_user
+            args = message.text.split(maxsplit=1)
+            reason = args[1] if len(args) > 1 else ""
         else:
-            args = message.text.split()
+            args = message.text.split(maxsplit=2)
             if len(args) < 2:
-                return await message.reply("Reply to a user or use /fedban @username or user_id")
+                return await message.reply("Reply to a user or use /fedban @username or user_id [reason]")
             mention = args[1]
             try:
                 if mention.startswith("@"):
@@ -96,13 +100,17 @@ def register(app):
                     user = await client.get_users(int(mention))
             except Exception:
                 return await message.reply("Invalid user! Use /fedban as reply, /fedban @username, or /fedban user_id.")
+            reason = args[2] if len(args) > 2 else ""
 
         user_id = user.id
         fed = feds.find_one({"fed_id": fed_id})
-        if user_id in fed.get("bans", []):
+        if any(b['user_id'] == user_id for b in fed.get("bans", [])):
             return await message.reply("User is already fedbanned.")
-        feds.update_one({"fed_id": fed_id}, {"$push": {"bans": user_id}})
-        await message.reply(f"✅ {user.mention} has been federationally banned!")
+
+        ban_entry = {"user_id": user_id, "reason": reason}
+        feds.update_one({"fed_id": fed_id}, {"$push": {"bans": ban_entry}})
+        reason_text = f"\n<b>Reason:</b> {reason}" if reason else ""
+        await message.reply(f"✅ {user.mention} has been federationally banned!{reason_text}")
 
     @app.on_message(filters.command("fedunban") & filters.group)
     async def fedunban_user(client, message: Message):
@@ -113,7 +121,6 @@ def register(app):
         if not is_fed_admin(message.from_user.id, fed_id):
             return await message.reply("Only federation admins/owner/superadmin can fedunban.")
 
-        # Get user by reply, username, or ID
         if message.reply_to_message:
             user = message.reply_to_message.from_user
         else:
@@ -131,9 +138,13 @@ def register(app):
 
         user_id = user.id
         fed = feds.find_one({"fed_id": fed_id})
-        if user_id not in fed.get("bans", []):
+        if not any(b['user_id'] == user_id for b in fed.get("bans", [])):
             return await message.reply("User is not fedbanned.")
-        feds.update_one({"fed_id": fed_id}, {"$pull": {"bans": user_id}})
+
+        feds.update_one(
+            {"fed_id": fed_id},
+            {"$pull": {"bans": {"user_id": user_id}}}
+        )
         await message.reply(f"✅ {user.mention} has been federationally unbanned!")
 
     @app.on_message(filters.command("fedbans") & filters.group)
@@ -146,5 +157,82 @@ def register(app):
         ban_list = fed.get("bans", [])
         if not ban_list:
             return await message.reply("No users are fedbanned in this federation.")
-        ban_text = "\n".join([f"<code>{uid}</code>" for uid in ban_list])
+        ban_text = "\n".join(
+            [
+                f"<code>{ban['user_id']}</code>" +
+                (f" — {ban['reason']}" if ban.get("reason") else "")
+                for ban in ban_list
+            ]
+        )
         await message.reply(f"🚫 Fedbanned users in <b>{fed_id}</b>:\n{ban_text}")
+
+    @app.on_message(filters.command("addfedadmin") & filters.group)
+    async def add_fed_admin(client, message: Message):
+        args = message.text.split()
+        if len(args) < 3:
+            return await message.reply("Usage: /addfedadmin <fed_id> <@username or user_id>")
+        fed_id = args[1]
+        mention = args[2]
+        fed = feds.find_one({"fed_id": fed_id})
+        if not fed:
+            return await message.reply("No federation found with that ID.")
+        if message.from_user.id != fed["owner_id"] and message.from_user.id != SUPER_ADMIN_ID:
+            return await message.reply("Only the federation owner or super admin can add federation admins.")
+        try:
+            if mention.startswith("@"):
+                user = await client.get_users(mention)
+            else:
+                user = await client.get_users(int(mention))
+        except Exception:
+            return await message.reply("Could not find that user.")
+        if user.id in fed.get("admins", []):
+            return await message.reply("User is already a federation admin.")
+        feds.update_one({"fed_id": fed_id}, {"$push": {"admins": user.id}})
+        await message.reply(f"✅ {user.mention} has been added as a federation admin!")
+
+    @app.on_message(filters.command("removefedadmin") & filters.group)
+    async def remove_fed_admin(client, message: Message):
+        args = message.text.split()
+        if len(args) < 3:
+            return await message.reply("Usage: /removefedadmin <fed_id> <@username or user_id>")
+        fed_id = args[1]
+        mention = args[2]
+        fed = feds.find_one({"fed_id": fed_id})
+        if not fed:
+            return await message.reply("No federation found with that ID.")
+        if message.from_user.id != fed["owner_id"] and message.from_user.id != SUPER_ADMIN_ID:
+            return await message.reply("Only the federation owner or super admin can remove federation admins.")
+        try:
+            if mention.startswith("@"):
+                user = await client.get_users(mention)
+            else:
+                user = await client.get_users(int(mention))
+        except Exception:
+            return await message.reply("Could not find that user.")
+        if user.id not in fed.get("admins", []):
+            return await message.reply("User is not a federation admin.")
+        feds.update_one({"fed_id": fed_id}, {"$pull": {"admins": user.id}})
+        await message.reply(f"✅ {user.mention} has been removed as a federation admin!")
+
+    @app.on_message(filters.command("fedadmins") & filters.group)
+    async def fed_admins(client, message: Message):
+        args = message.text.split()
+        if len(args) < 2:
+            return await message.reply("Usage: /fedadmins <fed_id>")
+        fed_id = args[1]
+        fed = feds.find_one({"fed_id": fed_id})
+        if not fed:
+            return await message.reply("No federation found with that ID.")
+        admin_ids = fed.get("admins", [])
+        owner_id = fed["owner_id"]
+        text = f"<b>Owner:</b> <code>{owner_id}</code>\n<b>Admins:</b>\n"
+        if not admin_ids:
+            text += "No federation admins have been set."
+        else:
+            for admin_id in admin_ids:
+                try:
+                    user = await client.get_users(admin_id)
+                    text += f"- {user.mention} (<code>{admin_id}</code>)\n"
+                except Exception:
+                    text += f"- <code>{admin_id}</code>\n"
+        await message.reply(text)
