@@ -35,7 +35,6 @@ from handlers import (
     moderation,
     federation,
     summon,
-    xp,
     fun,
     flyer
 )
@@ -46,9 +45,9 @@ help_cmd.register(app)
 moderation.register(app)
 federation.register(app)
 summon.register(app)
-xp.register(app)
 fun.register(app)
 flyer.register(app)
 
 print("✅ SuccuBot is running...")
 app.run()
+
