@@ -1,5 +1,6 @@
 import os
 import logging
+import traceback
 from pyrogram import filters
 from pyrogram.types import Message
 from pymongo import MongoClient
@@ -57,7 +58,8 @@ def register(app):
                 "bans": []
             })
         except Exception as e:
-            logging.error(f"Error inserting federation: {e}")
+            logging.error("Failed to insert federation:")
+            logging.error(traceback.format_exc())
             await message.reply("Failed to create federation due to a database error.")
             return
 
@@ -75,4 +77,4 @@ def register(app):
             text += f"- <code>{fed['fed_id']}</code>: {fed.get('name', 'No name')}\n"
         await message.reply(text)
 
-    # Other federation commands (joinfed, leavefed, fedban, fedunban, etc.) remain unchanged here...
+    # (Include other federation commands as needed...)
