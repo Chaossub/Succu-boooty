@@ -28,7 +28,7 @@ for fname in ["warnings.json", "xp.json", "summon.json", "flyers.json"]:
         with open(fpath, "w") as f:
             json.dump({}, f)
 
-# Import and register all handler modules
+# Import handlers (do not register yet)
 from handlers import (
     welcome,
     help_cmd,
@@ -39,15 +39,22 @@ from handlers import (
     flyer
 )
 
-# Register handlers
-welcome.register(app)
-help_cmd.register(app)
-moderation.register(app)
-federation.register(app)
-summon.register(app)
-fun.register(app)
-flyer.register(app)
+def debug_register(name, func):
+    try:
+        print(f"Registering {name}...")
+        func(app)
+        print(f"Registered {name} successfully.")
+    except Exception as e:
+        print(f"ERROR registering {name}: {e}")
+
+# Register handlers with debugging
+debug_register("welcome", welcome.register)
+debug_register("help_cmd", help_cmd.register)
+debug_register("moderation", moderation.register)
+debug_register("federation", federation.register)
+debug_register("summon", summon.register)
+debug_register("fun", fun.register)
+debug_register("flyer", flyer.register)
 
 print("✅ SuccuBot is running...")
 app.run()
-
