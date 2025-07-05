@@ -29,7 +29,7 @@ def register(app):
             return None
         user = message.reply_to_message.from_user
         if not user or not user.id:
-            await message.reply("Could not find the user to target.")
+            await message.reply("Could not find a valid user to target.")
             logging.debug("Command failed: reply_to_message has no valid user")
             return None
         return user
