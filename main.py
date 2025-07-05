@@ -1,72 +1,53 @@
 import os
 import logging
-from pyrogram import Client
-from pyrogram.enums import ParseMode
+
 from dotenv import load_dotenv
+import pyrogram
+from pyrogram import Client
 
-# Enable debug logging
+# Import your handler modules here
+from handlers import help_cmd, welcome, moderation, federation, summon, fun, flyer
+
+# Configure root logger
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='[%(levelname)s] %(asctime)s - %(message)s'
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s'
 )
+logger = logging.getLogger(__name__)
 
-logging.info("Loading environment variables...")
-load_dotenv()
+def main():
+    # 1. Load environment variables
+    logger.info("Loading environment variables...")
+    load_dotenv()
 
-API_ID = os.getenv("API_ID")
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
+    # 2. Log Pyrogram version
+    logger.info(f"▶️ Running Pyrogram v{pyrogram.__version__}")
 
-if not API_ID or not API_HASH or not BOT_TOKEN or not MONGO_URI:
-    logging.error("One or more required environment variables are missing!")
-    exit(1)
+    # 3. Read required vars
+    API_ID = int(os.getenv("API_ID"))
+    API_HASH = os.getenv("API_HASH")
+    BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-try:
-    API_ID = int(API_ID)
-except ValueError:
-    logging.error("API_ID must be an integer!")
-    exit(1)
+    # 4. Initialize the bot client
+    app = Client(
+        "succubot",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN
+    )
 
-logging.info("Starting SuccuBot client...")
-
-app = Client(
-    "SuccuBot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML
-)
-
-# Import handlers here
-from handlers import (
-    moderation,
-    federation,
-    xp,
-    warnings,
-    summon,
-    fun,
-    flyer,
-    welcome,
-    help_cmd
-)
-
-logging.info("Registering handlers...")
-
-try:
+    # 5. Register all your handlers
+    help_cmd.register(app)
+    welcome.register(app)
     moderation.register(app)
     federation.register(app)
-    xp.register(app)
-    warnings.register(app)
     summon.register(app)
     fun.register(app)
     flyer.register(app)
-    welcome.register(app)
-    help_cmd.register(app)
-except Exception as e:
-    logging.error(f"Error registering handlers: {e}", exc_info=True)
-    exit(1)
 
-logging.info("✅ SuccuBot is running...")
+    # 6. Start the bot
+    logger.info("Starting SuccuBot client...")
+    app.run()
 
-app.run()
+if __name__ == "__main__":
+    main()
