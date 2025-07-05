@@ -57,7 +57,7 @@ def register(app):
                 "admins": [],
                 "bans": []
             })
-        except Exception as e:
+        except Exception:
             logging.error("Failed to insert federation:")
             logging.error(traceback.format_exc())
             await message.reply("Failed to create federation due to a database error.")
@@ -77,4 +77,4 @@ def register(app):
             text += f"- <code>{fed['fed_id']}</code>: {fed.get('name', 'No name')}\n"
         await message.reply(text)
 
-    # (Include other federation commands as needed...)
+    # Additional federation commands can be added here as needed
