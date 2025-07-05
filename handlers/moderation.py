@@ -20,19 +20,32 @@ def is_admin(chat_member, user_id):
         return True
     return chat_member and chat_member.status in ("administrator", "creator")
 
-def register(app):
-
-    async def get_target_user(message: Message):
-        if not message.reply_to_message:
-            await message.reply("You must reply to the user for this command.")
-            logging.debug("Command failed: no reply_to_message")
+async def get_user_from_arg_or_reply(client, message: Message):
+    args = message.text.split()
+    if len(args) >= 2:
+        user_arg = args[1]
+        try:
+            if user_arg.startswith("@"):
+                user = await client.get_users(user_arg)
+            else:
+                user_id = int(user_arg)
+                user = await client.get_users(user_id)
+            return user
+        except Exception:
+            await message.reply("Could not find the specified user.")
             return None
+    elif message.reply_to_message:
         user = message.reply_to_message.from_user
-        if not user or not user.id:
-            await message.reply("Could not find a valid user to target.")
-            logging.debug("Command failed: reply_to_message has no valid user")
+        if user and user.id:
+            return user
+        else:
+            await message.reply("Replied message has no valid user.")
             return None
-        return user
+    else:
+        await message.reply("You must specify a user by username, user ID, or reply to their message.")
+        return None
+
+def register(app):
 
     @app.on_message(filters.command("flirtywarn") & filters.group)
     async def flirty_warn(client, message: Message):
@@ -41,7 +54,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can send flirty warnings.")
             return
-        user = await get_target_user(message)
+        user = await get_user_from_arg_or_reply(client, message)
         if not user:
             return
         msg = random.choice(FLIRTY_WARN_MESSAGES).format(mention=user.mention)
@@ -54,7 +67,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can issue warnings.")
             return
-        user = await get_target_user(message)
+        user = await get_user_from_arg_or_reply(client, message)
         if not user:
             return
         # TODO: implement warning increment in storage here
@@ -67,7 +80,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can mute users.")
             return
-        user = await get_target_user(message)
+        user = await get_user_from_arg_or_reply(client, message)
         if not user:
             return
         try:
@@ -95,7 +108,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can unmute users.")
             return
-        user = await get_target_user(message)
+        user = await get_user_from_arg_or_reply(client, message)
         if not user:
             return
         try:
@@ -122,7 +135,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can kick users.")
             return
-        user = await get_target_user(message)
+        user = await get_user_from_arg_or_reply(client, message)
         if not user:
             return
         try:
@@ -141,7 +154,7 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can ban users.")
             return
-        user = await get_target_user(message)
+        user = await get_user_from_arg_or_reply(client, message)
         if not user:
             return
         try:
