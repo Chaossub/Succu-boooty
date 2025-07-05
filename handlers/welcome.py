@@ -1,6 +1,6 @@
+import random
 from pyrogram import filters
 from pyrogram.types import Message, ChatMemberUpdated
-import random
 
 def register(app):
 
@@ -28,17 +28,24 @@ def register(app):
 
     @app.on_chat_member_updated()
     async def goodbye_handler(client, update: ChatMemberUpdated):
-        old = update.old_chat_member
-        new = update.new_chat_member
-        user = update.new_chat_member.user
+        old = getattr(update, "old_chat_member", None)
+        new = getattr(update, "new_chat_member", None)
+
+        # Guard against None values
+        if not old or not new:
+            return
+
+        user = getattr(new, "user", None)
+        if not user:
+            return
 
         # Debug log for every chat member update!
         try:
-            print(f"[DEBUG] Member update: old={old.status}, new={new.status}, user={user.id} ({user.first_name})")
+            print(f"[DEBUG] Member update: old={getattr(old, 'status', None)}, new={getattr(new, 'status', None)}, user={getattr(user, 'id', None)} ({getattr(user, 'first_name', None)})")
         except Exception as e:
             print(f"[DEBUG] Error printing update: {e}")
 
-        if old.status in ("member", "restricted") and new.status in ("left", "kicked"):
+        if old.status in ("member", "restricted") and new.status in ("left", "kicked", "banned"):
             mention = user.mention if user else "A user"
             msg = random.choice(GOODBYES).format(mention=mention)
             try:
