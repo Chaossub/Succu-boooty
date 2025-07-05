@@ -172,3 +172,4 @@ def register(app):
         except Exception as e:
             logging.error(f"Failed to unban user {args[1]}: {e}", exc_info=True)
             await message.reply(f"Failed to unban: {e}")
+
