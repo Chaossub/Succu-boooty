@@ -32,139 +32,136 @@ def extract_file_id(msg):
         return msg.document.file_id
     return None
 
-def get_flyer_name(message):
-    # For command as caption or text, returns the flyer name or None
-    text = message.text or message.caption
-    if not text:
+def get_flyer_name(content):
+    # For command in caption or text, returns the flyer name or None
+    if not content:
         return None
-    parts = text.strip().split(maxsplit=1)
+    parts = content.strip().split(maxsplit=1)
     if len(parts) < 2:
         return None
     return parts[1].strip().lower()
 
 def register(app):
 
-    @app.on_message((filters.command("createflyer") | filters.caption_command("createflyer")) & filters.group)
-    async def create_flyer(client, message: Message):
-        if not is_admin(client, message.from_user.id, message.chat.id):
-            return await message.reply("Only admins can add flyers.")
+    @app.on_message(filters.group)
+    async def flyer_commands(client, message: Message):
+        content = message.text or message.caption
+        if not content:
+            return
 
-        flyer_name = get_flyer_name(message)
-        if not flyer_name:
-            return await message.reply("Usage: /createflyer <name> (send with image/file as caption or reply)")
+        lower_content = content.lower()
+        # CREATE
+        if lower_content.startswith("/createflyer") or lower_content.startswith("!createflyer"):
+            if not is_admin(client, message.from_user.id, message.chat.id):
+                return await message.reply("Only admins can add flyers.")
+            flyer_name = get_flyer_name(content)
+            if not flyer_name:
+                return await message.reply("Usage: /createflyer <name> (send with image/file as caption or reply)")
+            file_id = extract_file_id(message)
+            if not file_id and message.reply_to_message:
+                file_id = extract_file_id(message.reply_to_message)
+            if not file_id:
+                return await message.reply("Attach a photo/file, or reply to one, with this command!")
+            data = load_flyers()
+            chat_id = str(message.chat.id)
+            if chat_id not in data:
+                data[chat_id] = {}
+            if flyer_name in data[chat_id]:
+                return await message.reply("A flyer with that name already exists! Use /changeflyer to update it.")
+            data[chat_id][flyer_name] = file_id
+            save_flyers(data)
+            return await message.reply(f"✅ Flyer '{flyer_name}' saved!")
 
-        # Try to get file from current message or reply
-        file_id = extract_file_id(message)
-        if not file_id and message.reply_to_message:
-            file_id = extract_file_id(message.reply_to_message)
-        if not file_id:
-            return await message.reply("Attach a photo/file, or reply to one, with this command!")
+        # CHANGE
+        if lower_content.startswith("/changeflyer") or lower_content.startswith("!changeflyer"):
+            if not is_admin(client, message.from_user.id, message.chat.id):
+                return await message.reply("Only admins can change flyers.")
+            flyer_name = get_flyer_name(content)
+            if not flyer_name:
+                return await message.reply("Usage: /changeflyer <name> (send with image/file as caption or reply)")
+            file_id = extract_file_id(message)
+            if not file_id and message.reply_to_message:
+                file_id = extract_file_id(message.reply_to_message)
+            if not file_id:
+                return await message.reply("Attach a photo/file, or reply to one, with this command!")
+            data = load_flyers()
+            chat_id = str(message.chat.id)
+            if chat_id not in data or flyer_name not in data[chat_id]:
+                return await message.reply("No flyer with that name. Use /createflyer first.")
+            data[chat_id][flyer_name] = file_id
+            save_flyers(data)
+            return await message.reply(f"✅ Flyer '{flyer_name}' updated!")
 
-        data = load_flyers()
-        chat_id = str(message.chat.id)
-        if chat_id not in data:
-            data[chat_id] = {}
-        if flyer_name in data[chat_id]:
-            return await message.reply("A flyer with that name already exists! Use /changeflyer to update it.")
+        # DELETE
+        if lower_content.startswith("/delflyer") or lower_content.startswith("!delflyer"):
+            if not is_admin(client, message.from_user.id, message.chat.id):
+                return await message.reply("Only admins can delete flyers.")
+            args = content.split(maxsplit=1)
+            if len(args) < 2:
+                return await message.reply("Usage: /delflyer <name>")
+            flyer_name = args[1].strip().lower()
+            data = load_flyers()
+            chat_id = str(message.chat.id)
+            if chat_id not in data or flyer_name not in data[chat_id]:
+                return await message.reply("No flyer with that name.")
+            del data[chat_id][flyer_name]
+            save_flyers(data)
+            return await message.reply("✅ Flyer deleted!")
 
-        data[chat_id][flyer_name] = file_id
-        save_flyers(data)
-        await message.reply(f"✅ Flyer '{flyer_name}' saved!")
+        # PIN
+        if lower_content.startswith("/pinflyer") or lower_content.startswith("!pinflyer"):
+            if not is_admin(client, message.from_user.id, message.chat.id):
+                return await message.reply("Only admins can pin flyers.")
+            args = content.split(maxsplit=1)
+            if len(args) < 2:
+                return await message.reply("Usage: /pinflyer <name>")
+            flyer_name = args[1].strip().lower()
+            data = load_flyers()
+            chat_id = str(message.chat.id)
+            if chat_id not in data or flyer_name not in data[chat_id]:
+                return await message.reply("No flyer with that name.")
+            file_id = data[chat_id][flyer_name]
+            try:
+                sent = await message.reply_photo(file_id)
+            except Exception:
+                sent = await message.reply_document(file_id)
+            try:
+                await client.pin_chat_message(chat_id, sent.id, disable_notification=True)
+            except Exception as e:
+                return await message.reply(f"Could not pin flyer: {e}")
+            return await message.reply(f"📌 Flyer '{flyer_name}' pinned!")
 
-    @app.on_message((filters.command("changeflyer") | filters.caption_command("changeflyer")) & filters.group)
-    async def change_flyer(client, message: Message):
-        if not is_admin(client, message.from_user.id, message.chat.id):
-            return await message.reply("Only admins can change flyers.")
+        # UNPIN
+        if lower_content.startswith("/unpinflyer") or lower_content.startswith("!unpinflyer"):
+            if not is_admin(client, message.from_user.id, message.chat.id):
+                return await message.reply("Only admins can unpin flyers.")
+            try:
+                await client.unpin_chat_message(message.chat.id)
+                return await message.reply("📍 Unpinned the current pinned message!")
+            except Exception as e:
+                return await message.reply(f"Could not unpin: {e}")
 
-        flyer_name = get_flyer_name(message)
-        if not flyer_name:
-            return await message.reply("Usage: /changeflyer <name> (send with image/file as caption or reply)")
+        # FLYERLIST
+        if lower_content.startswith("/flyerlist") or lower_content.startswith("!flyerlist"):
+            data = load_flyers()
+            chat_id = str(message.chat.id)
+            if chat_id not in data or not data[chat_id]:
+                return await message.reply("No flyers saved in this group yet!")
+            flyers = "\n".join([f"- <b>{f}</b>" for f in data[chat_id].keys()])
+            return await message.reply(f"📄 Flyers in this group:\n{flyers}")
 
-        file_id = extract_file_id(message)
-        if not file_id and message.reply_to_message:
-            file_id = extract_file_id(message.reply_to_message)
-        if not file_id:
-            return await message.reply("Attach a photo/file, or reply to one, with this command!")
-
-        data = load_flyers()
-        chat_id = str(message.chat.id)
-        if chat_id not in data or flyer_name not in data[chat_id]:
-            return await message.reply("No flyer with that name. Use /createflyer first.")
-
-        data[chat_id][flyer_name] = file_id
-        save_flyers(data)
-        await message.reply(f"✅ Flyer '{flyer_name}' updated!")
-
-    @app.on_message(filters.command("flyerlist") & filters.group)
-    async def flyer_list(_, message: Message):
-        data = load_flyers()
-        chat_id = str(message.chat.id)
-        if chat_id not in data or not data[chat_id]:
-            return await message.reply("No flyers saved in this group yet!")
-        flyers = "\n".join([f"- <b>{f}</b>" for f in data[chat_id].keys()])
-        await message.reply(f"📄 Flyers in this group:\n{flyers}")
-
-    @app.on_message(filters.command("flyer") & filters.group)
-    async def get_flyer(client, message: Message):
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
-            return await message.reply("Usage: /flyer <name>")
-        flyer_name = args[1].strip().lower()
-        data = load_flyers()
-        chat_id = str(message.chat.id)
-        if chat_id not in data or flyer_name not in data[chat_id]:
-            return await message.reply("No flyer with that name.")
-        file_id = data[chat_id][flyer_name]
-        try:
-            await message.reply_photo(file_id)
-        except Exception:
-            await message.reply_document(file_id)
-
-    @app.on_message(filters.command("delflyer") & filters.group)
-    async def del_flyer(client, message: Message):
-        if not is_admin(client, message.from_user.id, message.chat.id):
-            return await message.reply("Only admins can delete flyers.")
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
-            return await message.reply("Usage: /delflyer <name>")
-        flyer_name = args[1].strip().lower()
-        data = load_flyers()
-        chat_id = str(message.chat.id)
-        if chat_id not in data or flyer_name not in data[chat_id]:
-            return await message.reply("No flyer with that name.")
-        del data[chat_id][flyer_name]
-        save_flyers(data)
-        await message.reply("✅ Flyer deleted!")
-
-    @app.on_message(filters.command("pinflyer") & filters.group)
-    async def pin_flyer(client, message: Message):
-        if not is_admin(client, message.from_user.id, message.chat.id):
-            return await message.reply("Only admins can pin flyers.")
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
-            return await message.reply("Usage: /pinflyer <name>")
-        flyer_name = args[1].strip().lower()
-        data = load_flyers()
-        chat_id = str(message.chat.id)
-        if chat_id not in data or flyer_name not in data[chat_id]:
-            return await message.reply("No flyer with that name.")
-        file_id = data[chat_id][flyer_name]
-        try:
-            sent = await message.reply_photo(file_id)
-        except Exception:
-            sent = await message.reply_document(file_id)
-        try:
-            await client.pin_chat_message(chat_id, sent.id, disable_notification=True)
-        except Exception as e:
-            return await message.reply(f"Could not pin flyer: {e}")
-        await message.reply(f"📌 Flyer '{flyer_name}' pinned!")
-
-    @app.on_message(filters.command("unpinflyer") & filters.group)
-    async def unpin_flyer(client, message: Message):
-        if not is_admin(client, message.from_user.id, message.chat.id):
-            return await message.reply("Only admins can unpin flyers.")
-        try:
-            await client.unpin_chat_message(message.chat.id)
-            await message.reply("📍 Unpinned the current pinned message!")
-        except Exception as e:
-            await message.reply(f"Could not unpin: {e}")
+        # GET FLYER
+        if lower_content.startswith("/flyer") or lower_content.startswith("!flyer"):
+            args = content.split(maxsplit=1)
+            if len(args) < 2:
+                return await message.reply("Usage: /flyer <name>")
+            flyer_name = args[1].strip().lower()
+            data = load_flyers()
+            chat_id = str(message.chat.id)
+            if chat_id not in data or flyer_name not in data[chat_id]:
+                return await message.reply("No flyer with that name.")
+            file_id = data[chat_id][flyer_name]
+            try:
+                await message.reply_photo(file_id)
+            except Exception:
+                await message.reply_document(file_id)
