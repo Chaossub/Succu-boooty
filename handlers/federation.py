@@ -11,7 +11,7 @@ if not MONGO_URI:
     raise ValueError("MONGO_URI environment variable not set")
 
 mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["SuccuBot"]
+db = mongo_client["succubot"]  # changed to lowercase here
 feds = db["federations"]
 groups = db["groups"]
 
@@ -74,5 +74,3 @@ def register(app):
         for fed in fed_list:
             text += f"- <code>{fed['fed_id']}</code>: {fed.get('name', 'No name')}\n"
         await message.reply(text)
-
-    # Add other federation commands here as needed...
