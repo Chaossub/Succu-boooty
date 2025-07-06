@@ -2,16 +2,17 @@ import os
 import random
 from pymongo import MongoClient
 from pyrogram import filters
-from pyrogram.types import Message
+from pyrogram.types import Message, User
 
-# 1) Load your Mongo URI from the environment
+# 1) Load Mongo URI from env
 MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
 if not MONGO_URI:
     raise RuntimeError("Please set MONGO_URI or MONGODB_URI in your environment")
 
-# 2) Choose a database name (does not need to be in the URI)
+# 2) Choose a database name
 DB_NAME = os.getenv("MONGO_DB", "succubot")
 
+# 3) Connect to MongoDB
 mongo = MongoClient(MONGO_URI)
 db = mongo[DB_NAME]
 xp_collection = db["xp"]
@@ -49,31 +50,28 @@ def register(app):
         add_xp(message.chat.id, user.id, gain)
         await message.reply_text(f"{user.mention} got +{gain} XP for **{cmd}**!")
 
-    @app.on_message(filters.command("leaderboard") & filters.group)
-    async def leaderboard(client, message: Message):
+    @app.on_message(filters.command("naughtystats") & filters.group)
+    async def naughtystats(client, message: Message):
         board = get_leaderboard(message.chat.id)
         if not board:
             return await message.reply_text("No XP recorded yet.")
-        lines = ["🏆 Top XP Leaderboard:"]
+        lines = ["📊 Naughty XP Stats:"]
         for i, doc in enumerate(board, start=1):
             uid = doc["user_id"]
             xp = doc["xp"]
             try:
-                user = await client.get_users(uid)
-                mention = user.mention
+                user: User = await client.get_users(uid)
+                name = user.first_name or user.username or str(uid)
+                # Markdown link to the user
+                link = f"[{name}](tg://user?id={uid})"
             except Exception:
-                mention = f"<code>{uid}</code>"
-            lines.append(f"{i}. {mention} — {xp} XP")
+                link = f"`{uid}`"
+            lines.append(f"{i}. {link} — {xp} XP")
         await message.reply_text(
             "\n".join(lines),
             disable_web_page_preview=True,
-            parse_mode="html"
+            parse_mode="markdown"
         )
-
-    @app.on_message(filters.command("naughtystats") & filters.group)
-    async def naughtystats(client, message: Message):
-        # Alias for leaderboard
-        await leaderboard(client, message)
 
     @app.on_message(filters.command("resetxp") & filters.group)
     async def reset(client, message: Message):
