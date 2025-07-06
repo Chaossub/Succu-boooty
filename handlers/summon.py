@@ -6,7 +6,7 @@ from pyrogram import filters
 from pyrogram.types import Message
 
 # ─── Config ────────────────────────────────────────────────────────────
-SUMMON_PATH    = "data/summon.json"
+SUMMON_PATH = "data/summon.json"
 SUPER_ADMIN_ID = 6964994611
 # ────────────────────────────────────────────────────────────────────────
 
@@ -83,15 +83,26 @@ def register(app):
 
         # 4) Track & mention
         add_user_to_tracking(message.chat.id, target.id)
-        await message.reply_text(
-            f"{target.mention}, you are being summoned!"
-        )
+        await message.reply_text(f"{target.mention}, you are being summoned!")
 
     @app.on_message(filters.command("summonall") & filters.group)
     async def summon_all(client, message: Message):
-        data = load_summon().get(str(message.chat.id), [])
+        key = str(message.chat.id)
+        data = load_summon().get(key, [])
+
+        # Auto‐track if empty
         if not data:
-            return await message.reply_text("No tracked users! Use /trackall first.")
+            count = 0
+            async for m in client.get_chat_members(message.chat.id):
+                if not m.user.is_bot:
+                    add_user_to_tracking(message.chat.id, m.user.id)
+                    data.append(m.user.id)
+                    count += 1
+            if count == 0:
+                return await message.reply_text("❌ Couldn't track any members.")
+            await message.reply_text(f"✅ Auto-tracked {count} members!")
+
+        # Summon everyone
         mentions = []
         for uid in data:
             try:
@@ -99,6 +110,9 @@ def register(app):
                 mentions.append(user.mention)
             except:
                 continue
+
+        if not mentions:
+            return await message.reply_text("❌ No valid users to summon.")
         await message.reply_text(
             "🔔 Summoning everyone!\n" + " ".join(mentions),
             disable_web_page_preview=True
@@ -112,9 +126,9 @@ def register(app):
             "🔥 Someone wants your attention!",
             "👠 It’s getting steamy in here!"
         ]
-        # single-target branch
+        # Single-target (reply or @username)
         if message.reply_to_message or (len(message.text.split()) > 1 and message.text.split()[1].startswith("@")):
-            # replicate the summon_one logic but with a flirty prefix
+            # Reuse summon logic with flirty prefix
             if message.reply_to_message:
                 target = message.reply_to_message.from_user
             else:
@@ -128,36 +142,12 @@ def register(app):
             except:
                 return await message.reply_text("❌ That user is not in this group.")
             add_user_to_tracking(message.chat.id, target.id)
-            await message.reply_text(
-                f"{target.mention}, {random.choice(flirty_lines)}"
-            )
+            await message.reply_text(f"{target.mention}, {random.choice(flirty_lines)}")
             return
 
-        # fallback: summon all
-        data = load_summon().get(str(message.chat.id), [])
-        if not data:
-            return await message.reply_text("No tracked users! Use /trackall first.")
-        mentions = []
-        for uid in data:
-            try:
-                u = await client.get_users(int(uid))
-                mentions.append(u.mention)
-            except:
-                continue
-        await message.reply_text(
-            random.choice(flirty_lines) + "\n" + " ".join(mentions),
-            disable_web_page_preview=True
-        )
-
-    @app.on_message(filters.command("flirtysummonall") & filters.group)
-    async def flirty_summon_all(client, message: Message):
-        flirty = [
-            "😈 Come out and play, naughty ones!",
-            "💋 The succubi want *everyone*…",
-            "🔥 All the hotties assemble!",
-            "👠 Who’s feeling naughty tonight?"
-        ]
-        data = load_summon().get(str(message.chat.id), [])
+        # Fallback: summon all
+        key = str(message.chat.id)
+        data = load_summon().get(key, [])
         if not data:
             return await message.reply_text("No tracked users! Use /trackall first.")
         mentions = []
@@ -168,7 +158,31 @@ def register(app):
             except:
                 continue
         await message.reply_text(
-            random.choice(flirty) + "\n" + " ".join(mentions),
+            random.choice(flirty_lines) + "\n" + " ".join(mentions),
+            disable_web_page_preview=True
+        )
+
+    @app.on_message(filters.command("flirtysummonall") & filters.group)
+    async def flirty_summon_all(client, message: Message):
+        flirty_all_lines = [
+            "😈 Come out and play, naughty ones!",
+            "💋 The succubi want everyone…",
+            "🔥 All the hotties assemble!",
+            "👠 Who’s feeling naughty tonight?"
+        ]
+        key = str(message.chat.id)
+        data = load_summon().get(key, [])
+        if not data:
+            return await message.reply_text("No tracked users! Use /trackall first.")
+        mentions = []
+        for uid in data:
+            try:
+                user = await client.get_users(int(uid))
+                mentions.append(user.mention)
+            except:
+                continue
+        await message.reply_text(
+            random.choice(flirty_all_lines) + "\n" + " ".join(mentions),
             disable_web_page_preview=True
         )
 
