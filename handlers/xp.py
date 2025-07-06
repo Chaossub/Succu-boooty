@@ -4,12 +4,12 @@ from pymongo import MongoClient
 from pyrogram import filters
 from pyrogram.types import Message
 
-# 1) Load your Mongo URI
+# 1) Load your Mongo URI from the environment
 MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
 if not MONGO_URI:
     raise RuntimeError("Please set MONGO_URI or MONGODB_URI in your environment")
 
-# 2) Choose a database name (does not need to appear in the URI)
+# 2) Choose a database name (does not need to be in the URI)
 DB_NAME = os.getenv("MONGO_DB", "succubot")
 
 mongo = MongoClient(MONGO_URI)
@@ -37,7 +37,7 @@ def reset_xp(chat_id: int):
     xp_collection.delete_many({"chat_id": chat_id})
 
 def is_admin(member):
-    return member.status in ("administrator", "creator")
+    return member and member.status in ("administrator", "creator")
 
 def register(app):
 
@@ -58,8 +58,22 @@ def register(app):
         for i, doc in enumerate(board, start=1):
             uid = doc["user_id"]
             xp = doc["xp"]
-            lines.append(f"{i}. <a href='tg://user?id={uid}'>User</a> — {xp} XP")
-        await message.reply_text("\n".join(lines), disable_web_page_preview=True)
+            try:
+                user = await client.get_users(uid)
+                mention = user.mention
+            except Exception:
+                mention = f"<code>{uid}</code>"
+            lines.append(f"{i}. {mention} — {xp} XP")
+        await message.reply_text(
+            "\n".join(lines),
+            disable_web_page_preview=True,
+            parse_mode="html"
+        )
+
+    @app.on_message(filters.command("naughtystats") & filters.group)
+    async def naughtystats(client, message: Message):
+        # Alias for leaderboard
+        await leaderboard(client, message)
 
     @app.on_message(filters.command("resetxp") & filters.group)
     async def reset(client, message: Message):
