@@ -1,17 +1,22 @@
 import os
 import random
+import logging
 from pymongo import MongoClient
 from pyrogram import filters
 from pyrogram.types import Message, User
+
+# Configure a logger for this module
+logger = logging.getLogger("xp")
 
 # 1) Load your Mongo URI from env
 MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
 if not MONGO_URI:
     raise RuntimeError("Please set MONGO_URI or MONGODB_URI in your environment")
 
-# 2) Choose a database name (doesn't need to be in the URI)
+# 2) Choose a database name
 DB_NAME = os.getenv("MONGO_DB", "succubot")
 
+# 3) Connect to MongoDB
 mongo = MongoClient(MONGO_URI)
 db = mongo[DB_NAME]
 xp_collection = db["xp"]
@@ -54,18 +59,26 @@ def register(app):
         board = get_leaderboard(message.chat.id)
         if not board:
             return await message.reply_text("No XP recorded yet.")
+
         lines = ["📊 Naughty XP Stats:"]
         for i, doc in enumerate(board, start=1):
             uid = doc["user_id"]
             xp = doc["xp"]
+            name = None
             try:
                 user: User = await client.get_users(uid)
+                # pick display name: first_name > username > fallback to id
                 name = user.first_name or user.username or str(uid)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Could not fetch user {uid}: {e}")
                 name = str(uid)
-            # Build an HTML link with the real name
+
+            # Log what name we got
+            logger.info(f"Leaderboard entry #{i}: uid={uid}, name='{name}', xp={xp}")
+
             link = f"<a href='tg://user?id={uid}'>{name}</a>"
             lines.append(f"{i}. {link} — {xp} XP")
+
         await message.reply_text(
             "\n".join(lines),
             disable_web_page_preview=True,
@@ -79,4 +92,3 @@ def register(app):
             return await message.reply_text("❌ Only admins can reset XP.")
         reset_xp(message.chat.id)
         await message.reply_text("✅ XP leaderboard has been reset.")
-
