@@ -57,7 +57,7 @@ def register(app):
 
     @app.on_message(filters.command("summon") & filters.group)
     async def summon_one(client, message: Message):
-        # 1) If the command is a reply, grab that user:
+        # 1) If replying to someone, target that user
         if message.reply_to_message:
             target = message.reply_to_message.from_user
         else:
@@ -72,20 +72,19 @@ def register(app):
             username = parts[1].lstrip("@")
             try:
                 target = await client.get_users(username)
-            except Exception:
+            except:
                 return await message.reply_text("❌ Could not find that username.")
 
         # 3) Verify they’re in the chat
         try:
             await client.get_chat_member(message.chat.id, target.id)
-        except Exception:
+        except:
             return await message.reply_text("❌ That user is not in this group.")
 
         # 4) Track & mention
         add_user_to_tracking(message.chat.id, target.id)
         await message.reply_text(
-            f"{target.mention}, you are being summoned!",
-            parse_mode="html"
+            f"{target.mention}, you are being summoned!"
         )
 
     @app.on_message(filters.command("summonall") & filters.group)
@@ -102,7 +101,6 @@ def register(app):
                 continue
         await message.reply_text(
             "🔔 Summoning everyone!\n" + " ".join(mentions),
-            parse_mode="html",
             disable_web_page_preview=True
         )
 
@@ -111,71 +109,4 @@ def register(app):
         flirty_lines = [
             "😈 Come out and play!",
             "💋 The succubi are calling…",
-            "🔥 Someone wants your attention!",
-            "👠 It’s getting steamy in here!"
-        ]
-        # single‐target
-        if message.reply_to_message or (len(message.text.split()) > 1 and message.text.split()[1].startswith("@")):
-            # reuse the same logic as /summon
-            # pretend this is a mini-summon
-            return await summon_one(client, message)
-
-        # otherwise summon all
-        data = load_summon().get(str(message.chat.id), [])
-        if not data:
-            return await message.reply_text("No tracked users! Use /trackall first.")
-        mentions = []
-        for uid in data:
-            try:
-                user = await client.get_users(int(uid))
-                mentions.append(user.mention)
-            except:
-                continue
-        await message.reply_text(
-            random.choice(flirty_lines) + "\n" + " ".join(mentions),
-            parse_mode="html",
-            disable_web_page_preview=True
-        )
-
-    @app.on_message(filters.command("flirtysummonall") & filters.group)
-    async def flirty_summon_all(client, message: Message):
-        flirty = [
-            "😈 Come out and play, naughty ones!",
-            "💋 The succubi want *everyone*…",
-            "🔥 All the hotties assemble!",
-            "👠 Who’s feeling naughty tonight?"
-        ]
-        data = load_summon().get(str(message.chat.id), [])
-        if not data:
-            return await message.reply_text("No tracked users! Use /trackall first.")
-        mentions = []
-        for uid in data:
-            try:
-                user = await client.get_users(int(uid))
-                mentions.append(user.mention)
-            except:
-                continue
-        await message.reply_text(
-            random.choice(flirty) + "\n" + " ".join(mentions),
-            parse_mode="html",
-            disable_web_page_preview=True
-        )
-
-    @app.on_message(filters.command("cancel") & filters.group)
-    async def cancel_setup(client, message: Message):
-        await message.reply_text("🚫 Federation setup canceled.")
-
-    @app.on_message(filters.command("help") & filters.group)
-    async def help_cmd(client, message: Message):
-        cmds = [
-            "/trackall — track everyone",
-            "/summon @username or reply — summon one",
-            "/summonall — summon all",
-            "/flirtysummon @username or reply — flirty one",
-            "/flirtysummonall — flirty all",
-            "/cancel — cancel setup"
-        ]
-        await message.reply_text(
-            "📜 Available commands:\n" + "\n".join(cmds),
-            disable_web_page_preview=True
-        )
+            "🔥 Someone wants your at
