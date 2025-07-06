@@ -17,6 +17,7 @@ def load_summon():
         return json.load(f)
 
 def save_summon(data):
+    os.makedirs(os.path.dirname(SUMMON_PATH), exist_ok=True)
     with open(SUMMON_PATH, "w") as f:
         json.dump(data, f)
 
@@ -59,16 +60,17 @@ def register(app):
         args = message.text.split(maxsplit=1)
         if len(args) < 2 or not args[1].startswith("@"):
             return await message.reply_text("Usage: /summon @username")
-        username = args[1].strip()
+        username = args[1].lstrip("@")
         try:
-            user = await client.get_users(username)
+            member = await client.get_chat_member(message.chat.id, username)
+            user = member.user
             add_user_to_tracking(message.chat.id, user.id)
             await message.reply_text(
                 f"{user.mention}, you are being summoned!",
                 parse_mode="html"
             )
-        except:
-            await message.reply_text("❌ Could not find that user.")
+        except Exception:
+            await message.reply_text("❌ Could not find that user in this group.")
 
     @app.on_message(filters.command("summonall") & filters.group)
     async def summon_all(client, message: Message):
@@ -97,25 +99,30 @@ def register(app):
             "👠 It’s getting steamy in here!"
         ]
         args = message.text.split(maxsplit=1)
+        # single‐target branch
         if len(args) > 1 and args[1].startswith("@"):
+            username = args[1].lstrip("@")
             try:
-                user = await client.get_users(args[1].strip())
+                member = await client.get_chat_member(message.chat.id, username)
+                user = member.user
                 add_user_to_tracking(message.chat.id, user.id)
                 await message.reply_text(
                     f"{user.mention}, {random.choice(flirty)}",
                     parse_mode="html"
                 )
-            except:
-                await message.reply_text("❌ Could not find that user.")
+            except Exception:
+                await message.reply_text("❌ Could not find that user in this group.")
             return
+
+        # fallback to summoning all
         data = load_summon().get(str(message.chat.id), [])
         if not data:
             return await message.reply_text("No tracked users! Use /trackall first.")
         mentions = []
         for uid in data:
             try:
-                user = await client.get_users(int(uid))
-                mentions.append(user.mention)
+                u = await client.get_users(int(uid))
+                mentions.append(u.mention)
             except:
                 continue
         await message.reply_text(
