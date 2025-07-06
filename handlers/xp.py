@@ -68,4 +68,3 @@ def register(app):
             return await message.reply_text("❌ Only admins can reset XP.")
         reset_xp(message.chat.id)
         await message.reply_text("✅ XP leaderboard has been reset.")
-
