@@ -4,13 +4,18 @@ from pymongo import MongoClient
 from pyrogram import filters
 from pyrogram.types import Message
 
-# Load your Mongo URI from env (Railway: MONGO_URI or MONGODB_URI)
+# Load your Mongo URI from env
 MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
-mongo = MongoClient(MONGO_URI)
-db = mongo.get_database()  # uses default DB from URI
-xp_collection = db.get_collection("xp")
+if not MONGO_URI:
+    raise RuntimeError("Please set MONGO_URI or MONGODB_URI in your env")
 
-# Bot owner override
+# Name of the database to use (no slash in URI required)
+DB_NAME = os.getenv("MONGO_DB", "succubot")
+
+mongo = MongoClient(MONGO_URI)
+db = mongo[DB_NAME]
+xp_collection = db["xp"]
+
 OWNER_ID = 6964994611
 
 def add_xp(chat_id: int, user_id: int, amount: int):
@@ -36,29 +41,26 @@ def is_admin(member):
 
 def register(app):
 
-    # Fun commands that award XP
     @app.on_message(filters.command(["bite", "spank", "tease"]) & filters.group)
     async def xp_command(client, message: Message):
-        cmd = message.text.split()[0][1:].lower()  # "bite", "spank", or "tease"
+        cmd = message.text.split()[0][1:].lower()
         user = message.from_user
         gain = random.randint(1, 5)
         add_xp(message.chat.id, user.id, gain)
         await message.reply_text(f"{user.mention} got +{gain} XP for **{cmd}**!")
 
-    # /leaderboard
     @app.on_message(filters.command("leaderboard") & filters.group)
     async def leaderboard(client, message: Message):
         board = get_leaderboard(message.chat.id)
         if not board:
             return await message.reply_text("No XP recorded yet.")
-        text = ["🏆 Top XP Leaderboard:"]
+        lines = ["🏆 Top XP Leaderboard:"]
         for i, doc in enumerate(board, start=1):
             uid = doc["user_id"]
             xp = doc["xp"]
-            text.append(f"{i}. <a href='tg://user?id={uid}'>User</a> — {xp} XP")
-        await message.reply_text("\n".join(text), disable_web_page_preview=True)
+            lines.append(f"{i}. <a href='tg://user?id={uid}'>User</a> — {xp} XP")
+        await message.reply_text("\n".join(lines), disable_web_page_preview=True)
 
-    # /resetxp (admin or owner)
     @app.on_message(filters.command("resetxp") & filters.group)
     async def reset(client, message: Message):
         member = await client.get_chat_member(message.chat.id, message.from_user.id)
