@@ -5,18 +5,18 @@ from pymongo import MongoClient
 from pyrogram import filters
 from pyrogram.types import Message, User
 
-# Configure a logger for this module
-logger = logging.getLogger("xp")
+# Set up a logger for this module
+logger = logging.getLogger(__name__)
 
-# 1) Load your Mongo URI from env
+# 1️⃣ Load Mongo URI
 MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
 if not MONGO_URI:
     raise RuntimeError("Please set MONGO_URI or MONGODB_URI in your environment")
 
-# 2) Choose a database name
+# 2️⃣ Pick your DB name (doesn’t have to appear in the URI)
 DB_NAME = os.getenv("MONGO_DB", "succubot")
 
-# 3) Connect to MongoDB
+# 3️⃣ Connect to Mongo
 mongo = MongoClient(MONGO_URI)
 db = mongo[DB_NAME]
 xp_collection = db["xp"]
@@ -46,6 +46,7 @@ def is_admin(member):
 
 def register(app):
 
+    # Award XP on bite/spank/tease
     @app.on_message(filters.command(["bite", "spank", "tease"]) & filters.group)
     async def xp_command(client, message: Message):
         cmd = message.text.split()[0][1:].lower()
@@ -54,37 +55,35 @@ def register(app):
         add_xp(message.chat.id, user.id, gain)
         await message.reply_text(f"{user.mention} got +{gain} XP for **{cmd}**!")
 
+    # Show Naughty Stats with real names
     @app.on_message(filters.command("naughtystats") & filters.group)
     async def naughtystats(client, message: Message):
         board = get_leaderboard(message.chat.id)
         if not board:
             return await message.reply_text("No XP recorded yet.")
-
         lines = ["📊 Naughty XP Stats:"]
         for i, doc in enumerate(board, start=1):
             uid = doc["user_id"]
             xp = doc["xp"]
-            name = None
             try:
+                # Fetch the actual User object
                 user: User = await client.get_users(uid)
-                # pick display name: first_name > username > fallback to id
+                # Decide a display name
                 name = user.first_name or user.username or str(uid)
             except Exception as e:
                 logger.warning(f"Could not fetch user {uid}: {e}")
                 name = str(uid)
-
-            # Log what name we got
-            logger.info(f"Leaderboard entry #{i}: uid={uid}, name='{name}', xp={xp}")
-
+            # Build an HTML mention
             link = f"<a href='tg://user?id={uid}'>{name}</a>"
             lines.append(f"{i}. {link} — {xp} XP")
-
+        # Send as HTML so links render
         await message.reply_text(
             "\n".join(lines),
             disable_web_page_preview=True,
             parse_mode="html"
         )
 
+    # Admin-only: reset the XP
     @app.on_message(filters.command("resetxp") & filters.group)
     async def reset(client, message: Message):
         member = await client.get_chat_member(message.chat.id, message.from_user.id)
