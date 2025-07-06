@@ -4,12 +4,12 @@ from pymongo import MongoClient
 from pyrogram import filters
 from pyrogram.types import Message
 
-# Load your Mongo URI from env
+# 1) Load your Mongo URI
 MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
 if not MONGO_URI:
-    raise RuntimeError("Please set MONGO_URI or MONGODB_URI in your env")
+    raise RuntimeError("Please set MONGO_URI or MONGODB_URI in your environment")
 
-# Name of the database to use (no slash in URI required)
+# 2) Choose a database name (does not need to appear in the URI)
 DB_NAME = os.getenv("MONGO_DB", "succubot")
 
 mongo = MongoClient(MONGO_URI)
@@ -68,3 +68,4 @@ def register(app):
             return await message.reply_text("❌ Only admins can reset XP.")
         reset_xp(message.chat.id)
         await message.reply_text("✅ XP leaderboard has been reset.")
+
