@@ -63,8 +63,10 @@ def register(app):
         try:
             user = await client.get_users(username)
             add_user_to_tracking(message.chat.id, user.id)
-            await message.reply_text(f"{user.mention}, you are being summoned!",
-                                     parse_mode="html")
+            await message.reply_text(
+                f"{user.mention}, you are being summoned!",
+                parse_mode="html"
+            )
         except:
             await message.reply_text("❌ Could not find that user.")
 
@@ -99,8 +101,10 @@ def register(app):
             try:
                 user = await client.get_users(args[1].strip())
                 add_user_to_tracking(message.chat.id, user.id)
-                await message.reply_text(f"{user.mention}, {random.choice(flirty)}",
-                                         parse_mode="html")
+                await message.reply_text(
+                    f"{user.mention}, {random.choice(flirty)}",
+                    parse_mode="html"
+                )
             except:
                 await message.reply_text("❌ Could not find that user.")
             return
@@ -158,5 +162,7 @@ def register(app):
             "/flirtysummonall — flirty all",
             "/cancel — cancel setup"
         ]
-        await message.reply_text("📜 Available commands:\n" + "\n".join(cmds),
-                                 disable_web_page_preview=True)
+        await message.reply_text(
+            "📜 Available commands:\n" + "\n".join(cmds),
+            disable_web_page_preview=True
+        )
