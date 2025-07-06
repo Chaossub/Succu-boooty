@@ -109,4 +109,84 @@ def register(app):
         flirty_lines = [
             "😈 Come out and play!",
             "💋 The succubi are calling…",
-            "🔥 Someone wants your at
+            "🔥 Someone wants your attention!",
+            "👠 It’s getting steamy in here!"
+        ]
+        # single-target branch
+        if message.reply_to_message or (len(message.text.split()) > 1 and message.text.split()[1].startswith("@")):
+            # replicate the summon_one logic but with a flirty prefix
+            if message.reply_to_message:
+                target = message.reply_to_message.from_user
+            else:
+                username = message.text.split(maxsplit=1)[1].lstrip("@")
+                try:
+                    target = await client.get_users(username)
+                except:
+                    return await message.reply_text("❌ Could not find that username.")
+            try:
+                await client.get_chat_member(message.chat.id, target.id)
+            except:
+                return await message.reply_text("❌ That user is not in this group.")
+            add_user_to_tracking(message.chat.id, target.id)
+            await message.reply_text(
+                f"{target.mention}, {random.choice(flirty_lines)}"
+            )
+            return
+
+        # fallback: summon all
+        data = load_summon().get(str(message.chat.id), [])
+        if not data:
+            return await message.reply_text("No tracked users! Use /trackall first.")
+        mentions = []
+        for uid in data:
+            try:
+                u = await client.get_users(int(uid))
+                mentions.append(u.mention)
+            except:
+                continue
+        await message.reply_text(
+            random.choice(flirty_lines) + "\n" + " ".join(mentions),
+            disable_web_page_preview=True
+        )
+
+    @app.on_message(filters.command("flirtysummonall") & filters.group)
+    async def flirty_summon_all(client, message: Message):
+        flirty = [
+            "😈 Come out and play, naughty ones!",
+            "💋 The succubi want *everyone*…",
+            "🔥 All the hotties assemble!",
+            "👠 Who’s feeling naughty tonight?"
+        ]
+        data = load_summon().get(str(message.chat.id), [])
+        if not data:
+            return await message.reply_text("No tracked users! Use /trackall first.")
+        mentions = []
+        for uid in data:
+            try:
+                user = await client.get_users(int(uid))
+                mentions.append(user.mention)
+            except:
+                continue
+        await message.reply_text(
+            random.choice(flirty) + "\n" + " ".join(mentions),
+            disable_web_page_preview=True
+        )
+
+    @app.on_message(filters.command("cancel") & filters.group)
+    async def cancel_setup(client, message: Message):
+        await message.reply_text("🚫 Federation setup canceled.")
+
+    @app.on_message(filters.command("help") & filters.group)
+    async def help_cmd(client, message: Message):
+        cmds = [
+            "/trackall — track everyone",
+            "/summon @username or reply — summon one",
+            "/summonall — summon all",
+            "/flirtysummon @username or reply — flirty one",
+            "/flirtysummonall — flirty all",
+            "/cancel — cancel setup"
+        ]
+        await message.reply_text(
+            "📜 Available commands:\n" + "\n".join(cmds),
+            disable_web_page_preview=True
+        )
