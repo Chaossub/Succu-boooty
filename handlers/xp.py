@@ -4,15 +4,14 @@ from pymongo import MongoClient
 from pyrogram import filters
 from pyrogram.types import Message, User
 
-# 1) Load Mongo URI from env
+# 1) Load your Mongo URI from env
 MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
 if not MONGO_URI:
     raise RuntimeError("Please set MONGO_URI or MONGODB_URI in your environment")
 
-# 2) Choose a database name
+# 2) Choose a database name (doesn't need to be in the URI)
 DB_NAME = os.getenv("MONGO_DB", "succubot")
 
-# 3) Connect to MongoDB
 mongo = MongoClient(MONGO_URI)
 db = mongo[DB_NAME]
 xp_collection = db["xp"]
@@ -62,15 +61,15 @@ def register(app):
             try:
                 user: User = await client.get_users(uid)
                 name = user.first_name or user.username or str(uid)
-                # Markdown link to the user
-                link = f"[{name}](tg://user?id={uid})"
             except Exception:
-                link = f"`{uid}`"
+                name = str(uid)
+            # Build an HTML link with the real name
+            link = f"<a href='tg://user?id={uid}'>{name}</a>"
             lines.append(f"{i}. {link} — {xp} XP")
         await message.reply_text(
             "\n".join(lines),
             disable_web_page_preview=True,
-            parse_mode="markdown"
+            parse_mode="html"
         )
 
     @app.on_message(filters.command("resetxp") & filters.group)
@@ -80,3 +79,4 @@ def register(app):
             return await message.reply_text("❌ Only admins can reset XP.")
         reset_xp(message.chat.id)
         await message.reply_text("✅ XP leaderboard has been reset.")
+
