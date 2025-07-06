@@ -1,117 +1,94 @@
+import os
 from pyrogram import filters
 from pyrogram.types import Message
 
+# match whatever you use elsewhere:
 SUPER_ADMIN_ID = 6964994611
 
-def is_admin(app, user_id, chat_id):
+async def is_admin(client, chat_id: int, user_id: int) -> bool:
     if user_id == SUPER_ADMIN_ID:
         return True
     try:
-        member = app.get_chat_member(chat_id, user_id)
-        return member.status in ["administrator", "creator"]
-    except Exception:
+        member = await client.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except:
         return False
-
-GENERAL_CMDS = [
-    ("/naughty [reply]", "Check your or another's naughty XP"),
-    ("/leaderboard", "See the top 10 naughtiest users"),
-]
-
-FUN_CMDS = [
-    ("/bite [reply]", "Give someone a naughty bite (+3 XP)"),
-    ("/spank [reply]", "Give someone a naughty spank (+2 XP)"),
-    ("/tease [reply]", "Give someone a playful tease (+1 XP)"),
-]
-
-FLYER_CMDS = [
-    ("/flyer <name>", "View a flyer by name"),
-    ("/flyerlist", "See all flyers in this group"),
-]
-
-SUMMON_CMDS = [
-    ("/summon @user", "Summon a specific user"),
-    ("/summonall", "Summon all tracked users"),
-    ("/flirtysummon @user", "Flirty summon a specific user"),
-    ("/flirtysummonall", "Flirty summon all tracked users"),
-]
-
-MOD_CMDS = [
-    ("/warn [reply]", "Warn a user (auto-mute at 3/6 warns)"),
-    ("/warns [reply]", "Check warns for a user"),
-    ("/resetwarns [reply]", "Reset warns for a user"),
-    ("/mute [reply] [minutes]", "Mute a user (optionally timed)"),
-    ("/unmute [reply]", "Unmute a user"),
-    ("/flirtywarn [reply]", "Give a flirty warning"),
-    ("/ban [reply]", "Ban a user from the group"),
-    ("/unban [reply]", "Unban a user from the group"),
-    ("/kick [reply]", "Kick a user from the group"),
-]
-
-TRACK_CMDS = [
-    ("/trackall", "Track all group members for summons"),
-]
-
-FED_CMDS = [
-    ("/createfed <name>", "Create a new federation"),
-    ("/delfed <fed_id>", "Delete a federation"),
-    ("/renamefed <fed_id> <new_name>", "Rename a federation"),
-    ("/addfedadmin <fed_id> <@user>", "Add federation admin"),
-    ("/delfedadmin <fed_id> <@user>", "Remove federation admin"),
-    ("/linkgroup <fed_id>", "Link this group to a federation"),
-    ("/unlinkgroup <fed_id>", "Unlink this group from a federation"),
-    ("/fedban <fed_id> <@user> [reason]", "Federation-ban a user"),
-    ("/fedunban <fed_id> <@user>", "Remove federation-ban"),
-    ("/fedlist", "List federations you own"),
-    ("/fedinfo <fed_id>", "Show federation details"),
-    ("/fedcheck <@user>", "Check a user's fedban status"),
-]
-
-FLYER_ADMIN_CMDS = [
-    ("/createflyer <name> [reply]", "Add a flyer (reply to photo/file)"),
-    ("/changeflyer <name> [reply]", "Change a flyer (reply to photo/file)"),
-    ("/delflyer <name>", "Delete a flyer by name"),
-]
 
 def register(app):
 
     @app.on_message(filters.command("help") & filters.group)
-    async def help_command(client, message: Message):
-        is_user_admin = is_admin(client, message.from_user.id, message.chat.id)
-        text = "😈 <b>SuccuBot Commands</b> 😈\n\n"
+    async def help_cmd(client, message: Message):
+        user_id = message.from_user.id
+        chat_id = message.chat.id
 
-        text += "✨ <b>General</b>\n"
-        for cmd, desc in GENERAL_CMDS:
-            text += f"  <code>{cmd}</code> — {desc}\n"
+        # determine roles
+        admin = await is_admin(client, chat_id, user_id)
+        # if you have a federation-admin check, do it here:
+        # fed_admin = await is_fed_admin(...)
 
-        text += "\n🍑 <b>Fun & Naughty</b>\n"
-        for cmd, desc in FUN_CMDS:
-            text += f"  <code>{cmd}</code> — {desc}\n"
+        sections = []
 
-        text += "\n📄 <b>Flyers</b>\n"
-        for cmd, desc in FLYER_CMDS:
-            text += f"  <code>{cmd}</code> — {desc}\n"
+        # ── General ───────────────────────────────────────
+        sections.append("<b>🛠 General Commands:</b>")
+        sections.append("• /help — Show this help message")
+        sections.append("• /cancel — Cancel any pending setup (e.g. federation)")
 
-        text += "\n📣 <b>Summon & Tracking</b>\n"
-        for cmd, desc in SUMMON_CMDS:
-            text += f"  <code>{cmd}</code> — {desc}\n"
+        # ── Summon ───────────────────────────────────────
+        sections.append("\n<b>🔔 Summon Commands:</b>")
+        sections.append("• /trackall — Track all members in this chat (admin only)")
+        sections.append("• /summon @username or reply — Summon one tracked member")
+        sections.append("• /summonall — Summon all tracked members")
+        sections.append("• /flirtysummon @username or reply — Flirty summon one member")
+        sections.append("• /flirtysummonall — Flirty summon all members")
 
-        if is_user_admin:
-            text += "\n🛡️ <b>Moderation</b>\n"
-            for cmd, desc in MOD_CMDS:
-                text += f"  <code>{cmd}</code> — {desc}\n"
+        # ── Fun ───────────────────────────────────────────
+        sections.append("\n<b>🎉 Fun Commands:</b>")
+        sections.append("• /bite @username or reply — Playful bite & earn XP")
+        sections.append("• /spank @username or reply — Playful spank & earn XP")
+        sections.append("• /tease @username or reply — Playful tease & earn XP")
 
-            text += "\n🗂️ <b>Tracking (Admin)</b>\n"
-            for cmd, desc in TRACK_CMDS:
-                text += f"  <code>{cmd}</code> — {desc}\n"
+        # ── XP ────────────────────────────────────────────
+        sections.append("\n<b>📈 XP Commands:</b>")
+        sections.append("• /naughty — Show your naughty XP & level")
+        sections.append("• /leaderboard — Display the naughty XP leaderboard")
 
-            text += "\n🎨 <b>Flyers (Admin)</b>\n"
-            for cmd, desc in FLYER_ADMIN_CMDS:
-                text += f"  <code>{cmd}</code> — {desc}\n"
+        # ── Moderation (admin only) ──────────────────────
+        if admin:
+            sections.append("\n<b>⚒ Moderation Commands:</b>")
+            sections.append("• /warn @username — Issue a warning")
+            sections.append("• /flirtywarn @username — Flirty warning (no mute)")
+            sections.append("• /warns @username — Check a user’s warning count")
+            sections.append("• /resetwarns @username — Reset warnings")
+            sections.append("• /mute @username [duration] — Mute a user")
+            sections.append("• /unmute @username — Unmute a user")
+            sections.append("• /kick @username — Kick a user")
+            sections.append("• /ban @username — Ban a user")
+            sections.append("• /unban @username — Unban a user")
+            sections.append("• /userinfo @username — View user info")
 
-            text += "\n👑 <b>Federation</b>\n"
-            for cmd, desc in FED_CMDS:
-                text += f"  <code>{cmd}</code> — {desc}\n"
+        # ── Federation (admin only) ──────────────────────
+        if admin:
+            sections.append("\n<b>🛡 Federation Commands:</b>")
+            sections.append("• /createfed <name> — Create a federation")
+            sections.append("• /renamefed <fed_id> <new_name> — Rename a federation")
+            sections.append("• /purgefed <fed_id> — Delete a federation")
+            sections.append("• /addfedadmin <fed_id> @username — Add a fed admin")
+            sections.append("• /removefedadmin <fed_id> @username — Remove a fed admin")
+            sections.append("• /listfeds — List all federations")
+            sections.append("• /fedban <fed_id> @username — Ban across a federation")
+            sections.append("• /fedunban <fed_id> @username — Unban across a federation")
+            sections.append("• /fedcheck <fed_id> @username — Check ban status")
+            sections.append("• /togglefedaction <fed_id> — Toggle enforcement")
 
-        text += "\n❌ <code>/cancel</code> — Cancel multi-step commands"
+        # ── Flyers (admin only) ──────────────────────────
+        if admin:
+            sections.append("\n<b>📂 Flyer Commands:</b>")
+            sections.append("• /flyer <name> — Retrieve a flyer")
+            sections.append("• /addflyer <name> — Add a flyer (reply to image)")
+            sections.append("• /changeflyer <name> — Update a flyer (reply to image)")
+            sections.append("• /deleteflyer <name> — Delete a flyer")
+            sections.append("• /listflyers — List all flyers")
 
-        await message.reply(text)
+        # send it
+        help_text = "\n".join(sections)
+        await message.reply_text(help_text, disable_web_page_preview=True)
