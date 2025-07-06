@@ -57,20 +57,36 @@ def register(app):
 
     @app.on_message(filters.command("summon") & filters.group)
     async def summon_one(client, message: Message):
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2 or not args[1].startswith("@"):
-            return await message.reply_text("Usage: /summon @username")
-        username = args[1].lstrip("@")
+        # 1) If the command is a reply, grab that user:
+        if message.reply_to_message:
+            target = message.reply_to_message.from_user
+        else:
+            # 2) Otherwise expect “/summon @username”
+            parts = message.text.split(maxsplit=1)
+            if len(parts) < 2 or not parts[1].startswith("@"):
+                return await message.reply_text(
+                    "Usage:\n"
+                    "• Reply to someone’s message with /summon\n"
+                    "• Or /summon @username"
+                )
+            username = parts[1].lstrip("@")
+            try:
+                target = await client.get_users(username)
+            except Exception:
+                return await message.reply_text("❌ Could not find that username.")
+
+        # 3) Verify they’re in the chat
         try:
-            member = await client.get_chat_member(message.chat.id, username)
-            user = member.user
-            add_user_to_tracking(message.chat.id, user.id)
-            await message.reply_text(
-                f"{user.mention}, you are being summoned!",
-                parse_mode="html"
-            )
+            await client.get_chat_member(message.chat.id, target.id)
         except Exception:
-            await message.reply_text("❌ Could not find that user in this group.")
+            return await message.reply_text("❌ That user is not in this group.")
+
+        # 4) Track & mention
+        add_user_to_tracking(message.chat.id, target.id)
+        await message.reply_text(
+            f"{target.mention}, you are being summoned!",
+            parse_mode="html"
+        )
 
     @app.on_message(filters.command("summonall") & filters.group)
     async def summon_all(client, message: Message):
@@ -92,41 +108,31 @@ def register(app):
 
     @app.on_message(filters.command("flirtysummon") & filters.group)
     async def flirty_summon(client, message: Message):
-        flirty = [
+        flirty_lines = [
             "😈 Come out and play!",
             "💋 The succubi are calling…",
             "🔥 Someone wants your attention!",
             "👠 It’s getting steamy in here!"
         ]
-        args = message.text.split(maxsplit=1)
-        # single‐target branch
-        if len(args) > 1 and args[1].startswith("@"):
-            username = args[1].lstrip("@")
-            try:
-                member = await client.get_chat_member(message.chat.id, username)
-                user = member.user
-                add_user_to_tracking(message.chat.id, user.id)
-                await message.reply_text(
-                    f"{user.mention}, {random.choice(flirty)}",
-                    parse_mode="html"
-                )
-            except Exception:
-                await message.reply_text("❌ Could not find that user in this group.")
-            return
+        # single‐target
+        if message.reply_to_message or (len(message.text.split()) > 1 and message.text.split()[1].startswith("@")):
+            # reuse the same logic as /summon
+            # pretend this is a mini-summon
+            return await summon_one(client, message)
 
-        # fallback to summoning all
+        # otherwise summon all
         data = load_summon().get(str(message.chat.id), [])
         if not data:
             return await message.reply_text("No tracked users! Use /trackall first.")
         mentions = []
         for uid in data:
             try:
-                u = await client.get_users(int(uid))
-                mentions.append(u.mention)
+                user = await client.get_users(int(uid))
+                mentions.append(user.mention)
             except:
                 continue
         await message.reply_text(
-            random.choice(flirty) + "\n" + " ".join(mentions),
+            random.choice(flirty_lines) + "\n" + " ".join(mentions),
             parse_mode="html",
             disable_web_page_preview=True
         )
@@ -163,9 +169,9 @@ def register(app):
     async def help_cmd(client, message: Message):
         cmds = [
             "/trackall — track everyone",
-            "/summon @username — summon one",
+            "/summon @username or reply — summon one",
             "/summonall — summon all",
-            "/flirtysummon — flirty one",
+            "/flirtysummon @username or reply — flirty one",
             "/flirtysummonall — flirty all",
             "/cancel — cancel setup"
         ]
