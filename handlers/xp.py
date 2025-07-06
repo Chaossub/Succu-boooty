@@ -5,18 +5,17 @@ from pymongo import MongoClient
 from pyrogram import filters
 from pyrogram.types import Message, User
 
-# Set up a logger for this module
 logger = logging.getLogger(__name__)
 
-# 1️⃣ Load Mongo URI
+# 1) Load Mongo URI
 MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
 if not MONGO_URI:
     raise RuntimeError("Please set MONGO_URI or MONGODB_URI in your environment")
 
-# 2️⃣ Pick your DB name (doesn’t have to appear in the URI)
+# 2) Pick your DB name
 DB_NAME = os.getenv("MONGO_DB", "succubot")
 
-# 3️⃣ Connect to Mongo
+# 3) Connect to Mongo
 mongo = MongoClient(MONGO_URI)
 db = mongo[DB_NAME]
 xp_collection = db["xp"]
@@ -46,7 +45,6 @@ def is_admin(member):
 
 def register(app):
 
-    # Award XP on bite/spank/tease
     @app.on_message(filters.command(["bite", "spank", "tease"]) & filters.group)
     async def xp_command(client, message: Message):
         cmd = message.text.split()[0][1:].lower()
@@ -55,7 +53,6 @@ def register(app):
         add_xp(message.chat.id, user.id, gain)
         await message.reply_text(f"{user.mention} got +{gain} XP for **{cmd}**!")
 
-    # Show Naughty Stats with real names
     @app.on_message(filters.command("naughtystats") & filters.group)
     async def naughtystats(client, message: Message):
         board = get_leaderboard(message.chat.id)
@@ -66,24 +63,19 @@ def register(app):
             uid = doc["user_id"]
             xp = doc["xp"]
             try:
-                # Fetch the actual User object
+                # use the mention property to get an HTML link with their name
                 user: User = await client.get_users(uid)
-                # Decide a display name
-                name = user.first_name or user.username or str(uid)
+                mention = user.mention
             except Exception as e:
                 logger.warning(f"Could not fetch user {uid}: {e}")
-                name = str(uid)
-            # Build an HTML mention
-            link = f"<a href='tg://user?id={uid}'>{name}</a>"
-            lines.append(f"{i}. {link} — {xp} XP")
-        # Send as HTML so links render
+                mention = f"<code>{uid}</code>"
+            lines.append(f"{i}. {mention} — {xp} XP")
         await message.reply_text(
             "\n".join(lines),
             disable_web_page_preview=True,
             parse_mode="html"
         )
 
-    # Admin-only: reset the XP
     @app.on_message(filters.command("resetxp") & filters.group)
     async def reset(client, message: Message):
         member = await client.get_chat_member(message.chat.id, message.from_user.id)
