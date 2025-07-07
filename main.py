@@ -54,12 +54,13 @@ def main():
     logger.info("✅ SuccuBot is starting up…")
     try:
         app.run()
-    except Exception as e:
-        logger.exception("❌ app.run() exited with exception")
-    # if app.run() ever returns (it shouldn’t), don’t let the process die:
-    logger.warning("⚠️ app.run() has returned—entering keep-alive loop")
+    except Exception:
+        logger.exception("❌ app.run() exited unexpectedly")
+    # If app.run() ever returns or crashes, keep the process alive
+    logger.warning("⚠️ app.run() has returned — entering keep-alive loop")
     while True:
         time.sleep(60)
 
 if __name__ == "__main__":
     main()
+
