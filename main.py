@@ -1,63 +1,58 @@
 import os
 import logging
-
 from dotenv import load_dotenv
-import pyrogram
 from pyrogram import Client
-from pyrogram.raw.types.chat_banned_rights import ChatBannedRights
+from pyrogram.enums import ParseMode
 
-# ─── Monkey-patch to avoid NoneType.to_bytes in Pyrogram 2.0.106 ───
-_orig_write = ChatBannedRights.write
-def _patched_write(self, *args, **kwargs):
-    if not getattr(self, "until_date", None):
-        logging.getLogger("patch").info("Monkey-patch: setting until_date → 2147483647")
-        self.until_date = 2147483647
-    return _orig_write(self, *args, **kwargs)
-ChatBannedRights.write = _patched_write
-# ───────────────────────────────────────────────────────────────────────
+# ─── Load environment ───────────────────────────────────────────────────
+load_dotenv()
+API_ID    = int(os.getenv("API_ID", 0))
+API_HASH  = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    raise RuntimeError("Missing API_ID, API_HASH, or BOT_TOKEN in environment")
+
+# ─── Logging configuration ──────────────────────────────────────────────
+logging.basicConfig(
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    level=logging.DEBUG     # ← switched to DEBUG for handler tracing
+)
+logger = logging.getLogger(__name__)
+
+# ─── Initialize bot client ──────────────────────────────────────────────
+app = Client(
+    "SuccuBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML
+)
+
+# ─── Register all handler modules ────────────────────────────────────────
+from handlers.welcome    import register as register_welcome
+from handlers.help_cmd   import register as register_help
+from handlers.moderation import register as register_moderation
+from handlers.federation import register as register_federation
+from handlers.summon     import register as register_summon
+from handlers.xp         import register as register_xp
+from handlers.fun        import register as register_fun
+from handlers.flyer      import register as register_flyer
 
 def main():
-    # 1) configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s'
-    )
-    logger = logging.getLogger(__name__)
+    logger.debug("📥 Registering all handlers")
+    register_welcome(app)
+    register_help(app)
+    register_moderation(app)
+    register_federation(app)
+    register_summon(app)
+    register_xp(app)
+    register_fun(app)
+    register_flyer(app)
 
-    # 2) load .env
-    logger.info("Loading environment variables…")
-    load_dotenv()
-
-    # 3) log pyrogram version
-    logger.info(f"▶️ Running Pyrogram v{pyrogram.__version__}")
-
-    # 4) read credentials
-    API_ID   = int(os.getenv("API_ID"))
-    API_HASH = os.getenv("API_HASH")
-    BOT_TOKEN= os.getenv("BOT_TOKEN")
-
-    # 5) init bot
-    app = Client(
-        "succubot",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=BOT_TOKEN
-    )
-
-    # 6) now that env is loaded, import & register handlers
-    from handlers import help_cmd, welcome, moderation, federation, summon, fun, flyer, xp
-    help_cmd.register(app)
-    welcome .register(app)
-    moderation.register(app)
-    federation.register(app)
-    summon   .register(app)
-    fun      .register(app)
-    flyer    .register(app)
-    xp       .register(app)
-
-    # 7) start
-    logger.info("Starting SuccuBot client…")
+    logger.debug("✅ SuccuBot is starting up...")
     app.run()
+    logger.debug("🛑 SuccuBot has stopped")
 
 if __name__ == "__main__":
     main()
