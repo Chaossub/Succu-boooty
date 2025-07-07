@@ -1,252 +1,74 @@
-import json
-import re
+import os
 import logging
-from datetime import datetime
-from pathlib import Path
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from apscheduler.schedulers.background import BackgroundScheduler
-from apscheduler.triggers.date import DateTrigger
-from apscheduler.triggers.cron import CronTrigger
-from pyrogram import filters
-from pyrogram.types import Message
+from dotenv import load_dotenv
+from pyrogram import Client
+from pyrogram.enums import ParseMode
 
+# ─── Health‐check HTTP server ──────────────────────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8000))
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+
+# start the HTTP server in a background daemon thread
+Thread(target=run_health_server, daemon=True).start()
+
+# ─── Load environment ───────────────────────────────────────────────────
+load_dotenv()
+API_ID    = int(os.getenv("API_ID", 0))
+API_HASH  = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    raise RuntimeError("Missing API_ID, API_HASH, or BOT_TOKEN in environment")
+
+# ─── Logging configuration ──────────────────────────────────────────────
+logging.basicConfig(
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-# ─── Config ────────────────────────────────────────────────────────────
-PROJECT_ROOT   = Path(__file__).resolve().parent.parent
-DATA_DIR       = PROJECT_ROOT / "data"
-FLYER_PATH     = DATA_DIR / "flyers.json"
-SUPER_ADMIN_ID = 6964994611
+# ─── Initialize bot client ──────────────────────────────────────────────
+app = Client(
+    "SuccuBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML
+)
 
-# ensure data dir exists
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+# ─── Register all handler modules ────────────────────────────────────────
+from handlers.welcome    import register as register_welcome
+from handlers.help_cmd   import register as register_help
+from handlers.moderation import register as register_moderation
+from handlers.federation import register as register_federation
+from handlers.summon     import register as register_summon
+from handlers.xp         import register as register_xp
+from handlers.fun        import register as register_fun
+from handlers.flyer      import register as register_flyer
 
-# start a background scheduler
-scheduler = BackgroundScheduler()
-scheduler.start()
+def main():
+    logger.info("📥 Registering handlers…")
+    register_welcome(app)
+    register_help(app)
+    register_moderation(app)
+    register_federation(app)
+    register_summon(app)
+    register_xp(app)
+    register_fun(app)
+    register_flyer(app)
 
+    logger.info("✅ SuccuBot is starting up…")
+    app.run()
+    logger.info("🛑 SuccuBot has stopped")
 
-async def is_admin(client, chat_id: int, user_id: int) -> bool:
-    if user_id == SUPER_ADMIN_ID:
-        return True
-    try:
-        m = await client.get_chat_member(chat_id, user_id)
-        return m.status in ("administrator", "creator")
-    except:
-        return False
-
-
-def load_flyers():
-    if not FLYER_PATH.exists():
-        return {}
-    with open(FLYER_PATH, "r") as f:
-        return json.load(f)
-
-
-def save_flyers(data):
-    with open(FLYER_PATH, "w") as f:
-        json.dump(data, f)
-    logger.debug(f"📂 Saved flyers.json: {data}")
-
-
-def register(app):
-    # allow both groups/supergroups and channels
-    CHAT_FILTER = filters.group | filters.channel
-
-    @app.on_message(filters.command(["addflyer", "createflyer"]) & (filters.photo | filters.reply) & CHAT_FILTER)
-    async def add_flyer(client, message: Message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
-            return await message.reply_text("❌ You must be an admin to add flyers.")
-        if message.reply_to_message and message.reply_to_message.photo:
-            file_id = message.reply_to_message.photo.file_id
-            raw     = message.text or ""
-        elif message.photo:
-            file_id = message.photo.file_id
-            raw     = message.caption or ""
-        else:
-            return await message.reply_text(
-                "Usage:\n"
-                "• Reply to an image with /addflyer <name> <ad text>\n"
-                "• Or send an image with caption: /addflyer <name> <ad text>"
-            )
-        parts = raw.split(maxsplit=2)
-        if len(parts) < 3:
-            return await message.reply_text(
-                "Please specify both a name and an ad text:\n"
-                "/addflyer <name> <ad text>"
-            )
-        name = parts[1].lower()
-        ad   = parts[2].strip()
-
-        all_data  = load_flyers()
-        chat_data = all_data.setdefault(str(message.chat.id), {})
-        if name in chat_data:
-            return await message.reply_text(f"❌ A flyer named “{name}” already exists.")
-        chat_data[name] = {"file_id": file_id, "ad": ad}
-        save_flyers(all_data)
-        await message.reply_text(f"✅ Flyer “{name}” added!")
-
-    @app.on_message(filters.command(["changeflyer", "updateflyer"]) & (filters.photo | filters.reply) & CHAT_FILTER)
-    async def change_flyer(client, message: Message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
-            return await message.reply_text("❌ You must be an admin to change flyers.")
-        if not (message.reply_to_message and message.reply_to_message.photo):
-            return await message.reply_text(
-                "Usage:\n"
-                "Reply to an image with /changeflyer <name> [new ad text]"
-            )
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 2:
-            return await message.reply_text(
-                "Please specify the flyer name:\n"
-                "/changeflyer <name> [new ad text]"
-            )
-        name   = parts[1].lower()
-        new_ad = parts[2].strip() if len(parts) == 3 else None
-        file_id = message.reply_to_message.photo.file_id
-
-        all_data  = load_flyers()
-        chat_data = all_data.get(str(message.chat.id), {})
-        if name not in chat_data:
-            return await message.reply_text(f"❌ No flyer named “{name}” found.")
-        chat_data[name]["file_id"] = file_id
-        if new_ad:
-            chat_data[name]["ad"] = new_ad
-        save_flyers(all_data)
-        await message.reply_text(f"✅ Flyer “{name}” updated!")
-
-    @app.on_message(filters.command(["deleteflyer", "removeflyer"]) & CHAT_FILTER)
-    async def delete_flyer(client, message: Message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
-            return await message.reply_text("❌ You must be an admin to delete flyers.")
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2:
-            return await message.reply_text("Usage: /deleteflyer <name>")
-        name = parts[1].lower()
-
-        all_data  = load_flyers()
-        chat_data = all_data.get(str(message.chat.id), {})
-        if name not in chat_data:
-            return await message.reply_text(f"❌ No flyer named “{name}” found.")
-        del chat_data[name]
-        save_flyers(all_data)
-        await message.reply_text(f"✅ Flyer “{name}” deleted!")
-
-    @app.on_message(filters.command("listflyers") & CHAT_FILTER)
-    async def list_flyers(client, message: Message):
-        chat_data = load_flyers().get(str(message.chat.id), {})
-        if not chat_data:
-            return await message.reply_text("❌ No flyers have been added yet.")
-        names = "\n".join(f"• {n}" for n in chat_data)
-        await message.reply_text(f"<b>Available flyers:</b>\n{names}")
-
-    @app.on_message(filters.command(["flyer", "getflyer"]) & CHAT_FILTER)
-    async def get_flyer(client, message: Message):
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2:
-            return await message.reply_text("Usage: /flyer <name>")
-        name  = parts[1].lower()
-        entry = load_flyers().get(str(message.chat.id), {}).get(name)
-        if not entry:
-            return await message.reply_text(f"❌ No flyer named “{name}” found.")
-        await client.send_photo(
-            message.chat.id,
-            entry["file_id"],
-            caption=entry["ad"]
-        )
-
-    @app.on_message(filters.command("scheduleflyer") & CHAT_FILTER)
-    async def schedule_flyer(client, message: Message):
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 3:
-            return await message.reply_text(
-                "Usage:\n"
-                "• One-off:   /scheduleflyer <name> <YYYY-MM-DD HH:MM>\n"
-                "• Recurring: /scheduleflyer <name> <HH:MM> <Mon,Tue,...|daily>"
-            )
-        name = parts[1].lower()
-        rest = parts[2].strip()
-        entry = load_flyers().get(str(message.chat.id), {}).get(name)
-        if not entry:
-            return await message.reply_text(f"❌ No flyer named “{name}” found.")
-
-        # one-off detection
-        date_part, time_part = (rest.split(" ", 1) + [None])[:2]
-        if date_part and re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", date_part):
-            y, m, d = date_part.split("-")
-            dt_str = f"{y}-{m.zfill(2)}-{d.zfill(2)} {time_part}"
-            try:
-                run_date = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
-            except:
-                return await message.reply_text("❌ Invalid date/time. Use YYYY-MM-DD HH:MM")
-            job = scheduler.add_job(
-                client.send_photo,
-                trigger=DateTrigger(run_date),
-                args=[message.chat.id, entry["file_id"]],
-                kwargs={"caption": entry["ad"]}
-            )
-            return await message.reply_text(
-                f"✅ Scheduled one-off flyer “{name}” (job id: {job.id}) for {run_date:%Y-%m-%d %H:%M}"
-            )
-
-        # recurring fallback
-        rec_parts = rest.split(maxsplit=1)
-        if len(rec_parts) < 2:
-            return await message.reply_text(
-                "❌ For recurring, use:\n"
-                "/scheduleflyer <name> <HH:MM> <Mon,Tue,...|daily>"
-            )
-        time_str, days_str = rec_parts
-        try:
-            hour, minute = map(int, time_str.split(":"))
-        except:
-            return await message.reply_text("❌ Invalid time. Use HH:MM")
-        mapping = {
-            'mon':'mon','monday':'mon',
-            'tue':'tue','tuesday':'tue',
-            'wed':'wed','wednesday':'wed',
-            'thu':'thu','thursday':'thu',
-            'fri':'fri','friday':'fri',
-            'sat':'sat','saturday':'sat',
-            'sun':'sun','sunday':'sun'
-        }
-        if days_str.lower() == "daily":
-            dow = list(mapping.values())
-        else:
-            dow = []
-            for d in days_str.split(","):
-                tok = mapping.get(d.strip().lower())
-                if not tok:
-                    return await message.reply_text(
-                        "❌ Invalid weekdays. Use Mon,Tue,... or daily."
-                    )
-                dow.append(tok)
-        job = scheduler.add_job(
-            client.send_photo,
-            trigger=CronTrigger(day_of_week=",".join(dow), hour=hour, minute=minute),
-            args=[message.chat.id, entry["file_id"]],
-            kwargs={"caption": entry["ad"]}
-        )
-        return await message.reply_text(
-            f"✅ Scheduled flyer “{name}” (job id: {job.id}) every {days_str} at {time_str}"
-        )
-
-    @app.on_message(filters.command("listjobs") & CHAT_FILTER)
-    async def list_jobs(client, message: Message):
-        jobs = scheduler.get_jobs()
-        if not jobs:
-            return await message.reply_text("🗓 No scheduled jobs.")
-        lines = [f"• {job.id} → next at {job.next_run_time}" for job in jobs]
-        await message.reply_text("🗓 Scheduled jobs:\n" + "\n".join(lines))
-
-    @app.on_message(filters.command("cancelschedule") & CHAT_FILTER)
-    async def cancel_schedule(client, message: Message):
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2:
-            return await message.reply_text("Usage: /cancelschedule <job_id>")
-        job_id = parts[1].strip()
-        try:
-            scheduler.remove_job(job_id)
-            await message.reply_text(f"✅ Cancelled scheduled job `{job_id}`")
-        except Exception:
-            await message.reply_text(f"❌ No scheduled job found with ID `{job_id}`")
+if __name__ == "__main__":
+    main()
