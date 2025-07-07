@@ -1,24 +1,9 @@
 import os
 import logging
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
+import time
 from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
-
-# ─── Health-check HTTP server ──────────────────────────────────────────
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-
-def run_health_server():
-    port = int(os.environ.get("PORT", 8000))
-    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
-
-# fire it off in a daemon thread so Railway’s health-checks succeed
-Thread(target=run_health_server, daemon=True).start()
 
 # ─── Load environment ───────────────────────────────────────────────────
 load_dotenv()
@@ -67,8 +52,14 @@ def main():
     register_flyer(app)
 
     logger.info("✅ SuccuBot is starting up…")
-    app.run()
-    logger.info("🛑 SuccuBot has stopped")
+    try:
+        app.run()
+    except Exception as e:
+        logger.exception("❌ app.run() exited with exception")
+    # if app.run() ever returns (it shouldn’t), don’t let the process die:
+    logger.warning("⚠️ app.run() has returned—entering keep-alive loop")
+    while True:
+        time.sleep(60)
 
 if __name__ == "__main__":
     main()
