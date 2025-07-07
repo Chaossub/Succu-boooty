@@ -23,8 +23,8 @@ async def is_admin(client, chat_id: int, user_id: int) -> bool:
     if user_id == SUPER_ADMIN_ID:
         return True
     try:
-        m = await client.get_chat_member(chat_id, user_id)
-        return m.status in ("administrator", "creator")
+        member = await client.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
     except:
         return False
 
@@ -40,14 +40,14 @@ def save_flyers(data):
         json.dump(data, f)
 
 def register(app):
-    # allow both groups and channels
+    # allow both groups/supergroups and channels
     CHAT_FILTER = filters.group | filters.channel
 
     @app.on_message(filters.command(["addflyer", "createflyer"]) & (filters.photo | filters.reply) & CHAT_FILTER)
     async def add_flyer(client, message: Message):
         if not await is_admin(client, message.chat.id, message.from_user.id):
             return await message.reply_text("❌ You must be an admin to add flyers.")
-        # determine photo source and text
+        # determine the photo source and raw text
         if message.reply_to_message and message.reply_to_message.photo:
             file_id = message.reply_to_message.photo.file_id
             raw     = message.text or ""
@@ -62,7 +62,10 @@ def register(app):
             )
         parts = raw.split(maxsplit=2)
         if len(parts) < 3:
-            return await message.reply_text("Please specify both a name and an ad text:\n/addflyer <name> <ad text>")
+            return await message.reply_text(
+                "Please specify both a name and an ad text:\n"
+                "/addflyer <name> <ad text>"
+            )
         name = parts[1].strip().lower()
         ad   = parts[2].strip()
         all_data  = load_flyers()
@@ -78,10 +81,16 @@ def register(app):
         if not await is_admin(client, message.chat.id, message.from_user.id):
             return await message.reply_text("❌ You must be an admin to change flyers.")
         if not (message.reply_to_message and message.reply_to_message.photo):
-            return await message.reply_text("Usage: reply to an image with /changeflyer <name> [new ad text]")
+            return await message.reply_text(
+                "Usage:\n"
+                "Reply to an image with /changeflyer <name> [new ad text]"
+            )
         parts = message.text.split(maxsplit=2)
         if len(parts) < 2:
-            return await message.reply_text("Please specify the flyer name:\n/changeflyer <name> [new ad text]")
+            return await message.reply_text(
+                "Please specify the flyer name:\n"
+                "/changeflyer <name> [new ad text]"
+            )
         name   = parts[1].strip().lower()
         new_ad = parts[2].strip() if len(parts) == 3 else None
         file_id = message.reply_to_message.photo.file_id
@@ -128,7 +137,11 @@ def register(app):
         entry = load_flyers().get(str(message.chat.id), {}).get(name)
         if not entry:
             return await message.reply_text(f"❌ No flyer named “{name}” found.")
-        await client.send_photo(message.chat.id, entry["file_id"], caption=entry["ad"])
+        await client.send_photo(
+            message.chat.id,
+            entry["file_id"],
+            caption=entry["ad"]
+        )
 
     @app.on_message(filters.command("scheduleflyer") & CHAT_FILTER)
     async def schedule_flyer(client, message: Message):
@@ -160,7 +173,9 @@ def register(app):
                 args=[message.chat.id, entry["file_id"]],
                 kwargs={"caption": entry["ad"]}
             )
-            return await message.reply_text(f"✅ Scheduled one-off flyer “{name}” for {run_date:%Y-%m-%d %H:%M}")
+            return await message.reply_text(
+                f"✅ Scheduled one-off flyer “{name}” for {run_date:%Y-%m-%d %H:%M}"
+            )
 
         # recurring fallback
         rec_parts = rest.split(maxsplit=1)
@@ -190,7 +205,9 @@ def register(app):
             for d in days_str.split(","):
                 tok = mapping.get(d.strip().lower())
                 if not tok:
-                    return await message.reply_text(f"❌ Invalid weekday: {d}\nUse Mon,Tue,... or daily.")
+                    return await message.reply_text(
+                        f"❌ Invalid weekday: {d}\nUse Mon,Tue,... or daily."
+                    )
                 dow.append(tok)
         scheduler.add_job(
             client.send_photo,
@@ -198,4 +215,26 @@ def register(app):
             args=[message.chat.id, entry["file_id"]],
             kwargs={"caption": entry["ad"]}
         )
-        return await message.reply_text(f"✅ Scheduled flyer “{name}” every {days_str} at {time_str}")
+        return await message.reply_text(
+            f"✅ Scheduled flyer “{name}” every {days_str} at {time_str}"
+        )
+
+    @app.on_message(filters.command("listjobs") & CHAT_FILTER)
+    async def list_jobs(client, message: Message):
+        jobs = scheduler.get_jobs()
+        if not jobs:
+            return await message.reply_text("🗓 No scheduled jobs.")
+        lines = [f"• {job.id} → next at {job.next_run_time} UTC" for job in jobs]
+        await message.reply_text("🗓 Scheduled jobs:\n" + "\n".join(lines))
+
+    @app.on_message(filters.command("cancelschedule") & CHAT_FILTER)
+    async def cancel_schedule(client, message: Message):
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            return await message.reply_text("Usage: /cancelschedule <job_id>")
+        job_id = parts[1].strip()
+        try:
+            scheduler.remove_job(job_id)
+            await message.reply_text(f"✅ Cancelled scheduled job `{job_id}`")
+        except Exception:
+            await message.reply_text(f"❌ No scheduled job found with ID `{job_id}`")
