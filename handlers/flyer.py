@@ -39,8 +39,8 @@ def save_flyers(data):
         json.dump(data, f)
 
 def register(app):
-    # match groups, supergroups, and channels
-    CHAT_FILTER = filters.chat_type(["group", "supergroup", "channel"])
+    # allow both group/supergroup and channels
+    CHAT_FILTER = filters.group | filters.channel
 
     @app.on_message(filters.command("addflyer") & (filters.photo | filters.reply) & CHAT_FILTER)
     async def add_flyer(client, message: Message):
