@@ -1,23 +1,30 @@
-import os
 import json
 import re
+import logging
 from datetime import datetime
+from pathlib import Path
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.cron import CronTrigger
-
 from pyrogram import filters
 from pyrogram.types import Message
 
-# ─── Config ────────────────────────────────────────────────────────────
-FLYER_PATH     = "data/flyers.json"
-SUPER_ADMIN_ID = 6964994611
-# ────────────────────────────────────────────────────────────────────────
+logger = logging.getLogger(__name__)
 
-# start a background scheduler in its own thread
+# ─── Config ────────────────────────────────────────────────────────────
+PROJECT_ROOT   = Path(__file__).resolve().parent.parent
+DATA_DIR       = PROJECT_ROOT / "data"
+FLYER_PATH     = DATA_DIR / "flyers.json"
+SUPER_ADMIN_ID = 6964994611
+
+# ensure data dir exists
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# start a background scheduler
 scheduler = BackgroundScheduler()
 scheduler.start()
+
 
 async def is_admin(client, chat_id: int, user_id: int) -> bool:
     if user_id == SUPER_ADMIN_ID:
@@ -28,19 +35,22 @@ async def is_admin(client, chat_id: int, user_id: int) -> bool:
     except:
         return False
 
+
 def load_flyers():
-    if not os.path.exists(FLYER_PATH):
+    if not FLYER_PATH.exists():
         return {}
     with open(FLYER_PATH, "r") as f:
         return json.load(f)
 
+
 def save_flyers(data):
-    os.makedirs(os.path.dirname(FLYER_PATH), exist_ok=True)
     with open(FLYER_PATH, "w") as f:
         json.dump(data, f)
+    logger.debug(f"📂 Saved flyers.json: {data}")
+
 
 def register(app):
-    # allow both group/supergroup and channel contexts
+    # allow both groups/supergroups and channels
     CHAT_FILTER = filters.group | filters.channel
 
     @app.on_message(filters.command(["addflyer", "createflyer"]) & (filters.photo | filters.reply) & CHAT_FILTER)
@@ -160,10 +170,9 @@ def register(app):
         if not entry:
             return await message.reply_text(f"❌ No flyer named “{name}” found.")
 
-        # One-off detection
+        # one-off detection
         date_part, time_part = (rest.split(" ", 1) + [None])[:2]
         if date_part and re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", date_part):
-            # normalize and parse
             y, m, d = date_part.split("-")
             dt_str = f"{y}-{m.zfill(2)}-{d.zfill(2)} {time_part}"
             try:
@@ -180,7 +189,7 @@ def register(app):
                 f"✅ Scheduled one-off flyer “{name}” (job id: {job.id}) for {run_date:%Y-%m-%d %H:%M}"
             )
 
-        # Recurring fallback
+        # recurring fallback
         rec_parts = rest.split(maxsplit=1)
         if len(rec_parts) < 2:
             return await message.reply_text(
@@ -201,13 +210,17 @@ def register(app):
             'sat':'sat','saturday':'sat',
             'sun':'sun','sunday':'sun'
         }
-        dow = mapping.values() if days_str.lower()=="daily" else [
-            mapping.get(d.strip().lower()) for d in days_str.split(",")
-        ]
-        if any(d is None for d in dow):
-            return await message.reply_text(
-                "❌ Invalid weekdays. Use Mon,Tue,... or daily."
-            )
+        if days_str.lower() == "daily":
+            dow = list(mapping.values())
+        else:
+            dow = []
+            for d in days_str.split(","):
+                tok = mapping.get(d.strip().lower())
+                if not tok:
+                    return await message.reply_text(
+                        "❌ Invalid weekdays. Use Mon,Tue,... or daily."
+                    )
+                dow.append(tok)
         job = scheduler.add_job(
             client.send_photo,
             trigger=CronTrigger(day_of_week=",".join(dow), hour=hour, minute=minute),
