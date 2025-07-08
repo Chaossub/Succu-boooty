@@ -3,10 +3,9 @@ import logging
 import pkgutil
 import importlib
 import inspect
-
 from pymongo import MongoClient
 from pyrogram import Client
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ─── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -15,42 +14,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Env ────────────────────────────────────────────────────────────────────
-API_ID     = os.environ["API_ID"]
-API_HASH   = os.environ["API_HASH"]
-BOT_TOKEN  = os.environ["BOT_TOKEN"]
-MONGO_URI  = os.environ["MONGO_URI"]
-MONGO_DB   = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
-SCHED_TZ   = os.environ.get("SCHEDULER_TZ", "UTC")
-RAW_WHITE  = os.environ.get("FLYER_WHITELIST", "")
-WHITELIST  = [int(x) for x in RAW_WHITE.split(",") if x.strip()]
+# ─── Environment Variables ─────────────────────────────────────────────────
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+MONGO_URI = os.environ["MONGO_URI"]
+MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
+SCHED_TZ = os.environ.get("SCHEDULER_TZ", "UTC")
+RAW_WHITE = os.environ.get("FLYER_WHITELIST", "")
+WHITELIST = [int(x) for x in RAW_WHITE.split(",") if x.strip()]
 
-# ─── Init clients ───────────────────────────────────────────────────────────
+# ─── Initialize MongoDB Client ──────────────────────────────────────────────
 mongo_client = MongoClient(MONGO_URI)
-db           = mongo_client[MONGO_DB]
+db = mongo_client[MONGO_DB]
 
+# ─── Initialize Pyrogram Client ─────────────────────────────────────────────
 app = Client(
     "bot",
-    api_id=int(API_ID),
+    api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
 )
 
-scheduler = BackgroundScheduler(timezone=SCHED_TZ)
-scheduler.start()
+# ─── Initialize AsyncIOScheduler ────────────────────────────────────────────
+scheduler = AsyncIOScheduler(timezone=SCHED_TZ)
 
-# ─── Dynamic handler registration ───────────────────────────────────────────
+# ─── Dynamic Handler Registration ───────────────────────────────────────────
 handlers_dir = os.path.join(os.path.dirname(__file__), "handlers")
+
 for _, module_name, _ in pkgutil.iter_modules([handlers_dir]):
     module = importlib.import_module(f"handlers.{module_name}")
     if not hasattr(module, "register"):
         continue
 
-    sig    = inspect.signature(module.register)
+    sig = inspect.signature(module.register)
     params = sig.parameters
     kwargs = {}
 
-    # bind the bot/client/app instance
+    # Bind the app instance
     for name in ("app", "bot", "client"):
         if name in params:
             kwargs[name] = app
@@ -66,7 +67,13 @@ for _, module_name, _ in pkgutil.iter_modules([handlers_dir]):
     module.register(**kwargs)
     logger.info(f"Registered handler: handlers.{module_name}.register")
 
-# ─── Run ────────────────────────────────────────────────────────────────────
+# ─── Start Scheduler on Bot Startup ─────────────────────────────────────────
+@app.on_event("startup")
+async def on_startup():
+    scheduler.start()
+    logger.info("⏰ Scheduler started.")
+
+# ─── Run Bot ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     logger.info("📥 All handlers registered. Starting bot…")
     app.run()
