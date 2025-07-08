@@ -1,9 +1,25 @@
 import os
 import logging
 import time
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
+
+# ─── Health-check HTTP server ──────────────────────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8000))
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+
+# Start the health-check server in a background thread
+Thread(target=run_health_server, daemon=True).start()
 
 # ─── Load environment ───────────────────────────────────────────────────
 load_dotenv()
