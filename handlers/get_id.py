@@ -1,8 +1,7 @@
-# handlers/get_id.py
-from pyrogram import filters
+from pyrogram import filters, Client
 from pyrogram.types import Message
-from main import app
 
-@app.on_message(filters.command("id") & (filters.group | filters.channel))
-async def send_chat_id(client, message: Message):
-    await message.reply_text(f"Chat ID: `{message.chat.id}`", quote=True)
+def register(app: Client):
+    @app.on_message(filters.command("getid"))
+    async def get_id(_, message: Message):
+        await message.reply_text(f"Your ID: `{message.from_user.id}`\nChat ID: `{message.chat.id}`", parse_mode="markdown")
