@@ -13,6 +13,9 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
@@ -72,7 +75,7 @@ def main():
         app.run()
     except Exception:
         logger.exception("❌ app.run() exited unexpectedly")
-    # If for any reason app.run() returns, keep the process alive
+    # If app.run() ever returns or crashes, keep the process alive
     logger.warning("⚠️ app.run() has returned — entering keep-alive loop")
     while True:
         time.sleep(60)
