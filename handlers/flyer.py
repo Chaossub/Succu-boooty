@@ -101,5 +101,32 @@ def register(app: Client):
             return await message.reply_text(f"❌ No scheduled flyer '{name}' found.")
         for job in jobs:
             scheduler.remove_job(job.id)
-        await message.reply_text(f"✅ Canceled {len(jobs)} job(s) for '_
+        await message.reply_text(f"✅ Canceled {len(jobs)} job(s) for '{name}'.")
+
+    @app.on_message(filters.command("listflyers") & CHAT_FILTER)
+    async def list_flyers(client, message: Message):
+        docs = flyers_col.find({"chat_id": message.chat.id})
+        names = [doc["name"] for doc in docs]
+        if not names:
+            return await message.reply_text("No flyers created yet. Use /createflyer.")
+        text = "📋 Created flyers:\n" + "\n".join(f"- {n}" for n in names)
+        await message.reply_text(text)
+
+    @app.on_message(filters.command("helpflyer") & CHAT_FILTER)
+    async def help_flyer(client, message: Message):
+        help_text = (
+            "📋 **Flyer Commands**\n\n"
+            "`/createflyer <name>` — Create or update a flyer (attach image)\n"
+            "`/scheduleflyer <name> YYYY-MM-DD HH:MM` — Schedule it to post\n"
+            "`/cancelflyer <name>` — Cancel scheduled run(s)\n"
+            "`/listflyers` — List all created flyers\n"
+        )
+        await message.reply_text(help_text, parse_mode="markdown")
+
+    # Start scheduler once Pyrogram client has fully started
+    @app.on_event("startup")
+    async def start_scheduler():
+        scheduler.start()
+
+__all__ = ["register"]
 
