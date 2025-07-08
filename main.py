@@ -1,4 +1,4 @@
-# main.py
+# main.py (fully corrected)
 import os
 import logging
 import pkgutil
@@ -62,7 +62,7 @@ for _, module_name, _ in pkgutil.iter_modules([handlers_dir]):
     logger.info(f"Registered handler: handlers.{module_name}.register")
 
 if __name__ == "__main__":
-    scheduler.start()
+    scheduler.start()  # Explicitly start scheduler here
     logger.info("⏰ Scheduler started.")
     logger.info("📥 All handlers registered. Starting bot…")
     app.run()
