@@ -1,68 +1,60 @@
-# main.py (fully corrected)
 import os
 import logging
-import pkgutil
 import importlib
-import inspect
-from pymongo import MongoClient
+import pkgutil
 from pyrogram import Client
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pyrogram.enums import ParseMode
+from apscheduler.schedulers.background import BackgroundScheduler
+from fastapi import FastAPI
+import uvicorn
+import threading
 
+# ─── Logging ───────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("main")
 
+# ─── Env Setup ─────────────────────────────────────────────────────
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-MONGO_URI = os.environ["MONGO_URI"]
-MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
-SCHED_TZ = os.environ.get("SCHEDULER_TZ", "UTC")
-RAW_WHITE = os.environ.get("FLYER_WHITELIST", "")
-WHITELIST = [int(x) for x in RAW_WHITE.split(",") if x.strip()]
 
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB]
-
+# ─── Pyrogram Client ───────────────────────────────────────────────
 app = Client(
-    "bot",
+    "SuccuBot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML
 )
 
-scheduler = AsyncIOScheduler(timezone=SCHED_TZ)
+# ─── Scheduler ─────────────────────────────────────────────────────
+scheduler = BackgroundScheduler()
+scheduler.start()
+logger.info("⏰ Scheduler started.")
 
-handlers_dir = os.path.join(os.path.dirname(__file__), "handlers")
+# ─── Healthcheck Server (for Railway) ──────────────────────────────
+fastapi_app = FastAPI()
 
-for _, module_name, _ in pkgutil.iter_modules([handlers_dir]):
+@fastapi_app.get("/")
+async def root():
+    return {"status": "ok"}
+
+def run_health_server():
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=8000)
+
+threading.Thread(target=run_health_server, daemon=True).start()
+logger.info("✅ Health server running. Starting bot...")
+
+# ─── Handler Loader ────────────────────────────────────────────────
+for module_info in pkgutil.iter_modules(["handlers"]):
+    module_name = module_info.name
     module = importlib.import_module(f"handlers.{module_name}")
-    if not hasattr(module, "register"):
-        continue
+    if hasattr(module, "register"):
+        module.register(app)
+        logger.info(f"Registered handler: handlers.{module_name}.register")
 
-    sig = inspect.signature(module.register)
-    params = sig.parameters
-    kwargs = {}
-
-    for name in ("app", "bot", "client"):
-        if name in params:
-            kwargs[name] = app
-            break
-
-    if "scheduler" in params:
-        kwargs["scheduler"] = scheduler
-    if "db" in params:
-        kwargs["db"] = db
-    if "whitelist" in params:
-        kwargs["whitelist"] = WHITELIST
-
-    module.register(**kwargs)
-    logger.info(f"Registered handler: handlers.{module_name}.register")
-
-if __name__ == "__main__":
-    scheduler.start()  # Explicitly start scheduler here
-    logger.info("⏰ Scheduler started.")
-    logger.info("📥 All handlers registered. Starting bot…")
-    app.run()
+# ─── Run the Bot ───────────────────────────────────────────────────
+app.run()
