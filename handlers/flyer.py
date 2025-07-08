@@ -1,98 +1,81 @@
 import os
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
+from pyrogram import filters
+from pyrogram.types import Message
 from pymongo import MongoClient
-from pyrogram import filters, Client
-from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime
 
-# ─── ENV / DB SETUP ────────────────────────────────────────────────────────────
+# --- Chat filter: only basic groups & supergroups ---
+def _is_group_chat(_, __, message: Message):
+    return bool(message.chat and message.chat.type in ("group", "supergroup"))
 
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DBNAME = os.getenv("MONGO_DBNAME")
-if not MONGO_URI or not MONGO_DBNAME:
-    raise RuntimeError("MONGO_URI and MONGO_DBNAME must be set")
+CHAT_FILTER = filters.create(_is_group_chat)
 
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DBNAME]
-flyers_col = db.flyers
-
+# --- Whitelist of chats (set as comma-separated IDs in env) ---
 FLYER_WHITELIST = os.getenv("FLYER_WHITELIST", "")
-# parse CSV of chat-IDs into a set of ints
-WHITELISTED_CHAT_IDS = {
-    int(cid.strip())
-    for cid in FLYER_WHITELIST.split(",")
-    if cid.strip()
+WHITELIST_IDS = {
+    int(cid)
+    for cid in (x.strip() for x in FLYER_WHITELIST.split(","))
+    if cid and cid.lstrip("-").isdigit()
 }
 
-# ─── CHAT FILTER ──────────────────────────────────────────────────────────────
+# --- MongoDB setup (env-driven) ---
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB  = os.getenv("MONGO_DB_NAME")
+if not MONGO_URI or not MONGO_DB:
+    raise RuntimeError("MONGO_URI and MONGO_DB_NAME must be set in env")
 
-# only allow group-type chats (includes supergroups) & channels
-CHAT_FILTER = filters.chat_type.groups  # matches both basic groups & supergroups
-# if you also want channels, use:
-# CHAT_FILTER = filters.chat_type.groups | filters.chat_type.channels
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client[MONGO_DB]
+flyers = db.flyers
 
-# ─── HEALTH SERVER ────────────────────────────────────────────────────────────
+def register(app, scheduler):
+    # Health-check server on HEALTH_PORT (default 8080)
+    def run_health_server():
+        class HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"OK")
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-def run_health_server():
-    port = int(os.getenv("PORT", "8080"))
-    try:
-        HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
-    except OSError as e:
-        # already in use → skip
-        print(f"[flyer] health server not started (port {port} in use): {e!r}")
-
-threading.Thread(target=run_health_server, daemon=True).start()
-
-# ─── BOT / SCHEDULER SETUP ────────────────────────────────────────────────────
-
-app = Client("flyer_bot")
-scheduler = BackgroundScheduler(timezone=os.getenv("SCHEDULER_TZ", "UTC"))
-
-def post_scheduled_flyers():
-    now = datetime.utcnow()
-    for flyer in flyers_col.find({"when": {"$lte": now}, "posted": False}):
-        chat_id = flyer["chat_id"]
-        if chat_id not in WHITELISTED_CHAT_IDS:
-            continue
-
-        app.send_message(chat_id, flyer["text"], **flyer.get("options", {}))
-        flyers_col.update_one({"_id": flyer["_id"]}, {"$set": {"posted": True}})
-
-scheduler.add_job(post_scheduled_flyers, "interval", minutes=1)
-scheduler.start()
-
-# ─── HANDLER REGISTER ─────────────────────────────────────────────────────────
-
-def register():
-    @app.on_message(CHAT_FILTER & filters.command("flyer"))
-    def schedule_flyer(client, message):
-        """
-        Usage: /flyer YYYY-MM-DD HH:MM Your message here...
-        """
+        port = int(os.getenv("HEALTH_PORT", 8080))
         try:
-            _, date_str, time_str, *text = message.text.split()
-            dt = datetime.fromisoformat(f"{date_str}T{time_str}")
-        except Exception:
-            return message.reply("Usage: `/flyer YYYY-MM-DD HH:MM Your message...`", quote=True)
+            HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+        except OSError:
+            app.logger.warning("[flyer] health server not started (port %d in use)", port)
 
-        flyers_col.insert_one({
-            "chat_id": message.chat.id,
-            "when": dt,
-            "text": " ".join(text),
-            "options": {},
-            "posted": False
+    threading.Thread(target=run_health_server, daemon=True).start()
+
+    @app.on_message(CHAT_FILTER & filters.command("flyer"))
+    async def add_flyer(client, message: Message):
+        chat_id = message.chat.id
+        if chat_id not in WHITELIST_IDS:
+            return  # ignore non-whitelisted chats
+
+        # Save flyer info to MongoDB
+        flyers.insert_one({
+            "chat_id": chat_id,
+            "user_id": message.from_user.id if message.from_user else None,
+            "text": message.text or "",
+            "timestamp": message.date.timestamp()
         })
-        message.reply(f"Scheduled flyer for {dt.isoformat()}", quote=True)
+        await message.reply("✅ Flyer logged!")
 
-# ─── EXPORT ───────────────────────────────────────────────────────────────────
+    # Scheduled daily broadcast (e.g. 9:00 AM UTC)
+    def broadcast_flyers():
+        for chat_id in WHITELIST_IDS:
+            items = list(flyers.find({"chat_id": chat_id}))
+            if not items:
+                continue
 
-register()
-app.run()
+            lines = []
+            for f in items:
+                lines.append(f"- {f['text']}")
+            body = "📢 Today's flyers:\n\n" + "\n".join(lines)
+            try:
+                app.send_message(chat_id, body)
+            except Exception as e:
+                app.logger.error("[flyer] failed to broadcast to %d: %s", chat_id, e)
+
+    scheduler.add_job(broadcast_flyers, "cron", hour=int(os.getenv("FLYER_HOUR", "9")), minute=0)
