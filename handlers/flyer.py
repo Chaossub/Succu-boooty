@@ -1,81 +1,105 @@
 import os
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import asyncio
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from datetime import datetime
 
-from pyrogram import filters
-from pyrogram.types import Message
 from pymongo import MongoClient
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pyrogram import filters, Client
+from pyrogram.types import Message
 
-# --- Chat filter: only basic groups & supergroups ---
-def _is_group_chat(_, __, message: Message):
-    return bool(message.chat and message.chat.type in ("group", "supergroup"))
-
-CHAT_FILTER = filters.create(_is_group_chat)
-
-# --- Whitelist of chats (set as comma-separated IDs in env) ---
-FLYER_WHITELIST = os.getenv("FLYER_WHITELIST", "")
-WHITELIST_IDS = {
-    int(cid)
-    for cid in (x.strip() for x in FLYER_WHITELIST.split(","))
-    if cid and cid.lstrip("-").isdigit()
-}
-
-# --- MongoDB setup (env-driven) ---
+# ─── MongoDB setup ────────────────────────────────────────────────────────
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB  = os.getenv("MONGO_DB_NAME")
-if not MONGO_URI or not MONGO_DB:
-    raise RuntimeError("MONGO_URI and MONGO_DB_NAME must be set in env")
+MONGO_DBNAME = os.getenv("MONGO_DBNAME")
+
+if not MONGO_URI or not MONGO_DBNAME:
+    raise RuntimeError("MONGO_URI and MONGO_DBNAME must both be set")
 
 mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB]
-flyers = db.flyers
+db = mongo_client[MONGO_DBNAME]
+flyers_col = db["flyers"]
 
-def register(app, scheduler):
-    # Health-check server on HEALTH_PORT (default 8080)
-    def run_health_server():
-        class HealthHandler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"OK")
+# ─── Health server (for Railway) ─────────────────────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
 
-        port = int(os.getenv("HEALTH_PORT", 8080))
+def run_health_server():
+    port = int(os.getenv("PORT", 8080))
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+
+threading.Thread(target=run_health_server, daemon=True).start()
+
+# ─── Scheduler ───────────────────────────────────────────────────────────
+scheduler = AsyncIOScheduler()
+
+# ─── Registration ────────────────────────────────────────────────────────
+def register(app: Client):
+    CHAT_FILTER = filters.group | filters.channel
+
+    @app.on_message(filters.command("createflyer") & CHAT_FILTER)
+    async def create_flyer(client, message: Message):
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2 or not message.photo:
+            return await message.reply_text("Usage: /createflyer <name> (attach image)")
+        name = args[1].strip()
+        file_id = message.photo.file_id
+
+        flyers_col.update_one(
+            {"chat_id": message.chat.id, "name": name},
+            {"$set": {
+                "chat_id": message.chat.id,
+                "name": name,
+                "file_id": file_id,
+                "created_by": message.from_user.id,
+                "created_at": message.date
+            }},
+            upsert=True
+        )
+        await message.reply_text(f"✅ Flyer '{name}' created!")
+
+    @app.on_message(filters.command("scheduleflyer") & CHAT_FILTER)
+    async def schedule_flyer(client, message: Message):
+        parts = message.text.split()
+        if len(parts) != 4:
+            return await message.reply_text("Usage: /scheduleflyer <name> YYYY-MM-DD HH:MM")
+        _, name, date_str, time_str = parts
+
+        doc = flyers_col.find_one({"chat_id": message.chat.id, "name": name})
+        if not doc:
+            return await message.reply_text(f"❌ No flyer named '{name}'. Use /createflyer first.")
+
         try:
-            HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
-        except OSError:
-            app.logger.warning("[flyer] health server not started (port %d in use)", port)
+            run_dt = datetime.fromisoformat(f"{date_str} {time_str}")
+        except ValueError:
+            return await message.reply_text("❌ Invalid date/time format. Use YYYY-MM-DD HH:MM")
 
-    threading.Thread(target=run_health_server, daemon=True).start()
+        job_id = f"flyer_{message.chat.id}_{name}_{int(run_dt.timestamp())}"
 
-    @app.on_message(CHAT_FILTER & filters.command("flyer"))
-    async def add_flyer(client, message: Message):
-        chat_id = message.chat.id
-        if chat_id not in WHITELIST_IDS:
-            return  # ignore non-whitelisted chats
+        scheduler.add_job(
+            func=lambda chat_id, file_id: asyncio.create_task(client.send_photo(chat_id, file_id)),
+            trigger="date",
+            run_date=run_dt,
+            args=[message.chat.id, doc["file_id"]],
+            id=job_id,
+            replace_existing=True
+        )
+        await message.reply_text(f"✅ Scheduled flyer '{name}' for {run_dt.isoformat(sep=' ')} UTC")
 
-        # Save flyer info to MongoDB
-        flyers.insert_one({
-            "chat_id": chat_id,
-            "user_id": message.from_user.id if message.from_user else None,
-            "text": message.text or "",
-            "timestamp": message.date.timestamp()
-        })
-        await message.reply("✅ Flyer logged!")
+    @app.on_message(filters.command("cancelflyer") & CHAT_FILTER)
+    async def cancel_flyer(client, message: Message):
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            return await message.reply_text("Usage: /cancelflyer <name>")
+        name = args[1].strip()
 
-    # Scheduled daily broadcast (e.g. 9:00 AM UTC)
-    def broadcast_flyers():
-        for chat_id in WHITELIST_IDS:
-            items = list(flyers.find({"chat_id": chat_id}))
-            if not items:
-                continue
+        jobs = [job for job in scheduler.get_jobs() if f"{message.chat.id}_{name}_" in job.id]
+        if not jobs:
+            return await message.reply_text(f"❌ No scheduled flyer '{name}' found.")
+        for job in jobs:
+            scheduler.remove_job(job.id)
+        await message.reply_text(f"✅ Canceled {len(jobs)} job(s) for '_
 
-            lines = []
-            for f in items:
-                lines.append(f"- {f['text']}")
-            body = "📢 Today's flyers:\n\n" + "\n".join(lines)
-            try:
-                app.send_message(chat_id, body)
-            except Exception as e:
-                app.logger.error("[flyer] failed to broadcast to %d: %s", chat_id, e)
-
-    scheduler.add_job(broadcast_flyers, "cron", hour=int(os.getenv("FLYER_HOUR", "9")), minute=0)
