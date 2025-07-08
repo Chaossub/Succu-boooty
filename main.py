@@ -2,6 +2,7 @@ import os
 import logging
 import pkgutil
 import importlib
+import inspect
 
 from pymongo import MongoClient
 from pyrogram import Client
@@ -46,18 +47,22 @@ scheduler = BackgroundScheduler(timezone=SCHEDULER_TZ)
 scheduler.start()
 
 # ─── Dynamically import all handlers ────────────────────────────────────────
-# Any .py in handlers/ that defines `register(...)` will get hooked up.
 whitelist = [int(x) for x in raw_whitelist.split(",") if x.strip()]
 
-for finder, name, ispkg in pkgutil.iter_modules([os.path.join(os.path.dirname(__file__), "handlers")]):
+handlers_pkg = os.path.join(os.path.dirname(__file__), "handlers")
+for finder, name, ispkg in pkgutil.iter_modules([handlers_pkg]):
     module = importlib.import_module(f"handlers.{name}")
     if hasattr(module, "register"):
-        # signature: register(bot, scheduler=None, db=None, whitelist=None, …)
-        kwargs = {"bot": app, "db": db, "scheduler": scheduler, "whitelist": whitelist}
-        # prune any unused keys
-        sig = importlib.signature(module.register)
-        filtered = {k: v for k, v in kwargs.items() if k in sig.parameters}
-        module.register(**filtered)
+        # Build kwargs only for parameters the handler wants
+        sig = inspect.signature(module.register)
+        params = sig.parameters
+        kwargs = {}
+        if "bot" in params:       kwargs["bot"] = app
+        if "scheduler" in params: kwargs["scheduler"] = scheduler
+        if "db" in params:        kwargs["db"] = db
+        if "whitelist" in params: kwargs["whitelist"] = whitelist
+
+        module.register(**kwargs)
         logger.info(f"Registered handler: handlers.{name}.register")
 
 # ─── Start ──────────────────────────────────────────────────────────────────
