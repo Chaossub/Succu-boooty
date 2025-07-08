@@ -1,79 +1,39 @@
 import os
 import logging
-from pymongo import MongoClient
-from pyrogram import Client
 from apscheduler.schedulers.background import BackgroundScheduler
+from pyrogram import Client, filters
+from handlers.flyer import register as register_flyer
 
-# ─── Logging ────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-    level=logging.INFO,
-)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─── Environment ────────────────────────────────────────────────────────────
-# Telegram
-API_ID   = os.environ.get("API_ID")
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
+# Load environment variables
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SCHEDULER_TZ = os.getenv("SCHEDULER_TZ", "UTC")
 
 if not all([API_ID, API_HASH, BOT_TOKEN]):
-    logger.error("Missing one of: API_ID, API_HASH, BOT_TOKEN")
-    raise RuntimeError("Please set API_ID, API_HASH and BOT_TOKEN in env")
+    raise RuntimeError("API_ID, API_HASH, and BOT_TOKEN must be set in env")
 
-# Mongo
-MONGO_URI = os.environ.get("MONGO_URI")
-# support either MONGO_DB_NAME or MONGO_DBNAME
-MONGO_DB_NAME = (
-    os.environ.get("MONGO_DB_NAME")
-    or os.environ.get("MONGO_DBNAME")
-)
-
-if not MONGO_URI or not MONGO_DB_NAME:
-    logger.error(
-        f"MONGO_URI={bool(MONGO_URI)}, "
-        f"MONGO_DB_NAME={bool(MONGO_DB_NAME)}"
-    )
-    raise RuntimeError("Please set MONGO_URI and MONGO_DB_NAME (or MONGO_DBNAME) in env")
-
-# Scheduler timezone (optional)
-SCHEDULER_TZ = os.environ.get("SCHEDULER_TZ", "UTC")
-
-# ─── Initialize Mongo ────────────────────────────────────────────────────────
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB_NAME]  # explicit database selection
-
-# ─── Initialize Telegram Bot ────────────────────────────────────────────────
+# Initialize Pyrogram client
 app = Client(
-    "bot",
-    api_id=int(API_ID),
+    "succu_bot",
+    api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
 )
 
-# ─── Initialize Scheduler ───────────────────────────────────────────────────
+# Initialize APScheduler
 scheduler = BackgroundScheduler(timezone=SCHEDULER_TZ)
 scheduler.start()
+logger.info("Scheduler started")
 
-# ─── Register Handlers ──────────────────────────────────────────────────────
-# flyer_handler.register(app, scheduler, db, whitelist=FLYER_WHITELIST)
-# (import your flyer handler and pass along `db` and any other config)
+# Register commands/handlers from flyer.py
+# NOTE: use positional args to match signature
+register_flyer(app, scheduler)
 
-from handlers.flyer import register as register_flyer
-
-# If you have a FLYER_WHITELIST env var (comma-separated IDs):
-raw = os.environ.get("FLYER_WHITELIST", "")
-whitelist = [int(cid.strip()) for cid in raw.split(",") if cid.strip()]
-
-register_flyer(
-    bot=app,
-    scheduler=scheduler,
-    db=db,
-    whitelist=whitelist,
-)
-
-# ─── Run ────────────────────────────────────────────────────────────────────
+# Start the bot
 if __name__ == "__main__":
-    logger.info("📥 Registering handlers…")
-    logger.info("✅ Bot is starting up…")
     app.run()
