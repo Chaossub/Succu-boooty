@@ -1,52 +1,79 @@
 import os
 import logging
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pymongo import MongoClient
-from dotenv import load_dotenv
 from pyrogram import Client
+from apscheduler.schedulers.background import BackgroundScheduler
 
-# Load .env into os.environ (only if running locally; Railway injects its own env)
-load_dotenv()
+# ─── Logging ────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
 
-# Telegram credentials
-API_ID    = int(os.environ["API_ID"])
-API_HASH  = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+# ─── Environment ────────────────────────────────────────────────────────────
+# Telegram
+API_ID   = os.environ.get("API_ID")
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# MongoDB connection
-MONGO_URI    = os.environ["MONGO_URI"]
-MONGO_DBNAME = os.environ.get("MONGO_DB_NAME", "")  # e.g. "chaossunflowerbusiness321"
-if not MONGO_DBNAME:
-    raise RuntimeError("Please set MONGO_DB_NAME in env")
+if not all([API_ID, API_HASH, BOT_TOKEN]):
+    logger.error("Missing one of: API_ID, API_HASH, BOT_TOKEN")
+    raise RuntimeError("Please set API_ID, API_HASH and BOT_TOKEN in env")
+
+# Mongo
+MONGO_URI = os.environ.get("MONGO_URI")
+# support either MONGO_DB_NAME or MONGO_DBNAME
+MONGO_DB_NAME = (
+    os.environ.get("MONGO_DB_NAME")
+    or os.environ.get("MONGO_DBNAME")
+)
+
+if not MONGO_URI or not MONGO_DB_NAME:
+    logger.error(
+        f"MONGO_URI={bool(MONGO_URI)}, "
+        f"MONGO_DB_NAME={bool(MONGO_DB_NAME)}"
+    )
+    raise RuntimeError("Please set MONGO_URI and MONGO_DB_NAME (or MONGO_DBNAME) in env")
+
+# Scheduler timezone (optional)
+SCHEDULER_TZ = os.environ.get("SCHEDULER_TZ", "UTC")
+
+# ─── Initialize Mongo ────────────────────────────────────────────────────────
 mongo_client = MongoClient(MONGO_URI)
-db           = mongo_client.get_database(MONGO_DBNAME)
-flyers_col   = db["flyers"]
+db = mongo_client[MONGO_DB_NAME]  # explicit database selection
 
-# Chat‐ID whitelist for scheduled flyer posts
-# e.g. " -10012345, -10067890 "
-whitelist_env = os.environ.get("FLYER_WHITELIST", "")
-FLYER_WHITELIST = [
-    int(chat_id.strip())
-    for chat_id in whitelist_env.split(",")
-    if chat_id.strip()
-]
+# ─── Initialize Telegram Bot ────────────────────────────────────────────────
+app = Client(
+    "bot",
+    api_id=int(API_ID),
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+)
 
-# Set up Pyrogram & scheduler
-app       = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-scheduler = AsyncIOScheduler()
+# ─── Initialize Scheduler ───────────────────────────────────────────────────
+scheduler = BackgroundScheduler(timezone=SCHEDULER_TZ)
 scheduler.start()
 
-# Import and register handlers
-# handlers/flyer.py must expose:
-#   def register(app: Client, scheduler, collection, whitelist: List[int])
+# ─── Register Handlers ──────────────────────────────────────────────────────
+# flyer_handler.register(app, scheduler, db, whitelist=FLYER_WHITELIST)
+# (import your flyer handler and pass along `db` and any other config)
+
 from handlers.flyer import register as register_flyer
-register_flyer(app, scheduler, flyers_col, FLYER_WHITELIST)
 
-# handlers/get_id.py automatically registers the /id command via decorator
-import handlers.get_id  # noqa: F401
+# If you have a FLYER_WHITELIST env var (comma-separated IDs):
+raw = os.environ.get("FLYER_WHITELIST", "")
+whitelist = [int(cid.strip()) for cid in raw.split(",") if cid.strip()]
 
+register_flyer(
+    bot=app,
+    scheduler=scheduler,
+    db=db,
+    whitelist=whitelist,
+)
+
+# ─── Run ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s | %(levelname)s | %(message)s")
+    logger.info("📥 Registering handlers…")
+    logger.info("✅ Bot is starting up…")
     app.run()
