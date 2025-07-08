@@ -13,15 +13,22 @@ class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
+
     def do_HEAD(self):
         self.send_response(200)
         self.end_headers()
 
+    # suppress default logging to stderr (optional)
+    def log_message(self, format, *args):
+        pass
+
 def run_health_server():
     port = int(os.environ.get("PORT", 8000))
-    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+    logging.getLogger("health").info(f"Health server listening on port {port}")
+    # bind to '' to cover both IPv4 and IPv6
+    HTTPServer(("", port), HealthHandler).serve_forever()
 
-# start health‐check listener
+# start the health‐check listener in a daemon thread
 Thread(target=run_health_server, daemon=True).start()
 
 # ─── Load environment ────────────────────────────────────────────────────
@@ -75,8 +82,8 @@ def main():
         app.run()
     except Exception:
         logger.exception("❌ app.run() exited unexpectedly")
-    # If app.run() ever returns or crashes, keep the process alive
-    logger.warning("⚠️ app.run() has returned — entering keep-alive loop")
+    # If app.run() ever returns, keep the process alive
+    logger.warning("⚠️ app.run() returned—entering keep-alive loop")
     while True:
         time.sleep(60)
 
