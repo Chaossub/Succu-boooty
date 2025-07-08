@@ -1,122 +1,118 @@
 import os
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
+from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import filters
 from pyrogram.types import Message
-
 from pymongo import MongoClient
 
-# ─── Health server ─────────────────────────────────────────────────────
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
+# ── Configuration ────────────────────────────────────────────────────────────
+# MongoDB connection URI and DB name come from environment variables.
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB  = os.getenv("MONGO_DB", "chaossunflowerbusiness321")
 
-def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    try:
-        server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    except OSError as e:
-        print(f"[flyer] health server not started (port {port} in use): {e!r}")
-        return
-    server.serve_forever()
+if not MONGO_URI:
+    raise RuntimeError("Missing MONGO_URI environment variable")
 
-threading.Thread(target=run_health_server, daemon=True).start()
-
-
-# ─── MongoDB setup ─────────────────────────────────────────────────────
-MONGO_URI    = os.environ.get("MONGO_URI")
-MONGO_DBNAME = os.environ.get("MONGO_DBNAME")
-if not MONGO_URI or not MONGO_DBNAME:
-    raise RuntimeError("MONGO_URI and MONGO_DBNAME must both be set")
-
+# ── Database Setup ────────────────────────────────────────────────────────────
 mongo_client = MongoClient(MONGO_URI)
-db           = mongo_client[MONGO_DBNAME]
-flyers_col   = db["flyers"]
+db           = mongo_client[MONGO_DB]
+flyers_col   = db.flyers
 
-
-# ─── Scheduler ─────────────────────────────────────────────────────────
+# ── Scheduler Setup ──────────────────────────────────────────────────────────
 scheduler = AsyncIOScheduler()
-scheduler.start()
 
+# ── Helper to actually send a flyer ──────────────────────────────────────────
+async def _send_flyer(app, flyer: dict):
+    chat_id = flyer["chat_id"]
+    text    = flyer["text"]
+    photo   = flyer.get("photo")
+    if photo:
+        await app.send_photo(chat_id, photo, caption=text)
+    else:
+        await app.send_message(chat_id, text)
 
-# ─── Command Handlers ──────────────────────────────────────────────────
+# ── Registration of all commands ──────────────────────────────────────────────
 def register(app):
-    @app.on_message(filters.command("createflyer") & filters.group)
-    async def create_flyer(client, message: Message):
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2:
-            return await message.reply_text("Usage: /createflyer <name>")
-        name = parts[1].strip()
+    # Start the scheduler (so scheduled jobs will actually run)
+    scheduler.start()
+
+    @app.on_message(filters.command("addflyer") & filters.group)
+    async def addflyer(_, message: Message):
+        """
+        /addflyer <name> <text>
+        Or reply to a photo with /addflyer <name> <text>
+        """
+        parts = message.text.split(None, 2)
+        if len(parts) < 3:
+            return await message.reply_text("Usage: /addflyer <name> <text>")
+
+        name, text = parts[1], parts[2]
+        photo = None
+        # If replying to a photo, capture the file_id
+        if message.reply_to_message and message.reply_to_message.photo:
+            photo = message.reply_to_message.photo.file_id
+
         flyers_col.insert_one({
             "chat_id": message.chat.id,
-            "name": name,
-            "media": [],
-            "scheduled": []
+            "name":    name,
+            "text":    text,
+            "photo":   photo
         })
-        await message.reply_text(f"✅ Flyer '{name}' created.")
+        await message.reply_text(f"✅ Flyer **{name}** added.")
 
     @app.on_message(filters.command("listflyers") & filters.group)
-    async def list_flyers(client, message: Message):
+    async def listflyers(_, message: Message):
+        """
+        /listflyers
+        """
         docs = flyers_col.find({"chat_id": message.chat.id})
         names = [d["name"] for d in docs]
         if not names:
-            return await message.reply_text("No flyers found.")
-        await message.reply_text("📋 Flyers:\n" + "\n".join(names))
-
-    @app.on_message(filters.command("deleteflyer") & filters.group)
-    async def delete_flyer(client, message: Message):
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2:
-            return await message.reply_text("Usage: /deleteflyer <name>")
-        name = parts[1].strip()
-        res = flyers_col.delete_one({
-            "chat_id": message.chat.id,
-            "name": name
-        })
-        if res.deleted_count:
-            await message.reply_text(f"🗑️ Deleted flyer '{name}'.")
-        else:
-            await message.reply_text(f"No flyer named '{name}'.")
+            return await message.reply_text("No flyers found in this chat.")
+        await message.reply_text("📜 Available flyers:\n" + "\n".join(names))
 
     @app.on_message(filters.command("scheduleflyer") & filters.group)
-    async def schedule_flyer(client, message: Message):
-        parts = message.text.split(maxsplit=3)
-        if len(parts) < 4:
+    async def scheduleflyer(_, message: Message):
+        """
+        /scheduleflyer <name> YYYY-MM-DD HH:MM
+        """
+        parts = message.text.split(None, 3)
+        if len(parts) != 4:
             return await message.reply_text("Usage: /scheduleflyer <name> YYYY-MM-DD HH:MM")
+
         name, date_str, time_str = parts[1], parts[2], parts[3]
         try:
-            from datetime import datetime
-            dt = datetime.fromisoformat(f"{date_str}T{time_str}")
+            run_dt = datetime.fromisoformat(f"{date_str} {time_str}")
         except ValueError:
-            return await message.reply_text("❌ Invalid date/time. Use YYYY-MM-DD HH:MM")
-        flyer = flyers_col.find_one({"chat_id": message.chat.id, "name": name})
-        if not flyer:
-            return await message.reply_text(f"No flyer named '{name}'.")
-        def send_flyer():
-            app.send_photo(chat_id=message.chat.id, photo=flyer["media"][-1])
-        job = scheduler.add_job(send_flyer, "date", run_date=dt)
-        flyers_col.update_one(
-            {"_id": flyer["_id"]},
-            {"$push": {"scheduled": {"job_id": job.id, "run_date": dt}}}
-        )
-        await message.reply_text(f"⏰ Flyer '{name}' scheduled for {dt}.")
+            return await message.reply_text("❌ Invalid date/time. Use `YYYY-MM-DD HH:MM`")
 
-    @app.on_message(filters.command("addmedia") & filters.group)
-    async def add_media(client, message: Message):
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2 or not message.reply_to_message or not message.reply_to_message.photo:
-            return await message.reply_text("Usage: reply to photo with /addmedia <name>")
-        name = parts[1].strip()
         flyer = flyers_col.find_one({"chat_id": message.chat.id, "name": name})
         if not flyer:
-            return await message.reply_text(f"No flyer named '{name}'.")
-        file_id = message.reply_to_message.photo.file_id
-        flyers_col.update_one(
-            {"_id": flyer["_id"]},
-            {"$push": {"media": file_id}}
+            return await message.reply_text(f"❌ No flyer named **{name}** found.")
+
+        job_id = f"{message.chat.id}-{name}-{int(run_dt.timestamp())}"
+        scheduler.add_job(
+            _send_flyer,
+            "date",
+            run_date=run_dt,
+            args=[app, flyer],
+            id=job_id
         )
-        await message.reply_text(f"✅ Added media to '{name}'.")
+        await message.reply_text(f"⏰ Scheduled **{name}** at {run_dt} (job `{job_id}`).")
+
+    @app.on_message(filters.command("cancelflyer") & filters.group)
+    async def cancelflyer(_, message: Message):
+        """
+        /cancelflyer <job_id>
+        """
+        parts = message.text.split(None, 1)
+        if len(parts) != 2:
+            return await message.reply_text("Usage: /cancelflyer <job_id>")
+
+        job_id = parts[1]
+        try:
+            scheduler.remove_job(job_id)
+            await message.reply_text(f"🗑️ Canceled job `{job_id}`.")
+        except Exception:
+            await message.reply_text(f"❌ No scheduled job with ID `{job_id}`.")
+
