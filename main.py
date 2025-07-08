@@ -1,3 +1,4 @@
+# main.py
 import os
 import logging
 import pkgutil
@@ -7,14 +8,12 @@ from pymongo import MongoClient
 from pyrogram import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ─── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ─── Environment Variables ─────────────────────────────────────────────────
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -24,11 +23,9 @@ SCHED_TZ = os.environ.get("SCHEDULER_TZ", "UTC")
 RAW_WHITE = os.environ.get("FLYER_WHITELIST", "")
 WHITELIST = [int(x) for x in RAW_WHITE.split(",") if x.strip()]
 
-# ─── Initialize MongoDB Client ──────────────────────────────────────────────
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[MONGO_DB]
 
-# ─── Initialize Pyrogram Client ─────────────────────────────────────────────
 app = Client(
     "bot",
     api_id=API_ID,
@@ -36,10 +33,8 @@ app = Client(
     bot_token=BOT_TOKEN,
 )
 
-# ─── Initialize AsyncIOScheduler ────────────────────────────────────────────
 scheduler = AsyncIOScheduler(timezone=SCHED_TZ)
 
-# ─── Dynamic Handler Registration ───────────────────────────────────────────
 handlers_dir = os.path.join(os.path.dirname(__file__), "handlers")
 
 for _, module_name, _ in pkgutil.iter_modules([handlers_dir]):
@@ -51,7 +46,6 @@ for _, module_name, _ in pkgutil.iter_modules([handlers_dir]):
     params = sig.parameters
     kwargs = {}
 
-    # Bind the app instance
     for name in ("app", "bot", "client"):
         if name in params:
             kwargs[name] = app
@@ -67,13 +61,8 @@ for _, module_name, _ in pkgutil.iter_modules([handlers_dir]):
     module.register(**kwargs)
     logger.info(f"Registered handler: handlers.{module_name}.register")
 
-# ─── Start Scheduler on Bot Startup ─────────────────────────────────────────
-@app.on_event("startup")
-async def on_startup():
+if __name__ == "__main__":
     scheduler.start()
     logger.info("⏰ Scheduler started.")
-
-# ─── Run Bot ────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
     logger.info("📥 All handlers registered. Starting bot…")
     app.run()
