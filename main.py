@@ -1,35 +1,36 @@
 import os
 import logging
 import time
-from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+import socket
 
 from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 
-# ─── Health-check HTTP server ───────────────────────────────────────────
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
-    # suppress default logging to stderr (optional)
-    def log_message(self, format, *args):
-        pass
-
-def run_health_server():
+# ─── Health-check server (raw sockets) ──────────────────────────────────
+def health_server():
     port = int(os.environ.get("PORT", 8000))
-    logging.getLogger("health").info(f"Health server listening on port {port}")
-    # bind to '' to cover both IPv4 and IPv6
-    HTTPServer(("", port), HealthHandler).serve_forever()
+    # Print immediately so you know it's up
+    print(f"Health server listening on port {port}", flush=True)
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("", port))
+    srv.listen(5)
+    while True:
+        conn, _ = srv.accept()
+        try:
+            # Read whatever the client sends (we don't care)
+            conn.recv(1024)
+            # Reply with minimal valid HTTP 200 response
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+        except:
+            pass
+        finally:
+            conn.close()
 
-# start the health‐check listener in a daemon thread
-Thread(target=run_health_server, daemon=True).start()
+# Start the health server in a daemon thread before anything else
+threading.Thread(target=health_server, daemon=True).start()
 
 # ─── Load environment ────────────────────────────────────────────────────
 load_dotenv()
@@ -38,7 +39,7 @@ API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
-    raise RuntimeError("Missing API_ID, API_HASH, or BOT_TOKEN")
+    raise RuntimeError("Missing API_ID, API_HASH, or BOT_TOKEN in environment")
 
 # ─── Logging configuration ───────────────────────────────────────────────
 logging.basicConfig(
@@ -56,7 +57,7 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# ─── Register handlers ───────────────────────────────────────────────────
+# ─── Register all handlers ────────────────────────────────────────────────
 from handlers.welcome    import register as register_welcome
 from handlers.help_cmd   import register as register_help
 from handlers.moderation import register as register_moderation
@@ -82,8 +83,8 @@ def main():
         app.run()
     except Exception:
         logger.exception("❌ app.run() exited unexpectedly")
-    # If app.run() ever returns, keep the process alive
-    logger.warning("⚠️ app.run() returned—entering keep-alive loop")
+    # If app.run ever returns, keep the process alive indefinitely
+    logger.warning("⚠️ app.run() returned — entering keep-alive loop")
     while True:
         time.sleep(60)
 
