@@ -3,3 +3,5 @@ tgcrypto==1.2.5
 python-dotenv==1.0.1
 pymongo==4.7.2
 apscheduler==3.10.1
+fastapi
+uvicorn
