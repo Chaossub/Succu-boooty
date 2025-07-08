@@ -9,9 +9,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import filters, Client
 from pyrogram.types import Message
 
-# ─── MongoDB setup ────────────────────────────────────────────────────────
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DBNAME = os.getenv("MONGO_DBNAME")
+MONGO_DBNAME = os.getenv("MONGO_DBNAME") or os.getenv("MONGO_DB_NAME")
 
 if not MONGO_URI or not MONGO_DBNAME:
     raise RuntimeError("MONGO_URI and MONGO_DBNAME must both be set")
@@ -20,7 +19,6 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[MONGO_DBNAME]
 flyers_col = db["flyers"]
 
-# ─── Health server (for Railway) ─────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -33,10 +31,8 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-# ─── Scheduler ───────────────────────────────────────────────────────────
 scheduler = AsyncIOScheduler()
 
-# ─── Registration ────────────────────────────────────────────────────────
 def register(app: Client):
     CHAT_FILTER = filters.group | filters.channel
 
@@ -122,11 +118,4 @@ def register(app: Client):
             "`/listflyers` — List all created flyers\n"
         )
         await message.reply_text(help_text, parse_mode="markdown")
-
-    # Start scheduler once Pyrogram client has fully started
-    @app.on_event("startup")
-    async def start_scheduler():
-        scheduler.start()
-
-__all__ = ["register"]
 
