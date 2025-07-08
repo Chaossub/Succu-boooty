@@ -1,9 +1,5 @@
 import os
-import threading
-import asyncio
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
-
 from pymongo import MongoClient
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import filters, Client
@@ -18,18 +14,6 @@ if not MONGO_URI or not MONGO_DBNAME:
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[MONGO_DBNAME]
 flyers_col = db["flyers"]
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-def run_health_server():
-    port = int(os.getenv("PORT", 8080))
-    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
-
-threading.Thread(target=run_health_server, daemon=True).start()
 
 scheduler = AsyncIOScheduler()
 
@@ -118,4 +102,3 @@ def register(app: Client):
             "`/listflyers` — List all created flyers\n"
         )
         await message.reply_text(help_text, parse_mode="markdown")
-
