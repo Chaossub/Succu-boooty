@@ -18,11 +18,12 @@ class HealthHandler(BaseHTTPRequestHandler):
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
     try:
-        HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+        server = HTTPServer(("0.0.0.0", port), HealthHandler)
     except OSError as e:
         print(f"[flyer] health server not started (port {port} in use): {e!r}")
+        return
+    server.serve_forever()
 
-# start in background
 threading.Thread(target=run_health_server, daemon=True).start()
 
 
@@ -46,7 +47,6 @@ scheduler.start()
 def register(app):
     @app.on_message(filters.command("createflyer") & filters.group)
     async def create_flyer(client, message: Message):
-        # expects: /createflyer <name>
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             return await message.reply_text("Usage: /createflyer <name>")
@@ -84,7 +84,6 @@ def register(app):
 
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def schedule_flyer(client, message: Message):
-        # expects: /scheduleflyer <name> YYYY-MM-DD HH:MM
         parts = message.text.split(maxsplit=3)
         if len(parts) < 4:
             return await message.reply_text("Usage: /scheduleflyer <name> YYYY-MM-DD HH:MM")
@@ -97,9 +96,7 @@ def register(app):
         flyer = flyers_col.find_one({"chat_id": message.chat.id, "name": name})
         if not flyer:
             return await message.reply_text(f"No flyer named '{name}'.")
-        # schedule the job
         def send_flyer():
-            # re-import client inside job if needed
             app.send_photo(chat_id=message.chat.id, photo=flyer["media"][-1])
         job = scheduler.add_job(send_flyer, "date", run_date=dt)
         flyers_col.update_one(
@@ -110,7 +107,6 @@ def register(app):
 
     @app.on_message(filters.command("addmedia") & filters.group)
     async def add_media(client, message: Message):
-        # usage: reply to photo with /addmedia <name>
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2 or not message.reply_to_message or not message.reply_to_message.photo:
             return await message.reply_text("Usage: reply to photo with /addmedia <name>")
@@ -118,12 +114,9 @@ def register(app):
         flyer = flyers_col.find_one({"chat_id": message.chat.id, "name": name})
         if not flyer:
             return await message.reply_text(f"No flyer named '{name}'.")
-        # save file_id
         file_id = message.reply_to_message.photo.file_id
         flyers_col.update_one(
             {"_id": flyer["_id"]},
             {"$push": {"media": file_id}}
         )
         await message.reply_text(f"✅ Added media to '{name}'.")
-
-# end of file
