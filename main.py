@@ -53,14 +53,19 @@ handlers_pkg = os.path.join(os.path.dirname(__file__), "handlers")
 for finder, name, ispkg in pkgutil.iter_modules([handlers_pkg]):
     module = importlib.import_module(f"handlers.{name}")
     if hasattr(module, "register"):
-        # Build kwargs only for parameters the handler wants
         sig = inspect.signature(module.register)
         params = sig.parameters
         kwargs = {}
-        if "bot" in params:       kwargs["bot"] = app
-        if "scheduler" in params: kwargs["scheduler"] = scheduler
-        if "db" in params:        kwargs["db"] = db
-        if "whitelist" in params: kwargs["whitelist"] = whitelist
+        if "app" in params or "bot" in params:
+            # whichever your handler expects, pass the same `app`
+            key = "app" if "app" in params else "bot"
+            kwargs[key] = app
+        if "scheduler" in params:
+            kwargs["scheduler"] = scheduler
+        if "db" in params:
+            kwargs["db"] = db
+        if "whitelist" in params:
+            kwargs["whitelist"] = whitelist
 
         module.register(**kwargs)
         logger.info(f"Registered handler: handlers.{name}.register")
