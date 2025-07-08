@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 
-# ─── Health-check HTTP server ──────────────────────────────────────────
+# ─── Health-check HTTP server ───────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -18,26 +18,26 @@ def run_health_server():
     port = int(os.environ.get("PORT", 8000))
     HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
-# Start the health-check server in a background thread
+# start health‐check listener
 Thread(target=run_health_server, daemon=True).start()
 
-# ─── Load environment ───────────────────────────────────────────────────
+# ─── Load environment ────────────────────────────────────────────────────
 load_dotenv()
 API_ID    = int(os.getenv("API_ID", 0))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
-    raise RuntimeError("Missing API_ID, API_HASH, or BOT_TOKEN in environment")
+    raise RuntimeError("Missing API_ID, API_HASH, or BOT_TOKEN")
 
-# ─── Logging configuration ──────────────────────────────────────────────
+# ─── Logging configuration ───────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ─── Initialize bot client ──────────────────────────────────────────────
+# ─── Initialize bot client ───────────────────────────────────────────────
 app = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -46,7 +46,7 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# ─── Register all handler modules ────────────────────────────────────────
+# ─── Register handlers ───────────────────────────────────────────────────
 from handlers.welcome    import register as register_welcome
 from handlers.help_cmd   import register as register_help
 from handlers.moderation import register as register_moderation
@@ -72,7 +72,7 @@ def main():
         app.run()
     except Exception:
         logger.exception("❌ app.run() exited unexpectedly")
-    # If app.run() ever returns or crashes, keep the process alive
+    # If for any reason app.run() returns, keep the process alive
     logger.warning("⚠️ app.run() has returned — entering keep-alive loop")
     while True:
         time.sleep(60)
