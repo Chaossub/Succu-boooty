@@ -1,140 +1,131 @@
 import os
-import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime
+
 from pymongo import MongoClient
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import filters
 from pyrogram.types import Message
 
-# ─── Logging ──────────────────────────────────────────────────────────────
-logger = logging.getLogger(__name__)
+# ─── MongoDB setup ────────────────────────────────────────────────────────
+MONGO_URI    = os.getenv("MONGO_URI")
+MONGO_DBNAME = os.getenv("MONGO_DBNAME")
 
-# ─── MongoDB setup ───────────────────────────────────────────────────────
-MONGO_URI = os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise RuntimeError("MONGO_URI environment variable must be set")
+if not MONGO_URI or not MONGO_DBNAME:
+    raise RuntimeError("MONGO_URI and MONGO_DBNAME must both be set")
 
 mongo_client = MongoClient(MONGO_URI)
-db = mongo_client.get_default_database()
-flyers_col = db["flyers"]
+db           = mongo_client[MONGO_DBNAME]
+flyers_col   = db["flyers"]
 
-# ─── Scheduler setup ─────────────────────────────────────────────────────
+# ─── Health server (for Railway) ─────────────────────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+def run_health_server():
+    port = int(os.getenv("PORT", 8080))
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+
+threading.Thread(target=run_health_server, daemon=True).start()
+
+# ─── Scheduler ───────────────────────────────────────────────────────────
 scheduler = AsyncIOScheduler()
 scheduler.start()
 
-# ─── Database helper functions ───────────────────────────────────────────
-def add_flyer_to_db(chat_id: int, name: str, text: str, image_file_id: str = None):
-    flyers_col.update_one(
-        {"chat_id": chat_id, "name": name},
-        {"$set": {
-            "text": text,
-            "image_file_id": image_file_id,
-            "updated_at": datetime.utcnow()
-        }},
-        upsert=True
-    )
-
-def get_flyer_from_db(chat_id: int, name: str):
-    return flyers_col.find_one({"chat_id": chat_id, "name": name})
-
-def list_flyers_in_db(chat_id: int):
-    return list(flyers_col.find({"chat_id": chat_id}))
-
-def remove_flyer_from_db(chat_id: int, name: str):
-    flyers_col.delete_one({"chat_id": chat_id, "name": name})
-
-# ─── Handler registration ─────────────────────────────────────────────────
+# ─── Registration ────────────────────────────────────────────────────────
 def register(app):
+    # Only in groups, supergroups, and channels
+    CHAT_FILTER = filters.group | filters.channel
 
-    @app.on_message(filters.command("addflyer") & filters.group)
-    async def addflyer_cmd(client, message: Message):
-        """
-        Usage:
-          /addflyer <name> <text>
-        Optionally attach a photo; its file_id will be stored too.
-        """
-        args = message.text.split(maxsplit=2)
-        if len(args) < 3:
-            return await message.reply_text("Usage: /addflyer <name> <text>")
-
-        name, text = args[1], args[2]
-        file_id = None
-        if message.photo:
-            file_id = message.photo.file_id
-
-        add_flyer_to_db(message.chat.id, name, text, file_id)
-        await message.reply_text(f"✅ Flyer **{name}** saved.", parse_mode="markdown")
-
-    @app.on_message(filters.command("listflyers") & filters.group)
-    async def listflyers_cmd(client, message: Message):
-        flyers = list_flyers_in_db(message.chat.id)
-        if not flyers:
-            return await message.reply_text("No flyers found in this group.")
-        lines = [f"- **{f['name']}**" for f in flyers]
-        text = "📋 Flyers:\n" + "\n".join(lines)
-        await message.reply_text(text, parse_mode="markdown")
-
-    @app.on_message(filters.command("deleteflyer") & filters.group)
-    async def deleteflyer_cmd(client, message: Message):
+    @app.on_message(filters.command("createflyer") & CHAT_FILTER)
+    async def create_flyer(client, message: Message):
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply_text("Usage: /deleteflyer <name>")
-        name = args[1]
-        remove_flyer_from_db(message.chat.id, name)
-        await message.reply_text(f"🗑 Flyer **{name}** deleted.", parse_mode="markdown")
+            return await message.reply_text("Usage: /createflyer <name> (attach image)")
+        name = args[1].strip()
 
-    @app.on_message(filters.command("scheduleflyer") & filters.group)
-    async def scheduleflyer_cmd(client, message: Message):
-        """
-        Usage: /scheduleflyer <name> YYYY-MM-DD HH:MM
-        """
-        args = message.text.split(maxsplit=3)
-        if len(args) < 4:
+        if not message.photo:
+            return await message.reply_text("❌ Please attach an image with your flyer.")
+        file_id = message.photo.file_id
+
+        flyers_col.update_one(
+            {"chat_id": message.chat.id, "name": name},
+            {"$set": {
+                "chat_id":    message.chat.id,
+                "name":       name,
+                "file_id":    file_id,
+                "created_by": message.from_user.id,
+                "created_at": message.date
+            }},
+            upsert=True
+        )
+        await message.reply_text(f"✅ Flyer '{name}' created!")
+
+    @app.on_message(filters.command("scheduleflyer") & CHAT_FILTER)
+    async def schedule_flyer(client, message: Message):
+        parts = message.text.split()
+        if len(parts) != 4:
             return await message.reply_text("Usage: /scheduleflyer <name> YYYY-MM-DD HH:MM")
+        _, name, date_str, time_str = parts
 
-        name, date_str, time_str = args[1], args[2], args[3]
+        doc = flyers_col.find_one({"chat_id": message.chat.id, "name": name})
+        if not doc:
+            return await message.reply_text(f"❌ No flyer named '{name}'. Use /createflyer first.")
+
         try:
-            run_datetime = datetime.fromisoformat(f"{date_str}T{time_str}")
+            run_dt = datetime.fromisoformat(f"{date_str} {time_str}")
         except ValueError:
-            return await message.reply_text("❌ Invalid datetime. Use YYYY-MM-DD HH:MM")
+            return await message.reply_text("❌ Invalid date/time format. Use YYYY-MM-DD HH:MM")
 
-        flyer = get_flyer_from_db(message.chat.id, name)
-        if not flyer:
-            return await message.reply_text(f"❌ Flyer **{name}** not found.")
-
-        chat_id = message.chat.id
-        job_id = f"{chat_id}-{name}-{int(run_datetime.timestamp())}"
-
-        def job(chat_id=chat_id, name=name):
-            f = get_flyer_from_db(chat_id, name)
-            if not f:
-                return
-            if f.get("image_file_id"):
-                client.send_photo(chat_id, f["image_file_id"], caption=f["text"])
-            else:
-                client.send_message(chat_id, f["text"])
-
+        job_id = f"flyer_{message.chat.id}_{name}_{int(run_dt.timestamp())}"
         scheduler.add_job(
-            job,
-            "date",
-            run_date=run_datetime,
+            func=lambda chat_id, file_id: client.send_photo(chat_id, file_id),
+            trigger="date",
+            run_date=run_dt,
+            args=[message.chat.id, doc["file_id"]],
             id=job_id,
             replace_existing=True
         )
+        await message.reply_text(f"✅ Scheduled flyer '{name}' for {run_dt.isoformat(sep=' ')} UTC")
 
-        await message.reply_text(
-            f"⏰ Flyer **{name}** scheduled for {run_datetime.strftime('%Y-%m-%d %H:%M')}",
-            parse_mode="markdown"
-        )
+    @app.on_message(filters.command("cancelflyer") & CHAT_FILTER)
+    async def cancel_flyer(client, message: Message):
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            return await message.reply_text("Usage: /cancelflyer <name>")
+        name = args[1].strip()
 
-    @app.on_message(filters.command("listjobs") & filters.group)
-    async def listjobs_cmd(client, message: Message):
-        jobs = scheduler.get_jobs()
+        jobs = [job for job in scheduler.get_jobs() if f"{message.chat.id}_{name}_" in job.id]
         if not jobs:
-            return await message.reply_text("No scheduled flyers.")
-        lines = [
-            f"- `{job.id}` at `{job.next_run_time.strftime('%Y-%m-%d %H:%M:%S')}`"
-            for job in jobs
-        ]
-        text = "🗓 Scheduled jobs:\n" + "\n".join(lines)
-        await message.reply_text(text, parse_mode="markdown")
+            return await message.reply_text(f"❌ No scheduled flyer '{name}' found.")
+        for job in jobs:
+            scheduler.remove_job(job.id)
+        await message.reply_text(f"✅ Canceled {len(jobs)} job(s) for '{name}'.")
+
+    @app.on_message(filters.command("listflyers") & CHAT_FILTER)
+    async def list_flyers(client, message: Message):
+        docs = flyers_col.find({"chat_id": message.chat.id})
+        names = [doc["name"] for doc in docs]
+        if not names:
+            return await message.reply_text("No flyers created yet. Use /createflyer.")
+        text = "📋 Created flyers:\n" + "\n".join(f"- {n}" for n in names)
+        await message.reply_text(text)
+
+    @app.on_message(filters.command("helpflyer") & CHAT_FILTER)
+    async def help_flyer(client, message: Message):
+        help_text = (
+            "📋 **Flyer Commands**\n\n"
+            "`/createflyer <name>` — Create or update a flyer (attach image)\n"
+            "`/scheduleflyer <name> YYYY-MM-DD HH:MM` — Schedule it to post\n"
+            "`/cancelflyer <name>` — Cancel scheduled run(s)\n"
+            "`/listflyers` — List all created flyers\n"
+        )
+        await message.reply_text(help_text, parse_mode="markdown")
+
+# ─── If someone does `from handlers.flyer import register` ──────────────────
+# we expose only `register`.
+__all__ = ["register"]
