@@ -1,68 +1,102 @@
 import os
 import logging
-import threading
-from dotenv import load_dotenv
+import importlib
+import pkgutil
+
 from pyrogram import Client
 from pyrogram.enums import ParseMode
+from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
+
 from fastapi import FastAPI
 import uvicorn
 
-# ─── Logging Setup ────────────────────────────────────────
+# ─── ENV ────────────────────────────────────────────────
+load_dotenv()
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", 8888))  # Railway exposes port 8888
+
+# ─── Logging ─────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ─── Load Env ─────────────────────────────────────────────
-load_dotenv()
+# ─── FastAPI Healthcheck ────────────────────────────────
+app = FastAPI()
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", 8000))
-
-app = Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, parse_mode=ParseMode.HTML)
-
-# ─── FastAPI Health Server ────────────────────────────────
-api = FastAPI()
-
-@api.get("/")
+@app.get("/")
 def healthcheck():
     return {"status": "ok"}
 
-def run_health_server():
-    uvicorn.run(api, host="0.0.0.0", port=PORT, log_level="info")
-
-# ─── Scheduler ─────────────────────────────────────────────
-scheduler = BackgroundScheduler(timezone=os.getenv("SCHEDULER_TZ", "UTC"))
+# ─── Scheduler ───────────────────────────────────────────
+scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.start()
 logger.info("⏰ Scheduler started.")
 
-# ─── Register Handlers ─────────────────────────────────────
+# ─── Pyrogram Bot ────────────────────────────────────────
+bot = Client(
+    "SuccuBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML,
+)
+
+# ─── Register All Handlers ──────────────────────────────
 def register_handlers():
-    try:
-        import pkgutil
-        import handlers
+    from handlers import (
+        federation,
+        flyer,
+        fun,
+        get_id,
+        help_cmd,
+        moderation,
+        summon,
+        test,
+        warnings,
+        welcome,
+        xp,
+    )
 
-        for _, modname, _ in pkgutil.iter_modules(handlers.__path__):
-            mod = __import__(f"handlers.{modname}", fromlist=["register"])
-            if hasattr(mod, "register"):
-                mod.register(app)
-                logger.info(f"✅ Registered handler: handlers.{modname}")
-    except Exception as e:
-        logger.error(f"❌ Error registering handlers: {e}", exc_info=True)
+    for module in [
+        federation,
+        flyer,
+        fun,
+        get_id,
+        help_cmd,
+        moderation,
+        summon,
+        test,
+        warnings,
+        welcome,
+        xp,
+    ]:
+        try:
+            module.register(bot)
+            logger.info(f"✅ Registered handler: {module.__name__}")
+        except Exception as e:
+            logger.error(f"❌ Failed to register handler {module.__name__}: {e}")
 
-# ─── Main Run ──────────────────────────────────────────────
+# ─── Main ────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
-        # Start FastAPI health server in background
-        threading.Thread(target=run_health_server, daemon=True).start()
         logger.info("✅ Health server running. Starting bot...")
 
-        register_handlers()
+        # Start FastAPI in background
+        import threading
+        threading.Thread(
+            target=uvicorn.run,
+            kwargs={"app": app, "host": "0.0.0.0", "port": PORT},
+            daemon=True
+        ).start()
 
-        app.run()
+        # Register handlers and run the bot
+        register_handlers()
+        bot.run()
+
     except Exception as e:
-        logger.error(f"❌ Fatal error in main loop: {e}", exc_info=True)
+        logger.exception("❌ Failed to start bot:")
