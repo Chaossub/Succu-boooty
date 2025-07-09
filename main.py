@@ -1,94 +1,97 @@
 import os
-import asyncio
 import logging
-from fastapi import FastAPI
+import pkgutil
+import importlib
+import inspect
+import asyncio
 import uvicorn
 
+from pyrogram import Client, idle
+from pymongo import MongoClient
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from dotenv import load_dotenv
-from pyrogram import Client
-from pyrogram.enums import ParseMode
+from fastapi import FastAPI
 
-# ─── Load Environment Variables ─────────────────────────────────────────────
-load_dotenv()
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# Mongo info passed to handlers
-os.environ["MONGO_URI"] = os.getenv("MONGO_URI")
-os.environ["MONGO_DBNAME"] = os.getenv("MONGO_DB_NAME") or os.getenv("MONGO_DBNAME")
-
-# ─── Logging Setup ──────────────────────────────────────────────────────────
+# ─── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ─── FastAPI Health Check Server ────────────────────────────────────────────
-app_api = FastAPI()
+# ─── Env ────────────────────────────────────────────────────────────────────
+API_ID     = int(os.environ["API_ID"])
+API_HASH   = os.environ["API_HASH"]
+BOT_TOKEN  = os.environ["BOT_TOKEN"]
+MONGO_URI  = os.environ["MONGO_URI"]
+MONGO_DB   = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
+SCHED_TZ   = os.environ.get("SCHEDULER_TZ", "UTC")
+RAW_WHITE  = os.environ.get("FLYER_WHITELIST", "")
+WHITELIST  = [int(x) for x in RAW_WHITE.split(",") if x.strip()]
+PORT       = int(os.environ.get("PORT", 8000))
 
-@app_api.get("/")
+# ─── Init Clients ───────────────────────────────────────────────────────────
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client[MONGO_DB]
+
+app = Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+scheduler = AsyncIOScheduler(timezone=SCHED_TZ)
+scheduler.start()
+logger.info("⏰ Scheduler started.")
+
+# ─── Health Server ──────────────────────────────────────────────────────────
+api = FastAPI()
+
+@api.get("/")
 async def root():
     return {"status": "ok"}
 
-# ─── Initialize Bot & Scheduler ─────────────────────────────────────────────
-bot = Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, parse_mode=ParseMode.HTML)
-scheduler = AsyncIOScheduler()
+async def start_health_server():
+    config = uvicorn.Config(api, host="0.0.0.0", port=PORT, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
 
-# ─── Register Handlers ──────────────────────────────────────────────────────
+# ─── Dynamic Handler Registration ───────────────────────────────────────────
 def register_handlers():
-    from handlers import (
-        federation,
-        flyer,
-        fun,
-        get_id,
-        help_cmd,
-        moderation,
-        summon,
-        test,
-        warnings,
-        welcome,
-        xp
+    handlers_dir = os.path.join(os.path.dirname(__file__), "handlers")
+    for _, module_name, _ in pkgutil.iter_modules([handlers_dir]):
+        module = importlib.import_module(f"handlers.{module_name}")
+        if not hasattr(module, "register"):
+            continue
+
+        sig    = inspect.signature(module.register)
+        params = sig.parameters
+        kwargs = {}
+
+        for name in ("app", "bot", "client"):
+            if name in params:
+                kwargs[name] = app
+                break
+
+        if "scheduler" in params:
+            kwargs["scheduler"] = scheduler
+        if "db" in params:
+            kwargs["db"] = db
+        if "whitelist" in params:
+            kwargs["whitelist"] = WHITELIST
+
+        module.register(**kwargs)
+        logger.info(f"✅ Registered handler: handlers.{module_name}")
+
+# ─── Main Entrypoint ────────────────────────────────────────────────────────
+async def main():
+    register_handlers()
+    logger.info("✅ All handlers registered. Starting bot...")
+    
+    await app.start()
+    logger.info("✅ Bot started.")
+
+    await asyncio.gather(
+        idle(),
+        start_health_server()
     )
 
-    for module in [
-        federation,
-        flyer,
-        fun,
-        get_id,
-        help_cmd,
-        moderation,
-        summon,
-        test,
-        warnings,
-        welcome,
-        xp
-    ]:
-        module.register(bot)
-        logger.info(f"✅ Registered handler: {module.__name__}")
+    await app.stop()
 
-# ─── Async Main Startup ─────────────────────────────────────────────────────
-async def main():
-    logger.info("⏰ Scheduler started.")
-    scheduler.start()
-
-    register_handlers()
-    logger.info("✅ Health server running. Starting bot...")
-
-    await bot.start()
-    await bot.idle()
-    await bot.stop()
-
-# ─── Launch ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    try:
-        # Run FastAPI in the background
-        loop = asyncio.get_event_loop()
-        loop.create_task(uvicorn.run(app_api, host="0.0.0.0", port=8000, log_level="info"))
+    asyncio.run(main())
 
-        # Run bot main logic
-        loop.run_until_complete(main())
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("🛑 Bot interrupted and shutting down cleanly.")
