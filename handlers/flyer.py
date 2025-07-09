@@ -8,10 +8,12 @@ from datetime import datetime
 from pytz import timezone
 from pymongo import MongoClient
 
-from config import MONGO_URI, MONGO_DB
-
 # Logging
 logger = logging.getLogger(__name__)
+
+# Environment variables
+MONGO_URI = os.environ.get("MONGO_URI")
+MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
 
 # Database
 client = MongoClient(MONGO_URI)
@@ -28,10 +30,6 @@ def register(app, scheduler: BackgroundScheduler):
     async def add_flyer(client, message: Message):
         if not message.photo:
             await message.reply("Please attach a photo with your flyer.")
-            return
-
-        if not message.command or len(message.command) < 2:
-            await message.reply("Usage: /addflyer <name> <caption>")
             return
 
         parts = message.text.split(None, 2)
