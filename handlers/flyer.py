@@ -1,29 +1,4 @@
-import os
-import logging
-from datetime import datetime
-import pytz
 
-from pymongo import MongoClient
-from pyrogram import filters
-from pyrogram.types import Message
-from apscheduler.schedulers.background import BackgroundScheduler
-
-from utils.decorators import admin_only
-from utils.database import flyer_db
-from utils.flyer_utils import (
-    add_flyer,
-    change_flyer_image,
-    delete_flyer,
-    list_flyers,
-    get_flyer,
-    schedule_flyer
-)
-
-# Direct environment variable usage
-MONGO_URI = os.environ.get("MONGO_URI")
-MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
-
-client = MongoClient(MONGO_URI)
 db = client[MONGO_DB]
 
 LA_TIMEZONE = pytz.timezone("America/Los_Angeles")
