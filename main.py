@@ -1,20 +1,12 @@
 import os
+import threading
 import logging
-from dotenv import load_dotenv
+
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 import uvicorn
-import threading
-
-# ─── Load Env ───────────────────────────────────────────────────────────────
-load_dotenv()
-
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-SESSION_NAME = os.getenv("SESSION_NAME", "SuccuBot")
 
 # ─── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -23,62 +15,69 @@ logging.basicConfig(
 )
 logger = logging.getLogger("main")
 
-# ─── FastAPI Health Server ──────────────────────────────────────────────────
-app_api = FastAPI()
+# ─── Env ─────────────────────────────────────────────────────────────────────
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-@app_api.get("/")
-async def root():
-    return {"status": "ok"}
-
-def run_api():
-    uvicorn.run(app_api, host="0.0.0.0", port=8000)
-
-# ─── Start FastAPI in a thread ──────────────────────────────────────────────
-threading.Thread(target=run_api).start()
-logger.info("✅ Health server running. Starting bot...")
-
-# ─── Pyrogram Bot Client ────────────────────────────────────────────────────
+# ─── Pyrogram Client ─────────────────────────────────────────────────────────
 app = Client(
-    SESSION_NAME,
+    "SuccuBot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     parse_mode=ParseMode.HTML
 )
 
-# ─── Start Scheduler ────────────────────────────────────────────────────────
+# ─── Scheduler ───────────────────────────────────────────────────────────────
 scheduler = BackgroundScheduler(timezone="UTC")
-scheduler.start()
-logger.info("⏰ Scheduler started.")
 
-# ─── Import and Register Handlers ───────────────────────────────────────────
-from handlers import (
-    federation,
-    flyer,
-    fun,
-    get_id,
-    help_cmd,
-    moderation,
-    summon,
-    test,
-    warnings,
-    welcome,
-    xp,
-)
+# ─── Health Server ───────────────────────────────────────────────────────────
+app_fastapi = FastAPI()
 
-federation.register(app)
-flyer.register(app)
-fun.register(app)
-get_id.register(app)
-help_cmd.register(app)
-moderation.register(app)
-summon.register(app)
-test.register(app)
-warnings.register(app)
-welcome.register(app)
-xp.register(app)
+@app_fastapi.get("/")
+def read_root():
+    return {"status": "ok"}
 
-logger.info("✅ All handlers registered.")
+def run_health_server():
+    logger.info("✅ Health server running. Starting bot...")
+    uvicorn.run(app_fastapi, host="0.0.0.0", port=8000)
 
-# ─── Run the Bot ────────────────────────────────────────────────────────────
-app.run()
+# ─── Register Handlers ───────────────────────────────────────────────────────
+def register_all_handlers():
+    from handlers import (
+        federation,
+        flyer,
+        fun,
+        get_id,
+        help_cmd,
+        moderation,
+        summon,
+        test,
+        warnings,
+        welcome,
+        xp
+    )
+
+    federation.register(app)
+    flyer.register(app)
+    fun.register(app)
+    get_id.register(app)
+    help_cmd.register(app)
+    moderation.register(app)
+    summon.register(app)
+    test.register(app)
+    warnings.register(app)
+    welcome.register(app)
+    xp.register(app)
+
+    logger.info("✅ All handlers registered.")
+
+# ─── Main Entrypoint ─────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    scheduler.start()
+    logger.info("⏰ Scheduler started.")
+    
+    threading.Thread(target=run_health_server, daemon=True).start()
+    register_all_handlers()
+    app.run()
