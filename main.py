@@ -1,42 +1,51 @@
 import os
 import logging
-import pkgutil
-import importlib
-import inspect
 from pyrogram import Client
+from pyrogram.enums import ParseMode
+from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
-from pytz import timezone
 
-# Logging
-logging.basicConfig(
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-    level=logging.INFO,
+# Load environment variables
+load_dotenv()
+
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# Initialize bot
+app = Client(
+    "SuccuBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML
 )
-logger = logging.getLogger(__name__)
 
-# Env
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-SCHED_TZ = timezone("America/Los_Angeles")
-
-# Init
-app = Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-scheduler = BackgroundScheduler(timezone=SCHED_TZ)
+# Start scheduler
+scheduler = BackgroundScheduler(timezone="America/Los_Angeles")
 scheduler.start()
-logger.info("⏰ Scheduler started.")
+logging.info("⏰ Scheduler started.")
 
-def register_all_handlers(app):
-    for _, module_name, _ in pkgutil.iter_modules(["handlers"]):
-        module = importlib.import_module(f"handlers.{module_name}")
-        if hasattr(module, "register"):
-            args = inspect.signature(module.register).parameters
-            if len(args) == 2:
-                module.register(app, scheduler)
-            else:
-                module.register(app)
-            logger.info(f"✅ Registered handler: handlers.{module_name}")
-    logger.info("✅ All handlers registered. Starting bot...")
+# Import and register handlers
+from handlers import (
+    welcome,
+    help_cmd,
+    moderation,
+    federation,
+    summon,
+    xp,
+    fun,
+    flyer
+)
 
-register_all_handlers(app)
+welcome.register(app)
+help_cmd.register(app)
+moderation.register(app)
+federation.register(app)
+summon.register(app)
+xp.register(app)
+fun.register(app)
+flyer.register(app, scheduler)  # Scheduler is passed here
+
+print("✅ SuccuBot is running...")
 app.run()
