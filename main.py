@@ -1,7 +1,6 @@
 import os
 import logging
-import importlib
-import pkgutil
+from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -9,52 +8,77 @@ from fastapi import FastAPI
 import uvicorn
 import threading
 
-# ─── Logging ───────────────────────────────────────────────────────
+# ─── Load Env ───────────────────────────────────────────────────────────────
+load_dotenv()
+
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SESSION_NAME = os.getenv("SESSION_NAME", "SuccuBot")
+
+# ─── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger("main")
 
-# ─── Env Setup ─────────────────────────────────────────────────────
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+# ─── FastAPI Health Server ──────────────────────────────────────────────────
+app_api = FastAPI()
 
-# ─── Pyrogram Client ───────────────────────────────────────────────
+@app_api.get("/")
+async def root():
+    return {"status": "ok"}
+
+def run_api():
+    uvicorn.run(app_api, host="0.0.0.0", port=8000)
+
+# ─── Start FastAPI in a thread ──────────────────────────────────────────────
+threading.Thread(target=run_api).start()
+logger.info("✅ Health server running. Starting bot...")
+
+# ─── Pyrogram Bot Client ────────────────────────────────────────────────────
 app = Client(
-    "SuccuBot",
+    SESSION_NAME,
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     parse_mode=ParseMode.HTML
 )
 
-# ─── Scheduler ─────────────────────────────────────────────────────
-scheduler = BackgroundScheduler()
+# ─── Start Scheduler ────────────────────────────────────────────────────────
+scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.start()
 logger.info("⏰ Scheduler started.")
 
-# ─── Healthcheck Server (for Railway) ──────────────────────────────
-fastapi_app = FastAPI()
+# ─── Import and Register Handlers ───────────────────────────────────────────
+from handlers import (
+    federation,
+    flyer,
+    fun,
+    get_id,
+    help_cmd,
+    moderation,
+    summon,
+    test,
+    warnings,
+    welcome,
+    xp,
+)
 
-@fastapi_app.get("/")
-async def root():
-    return {"status": "ok"}
+federation.register(app)
+flyer.register(app)
+fun.register(app)
+get_id.register(app)
+help_cmd.register(app)
+moderation.register(app)
+summon.register(app)
+test.register(app)
+warnings.register(app)
+welcome.register(app)
+xp.register(app)
 
-def run_health_server():
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=8000)
+logger.info("✅ All handlers registered.")
 
-threading.Thread(target=run_health_server, daemon=True).start()
-logger.info("✅ Health server running. Starting bot...")
-
-# ─── Handler Loader ────────────────────────────────────────────────
-for module_info in pkgutil.iter_modules(["handlers"]):
-    module_name = module_info.name
-    module = importlib.import_module(f"handlers.{module_name}")
-    if hasattr(module, "register"):
-        module.register(app)
-        logger.info(f"Registered handler: handlers.{module_name}.register")
-
-# ─── Run the Bot ───────────────────────────────────────────────────
+# ─── Run the Bot ────────────────────────────────────────────────────────────
 app.run()
