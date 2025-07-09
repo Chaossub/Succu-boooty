@@ -1,49 +1,54 @@
 import os
-import threading
 import logging
-
+from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
 import uvicorn
 
-# ─── Logging ────────────────────────────────────────────────────────────────
+# ─── Setup Logging ──────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
-logger = logging.getLogger("main")
+logger = logging.getLogger(__name__)
 
-# ─── Env ─────────────────────────────────────────────────────────────────────
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+# ─── Load .env Variables ────────────────────────────────────────
+load_dotenv()
 
-# ─── Pyrogram Client ─────────────────────────────────────────────────────────
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+SESSION_NAME = os.getenv("SESSION_NAME", "SuccuBot")
+
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    logger.error("❌ Missing required env vars: API_ID, API_HASH, or BOT_TOKEN")
+    exit(1)
+
+try:
+    API_ID = int(API_ID)
+except ValueError:
+    logger.error("❌ API_ID must be an integer")
+    exit(1)
+
+# ─── Initialize Bot ─────────────────────────────────────────────
 app = Client(
-    "SuccuBot",
+    SESSION_NAME,
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML
+    parse_mode=ParseMode.HTML,
 )
 
-# ─── Scheduler ───────────────────────────────────────────────────────────────
-scheduler = BackgroundScheduler(timezone="UTC")
+# ─── Register Handlers ──────────────────────────────────────────
+def safe_register(module_name, register_func):
+    try:
+        register_func(app)
+        logger.info(f"✅ Registered handler: {module_name}")
+    except Exception as e:
+        logger.exception(f"❌ Failed to register handler {module_name}: {e}")
 
-# ─── Health Server ───────────────────────────────────────────────────────────
-app_fastapi = FastAPI()
-
-@app_fastapi.get("/")
-def read_root():
-    return {"status": "ok"}
-
-def run_health_server():
-    logger.info("✅ Health server running. Starting bot...")
-    uvicorn.run(app_fastapi, host="0.0.0.0", port=8000)
-
-# ─── Register Handlers ───────────────────────────────────────────────────────
 def register_all_handlers():
     from handlers import (
         federation,
@@ -58,26 +63,52 @@ def register_all_handlers():
         welcome,
         xp
     )
+    safe_register("handlers.federation", federation.register)
+    safe_register("handlers.flyer", flyer.register)
+    safe_register("handlers.fun", fun.register)
+    safe_register("handlers.get_id", get_id.register)
+    safe_register("handlers.help_cmd", help_cmd.register)
+    safe_register("handlers.moderation", moderation.register)
+    safe_register("handlers.summon", summon.register)
+    safe_register("handlers.test", test.register)
+    safe_register("handlers.warnings", warnings.register)
+    safe_register("handlers.welcome", welcome.register)
+    safe_register("handlers.xp", xp.register)
 
-    federation.register(app)
-    flyer.register(app)
-    fun.register(app)
-    get_id.register(app)
-    help_cmd.register(app)
-    moderation.register(app)
-    summon.register(app)
-    test.register(app)
-    warnings.register(app)
-    welcome.register(app)
-    xp.register(app)
+# ─── Scheduler Setup ────────────────────────────────────────────
+scheduler = BackgroundScheduler()
 
-    logger.info("✅ All handlers registered.")
+def start_scheduler():
+    try:
+        scheduler.start()
+        logger.info("⏰ Scheduler started.")
+    except Exception as e:
+        logger.exception(f"❌ Failed to start scheduler: {e}")
 
-# ─── Main Entrypoint ─────────────────────────────────────────────────────────
+# ─── FastAPI Health Server ──────────────────────────────────────
+api = FastAPI()
+
+@api.get("/")
+def health():
+    return {"status": "ok"}
+
+def run_fastapi():
+    try:
+        uvicorn.run(api, host="0.0.0.0", port=8000)
+    except Exception as e:
+        logger.exception(f"❌ Failed to start health server: {e}")
+
+# ─── Main Start ─────────────────────────────────────────────────
 if __name__ == "__main__":
-    scheduler.start()
-    logger.info("⏰ Scheduler started.")
-    
-    threading.Thread(target=run_health_server, daemon=True).start()
+    logger.info("✅ Health server running. Starting bot...")
+
+    start_scheduler()
     register_all_handlers()
-    app.run()
+
+    try:
+        app.run()
+    except Exception as e:
+        logger.exception(f"❌ Bot startup failed: {e}")
+
+    # Launch health server in parallel if needed
+    # (Skip if Railway already monitors port 8000)
