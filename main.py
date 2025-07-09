@@ -1,62 +1,94 @@
 import os
+import asyncio
 import logging
-from dotenv import load_dotenv
-from threading import Thread
 from fastapi import FastAPI
 import uvicorn
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 
-# Load environment variables
+# ─── Load Environment Variables ─────────────────────────────────────────────
 load_dotenv()
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ─── Logging ─────────────────────────────────────────
+# Mongo info passed to handlers
+os.environ["MONGO_URI"] = os.getenv("MONGO_URI")
+os.environ["MONGO_DBNAME"] = os.getenv("MONGO_DB_NAME") or os.getenv("MONGO_DBNAME")
+
+# ─── Logging Setup ──────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ─── FastAPI Health Server ──────────────────────────
+# ─── FastAPI Health Check Server ────────────────────────────────────────────
 app_api = FastAPI()
 
 @app_api.get("/")
-def read_root():
+async def root():
     return {"status": "ok"}
 
-def run_health_server():
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app_api, host="0.0.0.0", port=port)
+# ─── Initialize Bot & Scheduler ─────────────────────────────────────────────
+bot = Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+scheduler = AsyncIOScheduler()
 
-Thread(target=run_health_server).start()
-logger.info("✅ Health server running. Starting bot...")
+# ─── Register Handlers ──────────────────────────────────────────────────────
+def register_handlers():
+    from handlers import (
+        federation,
+        flyer,
+        fun,
+        get_id,
+        help_cmd,
+        moderation,
+        summon,
+        test,
+        warnings,
+        welcome,
+        xp
+    )
 
-# ─── Telegram Bot Client ────────────────────────────
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+    for module in [
+        federation,
+        flyer,
+        fun,
+        get_id,
+        help_cmd,
+        moderation,
+        summon,
+        test,
+        warnings,
+        welcome,
+        xp
+    ]:
+        module.register(bot)
+        logger.info(f"✅ Registered handler: {module.__name__}")
 
-app = Client(
-    "SuccuBot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML,
-)
+# ─── Async Main Startup ─────────────────────────────────────────────────────
+async def main():
+    logger.info("⏰ Scheduler started.")
+    scheduler.start()
 
-# ─── Handler Registration ───────────────────────────
-from handlers import (
-    welcome, help_cmd, moderation, federation,
-    summon, xp, fun, flyer, warnings, get_id, test
-)
+    register_handlers()
+    logger.info("✅ Health server running. Starting bot...")
 
-for mod in [
-    welcome, help_cmd, moderation, federation,
-    summon, xp, fun, flyer, warnings, get_id, test
-]:
-    mod.register(app)
-    logger.info(f"✅ Registered handler: handlers.{mod.__name__}")
+    await bot.start()
+    await bot.idle()
+    await bot.stop()
 
-# ─── Run Bot ────────────────────────────────────────
-app.run()
+# ─── Launch ─────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    try:
+        # Run FastAPI in the background
+        loop = asyncio.get_event_loop()
+        loop.create_task(uvicorn.run(app_api, host="0.0.0.0", port=8000, log_level="info"))
+
+        # Run bot main logic
+        loop.run_until_complete(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("🛑 Bot interrupted and shutting down cleanly.")
