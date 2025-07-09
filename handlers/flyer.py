@@ -1,10 +1,12 @@
 import os
-from datetime import datetime
+import asyncio
+from datetime import datetime, timezone
 from pymongo import MongoClient
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import filters, Client
 from pyrogram.types import Message
 
+# ─── MongoDB Setup ─────────────────────────────────────────────
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DBNAME = os.getenv("MONGO_DBNAME") or os.getenv("MONGO_DB_NAME")
 
@@ -15,8 +17,10 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[MONGO_DBNAME]
 flyers_col = db["flyers"]
 
+# ─── Scheduler ─────────────────────────────────────────────────
 scheduler = AsyncIOScheduler()
 
+# ─── Handler Registration ──────────────────────────────────────
 def register(app: Client):
     CHAT_FILTER = filters.group | filters.channel
 
@@ -53,17 +57,16 @@ def register(app: Client):
             return await message.reply_text(f"❌ No flyer named '{name}'. Use /createflyer first.")
 
         try:
-            run_dt = datetime.fromisoformat(f"{date_str} {time_str}")
+            run_dt = datetime.fromisoformat(f"{date_str} {time_str}").replace(tzinfo=timezone.utc)
         except ValueError:
             return await message.reply_text("❌ Invalid date/time format. Use YYYY-MM-DD HH:MM")
 
         job_id = f"flyer_{message.chat.id}_{name}_{int(run_dt.timestamp())}"
 
         scheduler.add_job(
-            func=lambda chat_id, file_id: asyncio.create_task(client.send_photo(chat_id, file_id)),
+            func=lambda: asyncio.create_task(client.send_photo(message.chat.id, doc["file_id"])),
             trigger="date",
             run_date=run_dt,
-            args=[message.chat.id, doc["file_id"]],
             id=job_id,
             replace_existing=True
         )
@@ -95,10 +98,10 @@ def register(app: Client):
     @app.on_message(filters.command("helpflyer") & CHAT_FILTER)
     async def help_flyer(client, message: Message):
         help_text = (
-            "📋 **Flyer Commands**\n\n"
-            "`/createflyer <name>` — Create or update a flyer (attach image)\n"
-            "`/scheduleflyer <name> YYYY-MM-DD HH:MM` — Schedule it to post\n"
-            "`/cancelflyer <name>` — Cancel scheduled run(s)\n"
-            "`/listflyers` — List all created flyers\n"
+            "📋 <b>Flyer Commands</b>\n\n"
+            "<code>/createflyer &lt;name&gt;</code> — Create or update a flyer (attach image)\n"
+            "<code>/scheduleflyer &lt;name&gt; YYYY-MM-DD HH:MM</code> — Schedule it to post\n"
+            "<code>/cancelflyer &lt;name&gt;</code> — Cancel scheduled run(s)\n"
+            "<code>/listflyers</code> — List all created flyers\n"
         )
-        await message.reply_text(help_text, parse_mode="markdown")
+        await message.reply_text(help_text, parse_mode="html")
