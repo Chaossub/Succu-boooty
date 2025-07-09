@@ -2,49 +2,41 @@ import os
 import logging
 import pkgutil
 import importlib
-from apscheduler.schedulers.background import BackgroundScheduler
 from pyrogram import Client
-from pyrogram.enums import ParseMode
-from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
+from pytz import timezone
 
-# ─── Load Environment ─────────────────────────────────────────────────────────
-load_dotenv()
-
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# ─── Logging ─────────────────────────────────────────────────────────────────
+# Logging
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ─── Initialize Bot ──────────────────────────────────────────────────────────
-app = Client(
-    "SuccuBot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML
-)
+# Env
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+MONGO_URI = os.environ["MONGO_URI"]
+MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
+SCHED_TZ = timezone("America/Los_Angeles")
 
-# ─── Start Scheduler ─────────────────────────────────────────────────────────
-scheduler = BackgroundScheduler()
+# Init bot
+app = Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+
+# Scheduler
+scheduler = BackgroundScheduler(timezone=SCHED_TZ)
 scheduler.start()
 logger.info("⏰ Scheduler started.")
 
-# ─── Register Handlers ───────────────────────────────────────────────────────
-def register_all_handlers(bot):
+# Register all handlers
+def register_all_handlers(app):
     for _, module_name, _ in pkgutil.iter_modules(["handlers"]):
         module = importlib.import_module(f"handlers.{module_name}")
         if hasattr(module, "register"):
-            module.register(bot)
-            logger.info(f"✅ Registered handler: handlers.{module_name}")
-
-# ─── Run Bot ─────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    register_all_handlers(app)
+            module.register(app, scheduler)
+        logger.info(f"✅ Registered handler: handlers.{module_name}")
     logger.info("✅ All handlers registered. Starting bot...")
-    app.run()
+
+register_all_handlers(app)
+app.run()
