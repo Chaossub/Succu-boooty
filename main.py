@@ -1,28 +1,42 @@
 import os
 import logging
-import asyncio
 from dotenv import load_dotenv
-from pyrogram import Client
-from pyrogram.enums import ParseMode
+from threading import Thread
 from fastapi import FastAPI
 import uvicorn
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# ─── Load .env ─────────────────────────────────────────────────
+from pyrogram import Client
+from pyrogram.enums import ParseMode
+
+# Load environment variables
 load_dotenv()
 
+# ─── Logging ─────────────────────────────────────────
+logging.basicConfig(
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+# ─── FastAPI Health Server ──────────────────────────
+app_api = FastAPI()
+
+@app_api.get("/")
+def read_root():
+    return {"status": "ok"}
+
+def run_health_server():
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app_api, host="0.0.0.0", port=port)
+
+Thread(target=run_health_server).start()
+logger.info("✅ Health server running. Starting bot...")
+
+# ─── Telegram Bot Client ────────────────────────────
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ─── Logging ──────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-)
-logger = logging.getLogger(__name__)
-
-# ─── Bot ──────────────────────────────────────────────────────
 app = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -31,49 +45,18 @@ app = Client(
     parse_mode=ParseMode.HTML,
 )
 
-# ─── Scheduler ────────────────────────────────────────────────
-scheduler = AsyncIOScheduler()
-scheduler.start()
-logger.info("⏰ Scheduler started.")
-
-# ─── Health Check ─────────────────────────────────────────────
-web_app = FastAPI()
-
-@web_app.get("/")
-async def health_check():
-    return {"status": "ok"}
-
-# ─── Register Handlers ────────────────────────────────────────
+# ─── Handler Registration ───────────────────────────
 from handlers import (
-    federation,
-    flyer,
-    fun,
-    get_id,
-    help_cmd,
-    moderation,
-    summon,
-    test,
-    warnings,
-    welcome,
-    xp
+    welcome, help_cmd, moderation, federation,
+    summon, xp, fun, flyer, warnings, get_id, test
 )
 
-for module in [federation, flyer, fun, get_id, help_cmd, moderation, summon, test, warnings, welcome, xp]:
-    module.register(app)
-    logger.info(f"✅ Registered handler: handlers.{module.__name__.split('.')[-1]}")
+for mod in [
+    welcome, help_cmd, moderation, federation,
+    summon, xp, fun, flyer, warnings, get_id, test
+]:
+    mod.register(app)
+    logger.info(f"✅ Registered handler: handlers.{mod.__name__}")
 
-# Start the flyer scheduler
-flyer.scheduler.start()
-
-# ─── Run ───────────────────────────────────────────────────────
-if __name__ == "__main__":
-    logger.info("✅ Health server running. Starting bot...")
-
-    async def main():
-        await app.start()
-        await asyncio.Event().wait()  # Run forever
-
-    loop = asyncio.get_event_loop()
-    loop.create_task(main())
-
-    uvicorn.run(web_app, host="0.0.0.0", port=8000)
+# ─── Run Bot ────────────────────────────────────────
+app.run()
