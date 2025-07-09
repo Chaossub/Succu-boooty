@@ -1,97 +1,62 @@
 import os
-import logging
-import pkgutil
-import importlib
-import inspect
 import asyncio
-import uvicorn
+import logging
 
-from pyrogram import Client, idle
-from pymongo import MongoClient
+from pyrogram import Client
+from pyrogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI
 
-# ─── Logging ────────────────────────────────────────────────────────────────
+# Logging setup
 logging.basicConfig(
     format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# ─── Env ────────────────────────────────────────────────────────────────────
-API_ID     = int(os.environ["API_ID"])
-API_HASH   = os.environ["API_HASH"]
-BOT_TOKEN  = os.environ["BOT_TOKEN"]
-MONGO_URI  = os.environ["MONGO_URI"]
-MONGO_DB   = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
-SCHED_TZ   = os.environ.get("SCHEDULER_TZ", "UTC")
-RAW_WHITE  = os.environ.get("FLYER_WHITELIST", "")
-WHITELIST  = [int(x) for x in RAW_WHITE.split(",") if x.strip()]
-PORT       = int(os.environ.get("PORT", 8000))
+# Environment
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# ─── Init Clients ───────────────────────────────────────────────────────────
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB]
+# Bot client
+app = Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+scheduler = AsyncIOScheduler()
 
-app = Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-scheduler = AsyncIOScheduler(timezone=SCHED_TZ)
-scheduler.start()
-logger.info("⏰ Scheduler started.")
+# Import and register all handlers
+from handlers import (
+    welcome,
+    help_cmd,
+    moderation,
+    federation,
+    summon,
+    xp,
+    fun,
+    flyer,
+    get_id,
+    warnings,
+    test
+)
 
-# ─── Health Server ──────────────────────────────────────────────────────────
-api = FastAPI()
-
-@api.get("/")
-async def root():
-    return {"status": "ok"}
-
-async def start_health_server():
-    config = uvicorn.Config(api, host="0.0.0.0", port=PORT, log_level="info")
-    server = uvicorn.Server(config)
-    await server.serve()
-
-# ─── Dynamic Handler Registration ───────────────────────────────────────────
 def register_handlers():
-    handlers_dir = os.path.join(os.path.dirname(__file__), "handlers")
-    for _, module_name, _ in pkgutil.iter_modules([handlers_dir]):
-        module = importlib.import_module(f"handlers.{module_name}")
-        if not hasattr(module, "register"):
-            continue
+    for handler in [welcome, help_cmd, moderation, federation, summon, xp, fun, flyer, get_id, warnings, test]:
+        handler.register(app)
+        logger.info(f"✅ Registered handler: handlers.{handler.__name__}")
 
-        sig    = inspect.signature(module.register)
-        params = sig.parameters
-        kwargs = {}
-
-        for name in ("app", "bot", "client"):
-            if name in params:
-                kwargs[name] = app
-                break
-
-        if "scheduler" in params:
-            kwargs["scheduler"] = scheduler
-        if "db" in params:
-            kwargs["db"] = db
-        if "whitelist" in params:
-            kwargs["whitelist"] = WHITELIST
-
-        module.register(**kwargs)
-        logger.info(f"✅ Registered handler: handlers.{module_name}")
-
-# ─── Main Entrypoint ────────────────────────────────────────────────────────
 async def main():
+    logger.info("⏰ Scheduler started.")
+    scheduler.start()
     register_handlers()
     logger.info("✅ All handlers registered. Starting bot...")
-    
     await app.start()
-    logger.info("✅ Bot started.")
+    await app.send_message(chat_id=6964994611, text="✅ Bot started successfully!")
+    await app.idle()
 
-    await asyncio.gather(
-        idle(),
-        start_health_server()
-    )
-
-    await app.stop()
+    # Prevent container shutdown
+    while True:
+        await asyncio.sleep(60)
 
 if __name__ == "__main__":
-    asyncio.run(main())
-
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.exception("Unhandled error in main(): %s", e)
