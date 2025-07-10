@@ -1,6 +1,6 @@
 import os
 import logging
-from pyrogram import Client, filters
+from pyrogram import Client
 from pyrogram.enums import ParseMode
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
@@ -12,20 +12,22 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DBNAME")
-SCHEDULER_TZ = os.getenv("SCHEDULER_TZ", "UTC")
+MONGO_DB = os.getenv("MONGO_DBNAME")  # Correct variable name for Railway
 
-# Validate required environment variables
-if not MONGO_URI:
-    raise ValueError("MONGO_URI is not set in environment variables.")
-if not MONGO_DB or not isinstance(MONGO_DB, str):
+if not isinstance(MONGO_DB, str) or not MONGO_DB:
     raise ValueError("MONGO_DB must be a string. Please set the MONGO_DBNAME environment variable.")
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Scheduler
+scheduler = BackgroundScheduler(timezone="America/Los_Angeles")
+scheduler.start()
+logging.info("⏰ Scheduler started.")
 
-# Initialize the bot
+# Logging
+logging.basicConfig(
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    level=logging.INFO,
+)
+
 app = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -34,16 +36,10 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# Start the scheduler
-scheduler = BackgroundScheduler(timezone=SCHEDULER_TZ)
-scheduler.start()
-logger.info("⏰ Scheduler started.")
-
-# Register all handlers
 def register_all_handlers(app):
     from handlers import (
-        welcome,
         help_cmd,
+        welcome,
         moderation,
         federation,
         summon,
@@ -52,8 +48,8 @@ def register_all_handlers(app):
         flyer
     )
 
-    welcome.register(app)
     help_cmd.register(app)
+    welcome.register(app)
     moderation.register(app)
     federation.register(app)
     summon.register(app)
@@ -63,6 +59,6 @@ def register_all_handlers(app):
 
 register_all_handlers(app)
 
-# Run the bot
-logger.info("✅ SuccuBot is running...")
+print("✅ SuccuBot is running...")
 app.run()
+
