@@ -1,125 +1,185 @@
 import os
-import logging
 import json
-from datetime import datetime
+import logging
+from datetime import datetime, timedelta
+
+from pyrogram import filters
+from pyrogram.types import Message
 from pymongo import MongoClient
-from pytz import timezone
 from apscheduler.schedulers.background import BackgroundScheduler
-from pyrogram import filters, types
+
 from pyrogram.handlers import MessageHandler
 
-# Set timezone
-SCHED_TZ = "America/Los_Angeles"
-
-# Setup logging
+# Logging
 logger = logging.getLogger(__name__)
 
-# Mongo setup
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DBNAME")
+# Mongo Setup
+MONGO_URI = os.environ.get("MONGO_URI")
+MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
 
-if not isinstance(MONGO_DB, str) or not MONGO_DB:
-    raise ValueError("MONGO_DB must be a string. Please set the MONGO_DBNAME environment variable.")
+if not isinstance(MONGO_DB, str):
+    raise ValueError("MONGO_DB must be a string. Please set the MONGO_DB environment variable.")
 
 client = MongoClient(MONGO_URI)
 db = client[MONGO_DB]
-flyer_col = db["flyers"]
+flyers_collection = db["flyers"]
+schedule_collection = db["scheduled_flyers"]
 
-# Helper
-def is_admin(user, chat):
-    return user.id in [admin.user.id for admin in chat.get_members() if admin.status in ("administrator", "creator")]
+# Scheduler
+scheduler = BackgroundScheduler(timezone=os.environ.get("SCHED_TZ", "UTC"))
+scheduler.start()
 
-# Register
-def register(app, scheduler: BackgroundScheduler):
-    @app.on_message(filters.command("addflyer") & filters.group)
-    async def add_flyer(client, message: types.Message):
-        if not message.photo:
-            return await message.reply("❌ Please attach an image.")
-        if not is_admin(message.from_user, message.chat):
-            return await message.reply("Only admins can use this.")
 
-        try:
-            _, name, caption = message.text.split(" ", 2)
-        except:
-            return await message.reply("Usage: /addflyer <name> <caption>")
+async def is_admin(user, chat):
+    async for member in chat.iter_members():
+        if member.user.id == user.id and member.status in ("administrator", "creator"):
+            return True
+    return False
 
-        flyer_col.update_one(
-            {"chat_id": message.chat.id, "name": name},
-            {
-                "$set": {
-                    "file_id": message.photo.file_id,
-                    "caption": caption
-                }
-            },
-            upsert=True
-        )
-        await message.reply(f"✅ Flyer '{name}' added.")
 
-    @app.on_message(filters.command("flyer") & filters.group)
-    async def send_flyer(client, message: types.Message):
-        try:
-            _, name = message.text.split(maxsplit=1)
-        except:
-            return await message.reply("Usage: /flyer <name>")
+async def add_flyer(client, message: Message):
+    if not await is_admin(message.from_user, message.chat):
+        await message.reply("Only admins can use this command.")
+        return
 
-        flyer = flyer_col.find_one({"chat_id": message.chat.id, "name": name})
-        if not flyer:
-            return await message.reply("❌ Flyer not found.")
-        await message.reply_photo(flyer["file_id"], caption=flyer["caption"])
+    if not message.photo or not message.caption:
+        await message.reply("Please send an image with a caption to use /addflyer <name> <caption>.")
+        return
 
-    @app.on_message(filters.command("listflyers") & filters.group)
-    async def list_flyers(client, message: types.Message):
-        flyers = flyer_col.find({"chat_id": message.chat.id})
-        names = [f['name'] for f in flyers]
-        if not names:
-            return await message.reply("No flyers saved.")
-        await message.reply("📄 Saved Flyers:\n" + "\n".join(names))
+    parts = message.caption.split(None, 2)
+    if len(parts) < 3:
+        await message.reply("Usage: /addflyer <name> <caption>")
+        return
 
-    @app.on_message(filters.command("scheduleflyer") & filters.group)
-    async def schedule_flyer(client, message: types.Message):
-        if not is_admin(message.from_user, message.chat):
-            return await message.reply("Only admins can schedule flyers.")
-        try:
-            _, name, time_str, target_group = message.text.split(maxsplit=3)
-        except:
-            return await message.reply("Usage: /scheduleflyer <name> <HH:MM> <target_chat_id>")
+    _, name, caption = parts
+    file_id = message.photo.file_id
+    flyers_collection.update_one(
+        {"chat_id": message.chat.id, "name": name},
+        {"$set": {"file_id": file_id, "caption": caption}},
+        upsert=True,
+    )
+    await message.reply(f"✅ Flyer '{name}' saved.")
 
-        flyer = flyer_col.find_one({"chat_id": message.chat.id, "name": name})
-        if not flyer:
-            return await message.reply("Flyer not found.")
 
-        hour, minute = map(int, time_str.split(":"))
-        now = datetime.now(timezone(SCHED_TZ))
-        run_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if run_time < now:
-            run_time = run_time.replace(day=now.day + 1)
+async def change_flyer(client, message: Message):
+    if not await is_admin(message.from_user, message.chat):
+        await message.reply("Only admins can use this command.")
+        return
 
-        job_id = f"{message.chat.id}_{name}_{target_group}"
+    if not message.reply_to_message or not message.reply_to_message.photo:
+        await message.reply("Please reply to a photo to use this command.")
+        return
 
-        def send_scheduled_flyer():
-            try:
-                client.send_photo(
-                    int(target_group),
-                    flyer["file_id"],
-                    caption=flyer["caption"]
-                )
-                logging.info(f"Scheduled flyer '{name}' sent to {target_group}")
-            except Exception as e:
-                logging.error(f"Error sending flyer: {e}")
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        await message.reply("Usage: /changeflyer <name>")
+        return
 
-        scheduler.add_job(
-            send_scheduled_flyer,
-            trigger="date",
-            run_date=run_time,
-            id=job_id,
-            timezone=SCHED_TZ
-        )
-        await message.reply(f"✅ Scheduled flyer '{name}' to post in {target_group} at {run_time.strftime('%H:%M %Z')}.")
+    name = parts[1]
+    file_id = message.reply_to_message.photo.file_id
 
-    @app.on_message(filters.command("listjobs") & filters.group)
-    async def list_jobs(client, message: types.Message):
-        jobs = scheduler.get_jobs()
-        if not jobs:
-            return await message.reply("📭 No flyers scheduled.")
-        lines = [f"{j.id} at {j.next_run_time.astimezone(timezone(SCHED_TZ)).strftime('%Y-%m-%d %H:%M %Z')}" for j in jobs]
-        await message.reply("📅 Scheduled Flyers:\n" + "\n".join(lines))
+    flyer = flyers_collection.find_one({"chat_id": message.chat.id, "name": name})
+    if not flyer:
+        await message.reply("Flyer not found.")
+        return
+
+    flyers_collection.update_one(
+        {"chat_id": message.chat.id, "name": name},
+        {"$set": {"file_id": file_id}},
+    )
+    await message.reply(f"✅ Flyer '{name}' updated.")
+
+
+async def delete_flyer(client, message: Message):
+    if not await is_admin(message.from_user, message.chat):
+        await message.reply("Only admins can use this command.")
+        return
+
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        await message.reply("Usage: /deleteflyer <name>")
+        return
+
+    name = parts[1]
+    flyers_collection.delete_one({"chat_id": message.chat.id, "name": name})
+    await message.reply(f"🗑️ Flyer '{name}' deleted.")
+
+
+async def list_flyers(client, message: Message):
+    flyers = flyers_collection.find({"chat_id": message.chat.id})
+    names = [flyer["name"] for flyer in flyers]
+    if names:
+        await message.reply("📋 Flyers:\n" + "\n".join(f"• {n}" for n in names))
+    else:
+        await message.reply("No flyers found.")
+
+
+async def send_flyer(client, message: Message):
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        await message.reply("Usage: /flyer <name>")
+        return
+
+    name = parts[1]
+    flyer = flyers_collection.find_one({"chat_id": message.chat.id, "name": name})
+    if not flyer:
+        await message.reply("Flyer not found.")
+        return
+
+    await message.reply_photo(flyer["file_id"], caption=flyer["caption"])
+
+
+async def schedule_flyer(client, message: Message):
+    if not await is_admin(message.from_user, message.chat):
+        await message.reply("Only admins can use this command.")
+        return
+
+    parts = message.text.split(None, 3)
+    if len(parts) < 4:
+        await message.reply("Usage: /scheduleflyer <name> <YYYY-MM-DD> <HH:MM>")
+        return
+
+    _, name, date_str, time_str = parts
+    flyer = flyers_collection.find_one({"chat_id": message.chat.id, "name": name})
+    if not flyer:
+        await message.reply("Flyer not found.")
+        return
+
+    dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    job_id = f"{message.chat.id}_{name}_{dt.isoformat()}"
+
+    async def send_scheduled_flyer():
+        await client.send_photo(message.chat.id, flyer["file_id"], caption=flyer["caption"])
+        schedule_collection.delete_one({"job_id": job_id})
+
+    scheduler.add_job(send_scheduled_flyer, trigger="date", run_date=dt, id=job_id)
+    schedule_collection.insert_one({
+        "chat_id": message.chat.id,
+        "name": name,
+        "datetime": dt,
+        "job_id": job_id,
+    })
+
+    await message.reply(f"⏰ Scheduled flyer '{name}' for {dt.strftime('%Y-%m-%d %H:%M')}.")
+
+
+async def list_scheduled(client, message: Message):
+    entries = schedule_collection.find({"chat_id": message.chat.id})
+    lines = []
+    for entry in entries:
+        dt = entry["datetime"].strftime("%Y-%m-%d %H:%M")
+        lines.append(f"• {entry['name']} at {dt}")
+    if lines:
+        await message.reply("📆 Scheduled Flyers:\n" + "\n".join(lines))
+    else:
+        await message.reply("No scheduled flyers.")
+
+
+def register(app):
+    app.add_handler(MessageHandler(add_flyer, filters.command("addflyer")))
+    app.add_handler(MessageHandler(change_flyer, filters.command("changeflyer")))
+    app.add_handler(MessageHandler(delete_flyer, filters.command("deleteflyer")))
+    app.add_handler(MessageHandler(list_flyers, filters.command("listflyers")))
+    app.add_handler(MessageHandler(send_flyer, filters.command("flyer")))
+    app.add_handler(MessageHandler(schedule_flyer, filters.command("scheduleflyer")))
+    app.add_handler(MessageHandler(list_scheduled, filters.command("listjobs")))
