@@ -1,10 +1,12 @@
-# handlers/flyer.py
 import os
 import json
 from pytz import timezone as pytz_timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from pyrogram import Client, filters
 from pyrogram.types import Message
+
+# ─── Superuser override ─────────────────────────────────
+SUPERUSERS = {6964994611}
 
 # ─── Storage paths ────────────────────────────────────
 FLYER_DIR     = "flyers"
@@ -35,13 +37,14 @@ def save_scheduled(jobs: list):
 
 # ─── Admin check ──────────────────────────────────────
 async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
+    if user_id in SUPERUSERS:
+        return True
     member = await client.get_chat_member(chat_id, user_id)
     return member.status in ("creator", "administrator")
 
-# ─── Scheduled job executors ──────────────────────────
+# ─── Scheduled job tasks ───────────────────────────────
 async def _send_flyer(client: Client, job: dict):
-    origin = job["origin_chat_id"]
-    flyers = load_flyers(origin)
+    flyers = load_flyers(job["origin_chat_id"])
     f = flyers.get(job["name"])
     if f:
         await client.send_photo(job["chat_id"], f["file_id"], caption=f["caption"])
@@ -49,9 +52,10 @@ async def _send_flyer(client: Client, job: dict):
 async def _send_text(client: Client, job: dict):
     await client.send_message(job["chat_id"], job["text"])
 
+# ─── Reschedule on startup ─────────────────────────────
 def _schedule_existing(scheduler: BackgroundScheduler, client: Client):
     for job in load_scheduled():
-        h, m = map(int, job["time"].split(":"))
+        h, m = map(int, job["time"].split(':'))
         trigger = dict(
             trigger="cron",
             hour=h,
@@ -61,11 +65,10 @@ def _schedule_existing(scheduler: BackgroundScheduler, client: Client):
         if job["type"] == "flyer":
             scheduler.add_job(_send_flyer, **trigger, args=[client, job])
         else:
-            scheduler.add_job(_send_text,  **trigger, args=[client, job])
+            scheduler.add_job(_send_text, **trigger, args=[client, job])
 
 # ─── Registration ────────────────────────────────────
 def register(app: Client, scheduler: BackgroundScheduler):
-    # bind all handlers to this `app` instance:
     @app.on_message(filters.command("addflyer") & filters.photo)
     async def addflyer_handler(client, message: Message):
         if not await is_admin(client, message.chat.id, message.from_user.id):
@@ -75,7 +78,7 @@ def register(app: Client, scheduler: BackgroundScheduler):
         name = message.caption.split(None, 1)[1].strip()
         flyers = load_flyers(message.chat.id)
         if name in flyers:
-            return await message.reply("❌ A flyer named “%s” already exists." % name)
+            return await message.reply(f"❌ A flyer named “{name}” already exists.")
         flyers[name] = {"file_id": message.photo.file_id, "caption": name}
         save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” added.")
@@ -89,7 +92,7 @@ def register(app: Client, scheduler: BackgroundScheduler):
         name = message.caption.split(None, 1)[1].strip()
         flyers = load_flyers(message.chat.id)
         if name not in flyers:
-            return await message.reply("❌ No flyer named “%s” found." % name)
+            return await message.reply(f"❌ No flyer named “{name}” found.")
         flyers[name]["file_id"] = message.photo.file_id
         save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” updated.")
@@ -122,7 +125,7 @@ def register(app: Client, scheduler: BackgroundScheduler):
         name = message.command[1]
         flyers = load_flyers(message.chat.id)
         if name not in flyers:
-            return await message.reply("❌ No flyer named “%s”." % name)
+            return await message.reply(f"❌ No flyer named “{name}”.")
         del flyers[name]
         save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” deleted.")
@@ -142,14 +145,8 @@ def register(app: Client, scheduler: BackgroundScheduler):
             return await message.reply("❌ Invalid time or chat_id.")
         flyers = load_flyers(message.chat.id)
         if name not in flyers:
-            return await message.reply("❌ Flyer “%s” not found." % name)
-        job = {
-            "type":           "flyer",
-            "name":           name,
-            "time":           time_str,
-            "chat_id":        dest,
-            "origin_chat_id": message.chat.id
-        }
+            return await message.reply(f"❌ Flyer “{name}” not found.")
+        job = {"type": "flyer", "name": name, "time": time_str, "chat_id": dest, "origin_chat_id": message.chat.id}
         data = load_scheduled() + [job]
         save_scheduled(data)
         scheduler.add_job(
@@ -172,9 +169,9 @@ def register(app: Client, scheduler: BackgroundScheduler):
         text = " ".join(cmd[3:])
         try:
             h, m = map(int, time_str.split(":"))
-            dest = int(target)
+           	dest = int(target)
         except:
-            return await message.reply("❌ Invalid time or chat_id.")
+           	return await message.reply("❌ Invalid time or chat_id.")
         job = {"type":"text","time":time_str,"chat_id":dest,"text":text}
         data = load_scheduled() + [job]
         save_scheduled(data)
@@ -195,8 +192,7 @@ def register(app: Client, scheduler: BackgroundScheduler):
         text = "<b>⏰ Scheduled Posts:</b>\n"
         for i, j in enumerate(data, 1):
             if j["type"] == "flyer":
-                text += (f"{i}. Flyer “{j['name']}” @ {j['time']} → "
-                         f"<code>{j['chat_id']}</code>\n")
+                text += f"{i}. Flyer “{j['name']}” @ {j['time']} → <code>{j['chat_id']}</code>\n"
             else:
                 text += f"{i}. Text @ {j['time']} → <code>{j['chat_id']}</code>\n"
         await message.reply(text)
@@ -214,5 +210,5 @@ def register(app: Client, scheduler: BackgroundScheduler):
         save_scheduled(data)
         await message.reply(f"✅ Canceled scheduled post #{idx+1}: {job}")
 
-    # finally, re-schedule any saved jobs on startup
+    # schedule saved jobs on startup
     _schedule_existing(scheduler, app)
