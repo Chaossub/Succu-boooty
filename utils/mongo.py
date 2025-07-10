@@ -1,16 +1,12 @@
-# utils/mongo.py
-
-from pymongo import MongoClient
 import os
+from pymongo import MongoClient
 
-# Get MongoDB connection URI and DB name from environment
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB_NAME") or os.getenv("MONGO_DBNAME")
+mongo_uri = os.environ["MONGO_URI"]
+mongo_db = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
 
-# Initialize Mongo client and database
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB]
+client = MongoClient(mongo_uri)
+db = client[mongo_db]
 
-# Collections
 flyer_collection = db["flyers"]
 scheduled_jobs = db["scheduled_jobs"]
+
