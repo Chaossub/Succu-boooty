@@ -1,16 +1,10 @@
-from pyrogram import Client
+SUPER_ADMIN_ID = 6964994611
 
-SUPER_ADMIN_ID = 6964994611  # Replace with your actual Telegram ID if needed
-
-async def is_admin(user, chat) -> bool:
-    if not user:
-        return False
-    if user.id == SUPER_ADMIN_ID:
+async def is_admin(client, chat_id: int, user_id: int) -> bool:
+    if user_id == SUPER_ADMIN_ID:
         return True
     try:
-        async for member in chat.get_members():
-            if member.user.id == user.id and member.status in ("administrator", "creator"):
-                return True
+        member = await client.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
     except:
-        pass
-    return False
+        return False
