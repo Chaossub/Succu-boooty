@@ -1,30 +1,31 @@
 import os
 import logging
-import importlib
-from dotenv import load_dotenv
-from apscheduler.schedulers.background import BackgroundScheduler
-from pyrogram import Client
+from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
+from apscheduler.schedulers.background import BackgroundScheduler
+from dotenv import load_dotenv
 
-# ─── Load .env ────────────────────────────────────────────────────────────────
+# Load environment variables
 load_dotenv()
 
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# Mongo vars used by flyer
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB") or os.getenv("MONGO_DB_NAME")
+MONGO_DB = os.getenv("MONGO_DBNAME")
+SCHEDULER_TZ = os.getenv("SCHEDULER_TZ", "UTC")
 
-# ─── Setup Logging ────────────────────────────────────────────────────────────
-logging.basicConfig(
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-    level=logging.INFO,
-)
+# Validate required environment variables
+if not MONGO_URI:
+    raise ValueError("MONGO_URI is not set in environment variables.")
+if not MONGO_DB or not isinstance(MONGO_DB, str):
+    raise ValueError("MONGO_DB must be a string. Please set the MONGO_DBNAME environment variable.")
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─── Pyrogram App ─────────────────────────────────────────────────────────────
+# Initialize the bot
 app = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -33,12 +34,12 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# ─── Scheduler ────────────────────────────────────────────────────────────────
-scheduler = BackgroundScheduler(timezone="America/Los_Angeles")
+# Start the scheduler
+scheduler = BackgroundScheduler(timezone=SCHEDULER_TZ)
 scheduler.start()
 logger.info("⏰ Scheduler started.")
 
-# ─── Register Handlers ────────────────────────────────────────────────────────
+# Register all handlers
 def register_all_handlers(app):
     from handlers import (
         welcome,
@@ -58,12 +59,10 @@ def register_all_handlers(app):
     summon.register(app)
     xp.register(app)
     fun.register(app)
-    flyer.register(app, scheduler)  # Pass scheduler to flyer
+    flyer.register(app, scheduler)
 
-    logger.info("✅ All handlers registered.")
+register_all_handlers(app)
 
-# ─── Main Run ─────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    register_all_handlers(app)
-    logger.info("✅ SuccuBot is running...")
-    app.run()
+# Run the bot
+logger.info("✅ SuccuBot is running...")
+app.run()
