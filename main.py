@@ -1,31 +1,25 @@
 import os
+from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 from apscheduler.schedulers.background import BackgroundScheduler
-from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+# ─── ENV VARS ────────────────────────────────────────────────────────────────
+API_ID     = int(os.getenv("API_ID"))
+API_HASH   = os.getenv("API_HASH")
+BOT_TOKEN  = os.getenv("BOT_TOKEN")
+MONGO_URI  = os.getenv("MONGO_URI")
+MONGO_DB   = os.getenv("MONGO_DB_NAME")
 
-# Optional: Set time zone for scheduler
-SCHEDULER_TZ = os.environ.get("SCHEDULER_TZ", "UTC")
+# Group Shortcuts must be in .env
+os.environ["SUCCUBUS_SANCTUARY"] = os.getenv("SUCCUBUS_SANCTUARY")
+os.environ["MODELS_CHAT"] = os.getenv("MODELS_CHAT")
+os.environ["TEST_GROUP"] = os.getenv("TEST_GROUP")
 
-# Set up group shortcuts from environment
-SUCCUBUS_SANCTUARY = os.environ.get("SUCCUBUS_SANCTUARY")
-MODELS_CHAT = os.environ.get("MODELS_CHAT")
-TEST_GROUP = os.environ.get("TEST_GROUP")
-
-GROUP_SHORTCUTS = {
-    "SUCCUBUS_SANCTUARY": SUCCUBUS_SANCTUARY,
-    "MODELS_CHAT": MODELS_CHAT,
-    "TEST_GROUP": TEST_GROUP
-}
-
-# Initialize the bot
+# ─── INIT ────────────────────────────────────────────────────────────────────
 app = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -34,11 +28,10 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# Initialize scheduler
-scheduler = BackgroundScheduler(timezone=SCHEDULER_TZ)
+scheduler = BackgroundScheduler(timezone="UTC")
 scheduler.start()
 
-# ─── Register Handlers ─────────────────────────────────────────────
+# ─── REGISTER HANDLERS ───────────────────────────────────────────────────────
 def register_all_handlers(app):
     from handlers import (
         help_cmd,
@@ -58,9 +51,10 @@ def register_all_handlers(app):
     xp.register(app)
     fun.register(app)
     welcome.register(app)
-    flyer.register(app, scheduler)  # now accepts scheduler
+    flyer.register(app, scheduler)
 
-print("✅ SuccuBot is running...")
-register_all_handlers(app)
-app.run()
-
+# ─── RUN BOT ─────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("✅ SuccuBot is running...")
+    register_all_handlers(app)
+    app.run()
