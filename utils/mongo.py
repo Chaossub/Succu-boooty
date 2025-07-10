@@ -1,15 +1,16 @@
-import os
+# utils/mongo.py
+
 from pymongo import MongoClient
+import os
 
-# Get Mongo connection URI and DB name from environment variables
-MONGO_URI = os.environ.get("MONGO_URI")
-MONGO_DB = os.environ.get("MONGO_DBNAME")
+# Get MongoDB connection URI and DB name from environment
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB = os.getenv("MONGO_DB_NAME") or os.getenv("MONGO_DBNAME")
 
-if not MONGO_URI or not MONGO_DB:
-    raise ValueError("MongoDB URI and DB name must be set in environment variables.")
-
+# Initialize Mongo client and database
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[MONGO_DB]
 
-# Collection used for storing flyers
+# Collections
 flyer_collection = db["flyers"]
+scheduled_jobs = db["scheduled_jobs"]
