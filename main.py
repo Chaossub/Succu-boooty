@@ -1,21 +1,22 @@
 import os
+from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 from apscheduler.schedulers.background import BackgroundScheduler
-from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB = os.getenv("MONGO_DBNAME") or os.getenv("MONGO_DB_NAME")
 
-# Scheduler setup
+# Init scheduler
 scheduler = BackgroundScheduler(timezone=os.getenv("SCHEDULER_TZ", "UTC"))
 scheduler.start()
 
-# Initialize the bot client
+# Init Pyrogram client
 app = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -24,18 +25,20 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
+# Import handlers
+from handlers import (
+    welcome,
+    help_cmd,
+    moderation,
+    federation,
+    summon,
+    xp,
+    fun,
+    flyer
+)
+
 # Register handlers
 def register_all_handlers(app):
-    from handlers import (
-        welcome,
-        help_cmd,
-        moderation,
-        federation,
-        summon,
-        xp,
-        fun,
-        flyer
-    )
     welcome.register(app)
     help_cmd.register(app)
     moderation.register(app)
@@ -43,10 +46,9 @@ def register_all_handlers(app):
     summon.register(app)
     xp.register(app)
     fun.register(app)
-    flyer.register(app, scheduler)  # Pass scheduler here
+    flyer.register(app, scheduler)
 
-if __name__ == "__main__":
-    print("✅ SuccuBot is running...")
-    register_all_handlers(app)
-    app.run()
+register_all_handlers(app)
 
+print("✅ SuccuBot is running...")
+app.run()
