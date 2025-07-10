@@ -14,7 +14,6 @@ async def is_admin(client, chat_id: int, user_id: int) -> bool:
         return False
 
 def register(app):
-
     @app.on_message(filters.command("help") & filters.group)
     async def help_cmd(client, message: Message):
         user_id = message.from_user.id
@@ -26,66 +25,53 @@ def register(app):
         # General
         sections.append("<b>🛠 General Commands:</b>")
         sections.append("• /help — Show this help message")
-        sections.append("• /cancel — Cancel any pending setup (e.g. federation)\n")
+        sections.append("• /cancel — Cancel pending setup (e.g. flyer scheduling)\n")
 
         # Summon
         sections.append("<b>🔔 Summon Commands:</b>")
-        sections.append("• /trackall — Track all members (admin only)")
-        sections.append("• /summon @username or reply — Summon one")
-        sections.append("• /summonall — Summon everyone")
-        sections.append("• /flirtysummon @username or reply — Flirty summon one")
+        if admin:
+            sections.append("• /trackall — Track all group members (admin only)")
+        sections.append("• /summon @username — Summon one")
+        sections.append("• /summonall — Summon all tracked")
+        sections.append("• /flirtysummon @username — Flirty summon one")
         sections.append("• /flirtysummonall — Flirty summon all\n")
 
         # Fun
         sections.append("<b>🎉 Fun Commands:</b>")
-        sections.append("• /bite @username or reply — Playful bite & earn XP")
-        sections.append("• /spank @username or reply — Playful spank & earn XP")
-        sections.append("• /tease @username or reply — Playful tease & earn XP\n")
+        sections.append("• /bite @username — Bite & earn XP")
+        sections.append("• /spank @username — Spank & earn XP")
+        sections.append("• /tease @username — Tease & earn XP\n")
 
         # XP
         sections.append("<b>📈 XP Commands:</b>")
-        sections.append("• /naughty — Show your naughty XP & level")
-        sections.append("• /leaderboard — Display the XP leaderboard\n")
+        sections.append("• /naughty — Show your XP")
+        sections.append("• /leaderboard — Show top naughty users\n")
 
         # Moderation
         if admin:
             sections.append("<b>⚒ Moderation Commands:</b>")
-            sections.append("• /warn @username — Issue a warning")
-            sections.append("• /flirtywarn @username — Flirty warning (no mute)")
-            sections.append("• /warns @username — Check warnings")
-            sections.append("• /resetwarns @username — Reset warnings")
-            sections.append("• /mute @username [duration] — Mute a user")
-            sections.append("• /unmute @username — Unmute a user")
-            sections.append("• /kick @username — Kick a user")
-            sections.append("• /ban @username — Ban a user")
-            sections.append("• /unban @username — Unban a user")
-            sections.append("• /userinfo @username — View user info\n")
+            sections.append("• /warn, /flirtywarn, /warns, /resetwarns")
+            sections.append("• /mute, /unmute, /kick, /ban, /unban")
+            sections.append("• /userinfo @user — View user info\n")
 
         # Federation
         if admin:
             sections.append("<b>🛡 Federation Commands:</b>")
-            sections.append("• /createfed <name> — Create a federation")
-            sections.append("• /renamefed <fed_id> <new_name> — Rename a federation")
-            sections.append("• /purgefed <fed_id> — Delete a federation")
-            sections.append("• /addfedadmin <fed_id> @username — Add a fed admin")
-            sections.append("• /removefedadmin <fed_id> @username — Remove a fed admin")
-            sections.append("• /listfeds — List all federations")
-            sections.append("• /fedban <fed_id> @username — Ban in a federation")
-            sections.append("• /fedunban <fed_id> @username — Unban in a federation")
-            sections.append("• /fedcheck <fed_id> @username — Check ban status")
-            sections.append("• /togglefedaction <fed_id> — Toggle enforcement\n")
+            sections.append("• /createfed, /renamefed, /purgefed")
+            sections.append("• /addfedadmin, /removefedadmin")
+            sections.append("• /listfeds, /fedban, /fedunban, /fedcheck")
+            sections.append("• /togglefedaction\n")
 
         # Flyers
         if admin:
             sections.append("<b>📂 Flyer Commands:</b>")
-            sections.append("• /flyer <name> — Retrieve a flyer")
+            sections.append("• /flyer <name> — Show a flyer")
             sections.append("• /listflyers — List all flyers")
-            sections.append("• /addflyer <name> <ad> — Add a flyer (with image + caption)")
-            sections.append("• /changeflyer <name> [new ad] — Update flyer image or ad")
-            sections.append("• /deleteflyer <name> — Delete a flyer")
-            sections.append("• /scheduleflyer <name> <time or datetime> <chat_id> — Schedule flyer post")
-            sections.append("• /listjobs — List all scheduled flyer posts")
-            sections.append("• /cancelscheduled <name> — Cancel a scheduled flyer post\n")
+            sections.append("• /addflyer <name> <caption> — Add flyer")
+            sections.append("• /changeflyer <name> — Update flyer image")
+            sections.append("• /deleteflyer <name> — Delete flyer")
+            sections.append("• /scheduleflyer <name> <datetime> <group> — Schedule")
+            sections.append("• /listscheduled — View scheduled flyers")
+            sections.append("• /cancelflyer <job_id> — Cancel a scheduled flyer\n")
 
-        help_text = "\n".join(sections)
-        await message.reply_text(help_text, disable_web_page_preview=True)
+        await message.reply_text("\n".join(sections), disable_web_page_preview=True)
