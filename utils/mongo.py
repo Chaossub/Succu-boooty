@@ -1,12 +1,10 @@
-import os
 from pymongo import MongoClient
+import os
 
-mongo_uri = os.environ["MONGO_URI"]
-mongo_db = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
+MONGO_URI = os.environ["MONGO_URI"]
+mongo_client = MongoClient(MONGO_URI)
+db_name = os.environ.get("MONGO_DBNAME") or os.environ.get("MONGO_DB_NAME", "SuccuBot")
 
-client = MongoClient(mongo_uri)
-db = client[mongo_db]
-
-flyer_collection = db["flyers"]
-scheduled_jobs = db["scheduled_jobs"]
-
+db = mongo_client[db_name]
+flyer_collection = db.flyers
+scheduled_jobs = db.scheduled_jobs
