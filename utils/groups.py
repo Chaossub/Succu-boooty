@@ -1,5 +1,3 @@
-# utils/groups.py
-
 import os
 
 GROUP_SHORTCUTS = {
