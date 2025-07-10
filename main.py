@@ -5,51 +5,34 @@ from pyrogram.enums import ParseMode
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DBNAME")  # Correct variable name for Railway
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 
-if not isinstance(MONGO_DB, str) or not MONGO_DB:
-    raise ValueError("MONGO_DB must be a string. Please set the MONGO_DBNAME environment variable.")
-
-# Scheduler
-scheduler = BackgroundScheduler(timezone="America/Los_Angeles")
+# Init scheduler
+scheduler = BackgroundScheduler(timezone=os.environ.get("SCHEDULER_TZ", "UTC"))
 scheduler.start()
 logging.info("⏰ Scheduler started.")
 
-# Logging
-logging.basicConfig(
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-    level=logging.INFO,
-)
-
-app = Client(
-    "SuccuBot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML
-)
+# Init app
+app = Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, parse_mode=ParseMode.HTML)
 
 def register_all_handlers(app):
     from handlers import (
-        help_cmd,
         welcome,
+        help_cmd,
         moderation,
         federation,
         summon,
         xp,
         fun,
-        flyer
+        flyer,
     )
 
-    help_cmd.register(app)
     welcome.register(app)
+    help_cmd.register(app)
     moderation.register(app)
     federation.register(app)
     summon.register(app)
@@ -57,8 +40,6 @@ def register_all_handlers(app):
     fun.register(app)
     flyer.register(app, scheduler)
 
-register_all_handlers(app)
-
 print("✅ SuccuBot is running...")
+register_all_handlers(app)
 app.run()
-
