@@ -2,7 +2,7 @@ import os
 from pyrogram import filters
 from pyrogram.types import Message
 
-SUPER_ADMIN_ID = 6964994611
+SUPER_ADMIN_ID = 6964994611  # You can update this if needed
 
 async def is_admin(client, chat_id: int, user_id: int) -> bool:
     if user_id == SUPER_ADMIN_ID:
@@ -14,7 +14,6 @@ async def is_admin(client, chat_id: int, user_id: int) -> bool:
         return False
 
 def register(app):
-
     @app.on_message(filters.command("help") & filters.group)
     async def help_cmd(client, message: Message):
         user_id = message.from_user.id
@@ -30,7 +29,8 @@ def register(app):
 
         # Summon
         sections.append("<b>🔔 Summon Commands:</b>")
-        sections.append("• /trackall — Track all members (admin only)")
+        if admin:
+            sections.append("• /trackall — Track all members (admin only)")
         sections.append("• /summon @username or reply — Summon one")
         sections.append("• /summonall — Summon everyone")
         sections.append("• /flirtysummon @username or reply — Flirty summon one")
@@ -83,7 +83,8 @@ def register(app):
             sections.append("• /addflyer <name> <ad> — Add a flyer (reply or send image with caption)")
             sections.append("• /changeflyer <name> [new ad] — Update flyer image or ad")
             sections.append("• /deleteflyer <name> — Delete a flyer")
-            sections.append("• /scheduleflyer <name> <time or datetime> — Schedule a flyer one-off or recurring\n")
+            sections.append("• /scheduleflyer <name> <YYYY-MM-DD HH:MM> — Schedule flyer post\n")
 
         help_text = "\n".join(sections)
         await message.reply_text(help_text, disable_web_page_preview=True)
+
