@@ -20,7 +20,6 @@ for name in ["SUCCUBUS_SANCTUARY", "MODELS_CHAT", "TEST_GROUP"]:
 # ─── Storage paths ────────────────────────────────────
 FLYER_DIR = "flyers"
 SCHEDULE_FILE = "scheduled_flyers.json"
-
 os.makedirs(FLYER_DIR, exist_ok=True)
 
 
@@ -50,6 +49,7 @@ def save_scheduled(jobs: list):
     with open(SCHEDULE_FILE, "w") as f:
         json.dump(jobs, f, indent=2)
 
+
 # ─── Admin check ──────────────────────────────────────
 async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
     if user_id in SUPERUSERS:
@@ -60,6 +60,7 @@ async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
     except:
         return False
 
+
 # ─── Resolve chat shortcuts or numeric IDs ─────────────
 def resolve_target(target: str) -> int:
     if target.lstrip('-').isdigit():
@@ -69,43 +70,39 @@ def resolve_target(target: str) -> int:
         return CHAT_SHORTCUTS[key]
     raise ValueError(f"Unknown chat shortcut or invalid ID: {target}")
 
+
 # ─── Job executors ────────────────────────────────────
 async def _send_flyer(client: Client, job: dict):
-    # ensure the chat is known to the client storage
+    # ensure the chat is known
     try:
         await client.get_chat(job["chat_id"])
-    except Exception:
+    except:
         pass
     # send to forum thread if provided
     kwargs = {}
     if job.get("thread_id") is not None:
         kwargs["message_thread_id"] = job["thread_id"]
-    flyers = load_flyers(job["origin_chat_id"])
+    flyers = load_flyers(job["origin_chat_id"])]
     f = flyers.get(job["name"])
     if f:
         await client.send_photo(job["chat_id"], f["file_id"], caption=f["caption"], **kwargs)
 
+
 async def _send_text(client: Client, job: dict):
-    # ensure the chat is known to the client storage
+    # ensure the chat is known
     try:
         await client.get_chat(job["chat_id"])
-    except Exception:
+    except:
         pass
     kwargs = {}
     if job.get("thread_id") is not None:
         kwargs["message_thread_id"] = job["thread_id"]
     await client.send_message(job["chat_id"], job["text"], **kwargs)
 
-# ─── Registration ────────────────────────────────────
-def register(app: Client, scheduler):(client: Client, job: dict):
-    kwargs = {}
-    if job.get("thread_id") is not None:
-        kwargs["message_thread_id"] = job["thread_id"]
-    await client.send_message(job["chat_id"], job["text"], **kwargs)
 
 # ─── Registration ────────────────────────────────────
 def register(app: Client, scheduler):
-    # ... your CRUD handlers here ...
+    # (CRUD handlers omitted for brevity—assume your existing add/change/list/delete are here)
 
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def scheduleflyer_handler(client, message: Message):
@@ -124,9 +121,14 @@ def register(app: Client, scheduler):
         flyers = load_flyers(message.chat.id)
         if name not in flyers:
             return await message.reply(f"❌ Flyer '{name}' not found.")
-        job = {"type":"flyer","name":name,"time":time_str,
-               "chat_id":dest,"origin_chat_id":message.chat.id,
-               "thread_id":thread_id}
+        job = {
+            "type": "flyer",
+            "name": name,
+            "time": time_str,
+            "chat_id": dest,
+            "origin_chat_id": message.chat.id,
+            "thread_id": thread_id
+        }
         data = load_scheduled() + [job]
         save_scheduled(data)
         scheduler.add_job(
@@ -158,9 +160,13 @@ def register(app: Client, scheduler):
             dest = resolve_target(target)
         except Exception as e:
             return await message.reply(f"❌ {e}")
-        job = {"type":"text","time":time_str,
-               "chat_id":dest,"text":text,
-               "thread_id":thread_id}
+        job = {
+            "type": "text",
+            "time": time_str,
+            "chat_id": dest,
+            "text": text,
+            "thread_id": thread_id
+        }
         data = load_scheduled() + [job]
         save_scheduled(data)
         scheduler.add_job(
@@ -203,9 +209,9 @@ def register(app: Client, scheduler):
     # Reschedule existing jobs on startup
     for job in load_scheduled():
         hour, minute = map(int, job['time'].split(':'))
-        fn = _send_flyer if job['type'] == 'flyer' else _send_text
+        executor = _send_flyer if job['type'] == 'flyer' else _send_text
         scheduler.add_job(
-            fn,
+            executor,
             trigger='cron',
             hour=hour,
             minute=minute,
