@@ -63,12 +63,14 @@ async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
 
 # ─── Resolve chat shortcuts or numeric IDs ─────────────
 def resolve_target(target: str) -> int:
-    if target.lstrip('-').isdigit():
+    # Accept negative and positive numeric IDs
+    try:
         return int(target)
-    key = target.lower()
-    if key in CHAT_SHORTCUTS:
-        return CHAT_SHORTCUTS[key]
-    raise ValueError(f"Unknown chat shortcut or invalid ID: {target}")
+    except ValueError:
+        key = target.lower()
+        if key in CHAT_SHORTCUTS:
+            return CHAT_SHORTCUTS[key]
+        raise ValueError(f"Unknown chat shortcut or invalid ID: {target}")
 
 # ─── Job executors ────────────────────────────────────
 async def _send_flyer(client: Client, job: dict):
@@ -250,3 +252,4 @@ def register(app: Client, scheduler):
         scheduler.add_job(executor, trigger='cron', hour=hour, minute=minute,
                           timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','US/Pacific')),
                           args=[app, job])
+
