@@ -3,7 +3,7 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Your super‐admin override
+# Superuser override
 SUPER_ADMIN_ID = 6964994611
 
 async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
@@ -17,80 +17,84 @@ async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
 
 
 def register(app: Client):
-    @app.on_message(
-        filters.command(["start", "help"]) & (filters.private | filters.group)
-    )
-    async def help_cmd(client: Client, message: Message):
+    @app.on_message(filters.command(["start", "help"]) & (filters.group | filters.private))
+    async def help_handler(client: Client, message: Message):
         user_id = message.from_user.id
         chat_id = message.chat.id
         admin = await is_admin(client, chat_id, user_id)
 
-        sections = []
-        sections.append("<b>🛠 General Commands</b>")
-        sections.append("• /start — Initialize the bot")
-        sections.append("• /help — Show this help message")
-        sections.append("• /cancel — Cancel the current operation\n")
+        lines = ["<b>SuccuBot Commands</b>"]
 
-        sections.append("<b>🔔 Summon Commands</b>")
+        # General
+        lines.append("\n🛠 <b>General</b>")
+        lines.append("/start — Initialize the bot")
+        lines.append("/help — Show this help message")
+        lines.append("/cancel — Cancel the current operation")
+
+        # Summon
+        lines.append("\n🔔 <b>Summon</b>")
         if admin:
-            sections.append("• /trackall — Track all group members (admin only)")
-        sections.append("• /summon <username> — Summon one user")
-        sections.append("• /summonall — Summon all tracked users")
-        sections.append("• /flirtysummon <username> — Flirty summon one")
-        sections.append("• /flirtysummonall — Flirty summon all\n")
+            lines.append("/trackall — Track all group members (admin only)")
+        lines.append("/summon <username> — Summon one user")
+        lines.append("/summonall — Summon all tracked users")
+        lines.append("/flirtysummon <username> — Flirty summon one user")
+        lines.append("/flirtysummonall — Flirty summon all users")
 
-        sections.append("<b>🎉 Fun Commands</b>")
-        sections.append("• /bite <username> — Playful bite & earn XP")
-        sections.append("• /spank <username> — Playful spank & earn XP")
-        sections.append("• /tease <username> — Playful tease & earn XP\n")
+        # Fun
+        lines.append("\n🎉 <b>Fun</b>")
+        lines.append("/bite <username> — Playful bite & earn XP")
+        lines.append("/spank <username> — Playful spank & earn XP")
+        lines.append("/tease <username> — Playful tease & earn XP")
 
-        sections.append("<b>📈 XP Commands</b>")
-        sections.append("• /naughty — Show your XP")
-        sections.append("• /leaderboard — Show the XP leaderboard\n")
+        # XP
+        lines.append("\n📈 <b>XP & Leaderboard</b>")
+        lines.append("/naughty — Show your XP")
+        lines.append("/leaderboard — Show the XP leaderboard")
 
+        # Moderation
         if admin:
-            sections.append("<b>⚒ Moderation Commands</b>")
-            sections.append("• /warn <user> [reason] — Issue a warning")
-            sections.append("• /warns <user> — Check warnings")
-            sections.append("• /resetwarns <user> — Reset warns")
-            sections.append("• /flirtywarn <user> — Flirty warning (no count)")
-            sections.append("• /mute <user> [min] — Mute a user")
-            sections.append("• /unmute <user> — Unmute a user")
-            sections.append("• /kick <user> — Kick a user")
-            sections.append("• /ban <user> — Ban a user")
-            sections.append("• /unban <user> — Unban a user")
-            sections.append("• /userinfo <user> — View user info\n")
+            lines.append("\n⚒ <b>Moderation</b>")
+            lines.append("/warn <user> [reason] — Issue a warning")
+            lines.append("/warns <user> — Check warnings")
+            lines.append("/resetwarns <user> — Reset warns")
+            lines.append("/flirtywarn <user> — Flirty warning (no count)")
+            lines.append("/mute <user> [min] — Mute a user")
+            lines.append("/unmute <user> — Unmute a user")
+            lines.append("/kick <user> — Kick a user")
+            lines.append("/ban <user> — Ban a user")
+            lines.append("/unban <user> — Unban a user")
+            lines.append("/userinfo <user> — View user info")
 
-        if admin:
-            sections.append("<b>🛡 Federation Commands</b>")
-            sections.append("• /createfed <name> — Create a federation")
-            sections.append("• /deletefed <fed_id> — Delete a federation")
-            sections.append("• /purgefed <fed_id> — Purge federation ban list")
-            sections.append("• /renamefed <fed_id> <new_name> — Rename federation")
-            sections.append("• /addfedadmin <fed_id> <user> — Add fed admin")
-            sections.append("• /removefedadmin <fed_id> <user> — Remove fed admin")
-            sections.append("• /listfeds — List federations")
-            sections.append("• /listfedgroups <fed_id> — List groups in federation")
-            sections.append("• /listfedadmins <fed_id> — List federation admins")
-            sections.append("• /fedban <fed_id> <user> — Federation ban")
-            sections.append("• /fedunban <fed_id> <user> — Federation unban")
-            sections.append("• /fedcheck <user> — Check federation bans")
-            sections.append("• /togglefedaction <fed_id> <kick|mute|off> — Toggle enforcement\n")
+            # Federation
+            lines.append("\n🛡 <b>Federation</b>")
+            lines.append("/createfed <name> — Create a federation")
+            lines.append("/deletefed <fed_id> — Delete a federation")
+            lines.append("/purgefed <fed_id> — Purge fed ban list")
+            lines.append("/renamefed <fed_id> <new_name> — Rename federation")
+            lines.append("/addfedadmin <fed_id> <user> — Add fed admin")
+            lines.append("/removefedadmin <fed_id> <user> — Remove fed admin")
+            lines.append("/listfeds — List federations")
+            lines.append("/listfedgroups <fed_id> — List groups in federation")
+            lines.append("/listfedadmins <fed_id> — List federation admins")
+            lines.append("/fedban <fed_id> <user> — Federation ban")
+            lines.append("/fedunban <fed_id> <user> — Federation unban")
+            lines.append("/fedcheck <user> — Check federation bans")
+            lines.append("/togglefedaction <fed_id> <kick|mute|off> — Toggle enforcement")
 
-        if admin:
-            sections.append("<b>📂 Flyer Commands</b>")
-            sections.append("• /flyer <name> — Retrieve a flyer")
-            sections.append("• /listflyers — List all flyers")
-            sections.append("• /addflyer <name> — Add a flyer (photo + caption)")
-            sections.append("• /changeflyer <name> — Update flyer image")
-            sections.append("• /deleteflyer <name> — Delete a flyer")
-            sections.append("• /scheduleflyer <name> <HH:MM> <chat> — Schedule flyer")
-            sections.append("• /scheduletext <HH:MM> <chat> <text> — Schedule text")
-            sections.append("• /listscheduled — View scheduled posts")
-            sections.append("• /cancelflyer <index> — Cancel a scheduled post\n")
+            # Flyers
+            lines.append("\n📂 <b>Flyers</b>")
+            lines.append("/flyer <name> — Retrieve a flyer")
+            lines.append("/listflyers — List all flyers")
+            lines.append("/addflyer <name> — Add a flyer (photo with caption)")
+            lines.append("/changeflyer <name> — Update flyer image")
+            lines.append("/deleteflyer <name> — Delete a flyer")
+            lines.append("/scheduleflyer <name> <HH:MM> <chat> — Schedule flyer")
+            lines.append("/scheduletext <HH:MM> <chat> <text> — Schedule text")
+            lines.append("/listscheduled — View scheduled posts")
+            lines.append("/cancelflyer <index> — Cancel a scheduled post")
 
         await message.reply_text(
-            "\n".join(sections),
+            "\n".join(lines),
             disable_web_page_preview=True,
             parse_mode="HTML"
         )
