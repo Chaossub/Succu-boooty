@@ -208,3 +208,22 @@ def register(app: Client, scheduler):
             timezone=pytz_timezone(os.environ.get('SCHEDULER_TZ', 'US/Pacific')),
             args=[app, job]
         )
+
+    # ─── Admin-only job listing ──────────────────────────
+    @app.on_message(filters.command("jobs") & filters.group)
+    async def jobs_handler(client, message: Message):
+        # only admins/superusers may list scheduled jobs
+        if not await is_admin(client, message.chat.id, message.from_user.id):
+            return await message.reply("❌ Only admins can view scheduled jobs.")
+        jobs_list = scheduler.get_jobs()
+        if not jobs_list:
+            return await message.reply("❌ No active scheduled jobs.")
+        lines = ["<b>Scheduled Jobs:</b>"]
+        for job in jobs_list:
+            next_run = job.next_run_time.strftime("%Y-%m-%d %H:%M:%S %Z") if job.next_run_time else "N/A"
+            lines.append(f"{job.id} ({job.func.__name__}) → Next run: {next_run}")
+        await message.reply(
+            "
+".join(lines),
+            disable_web_page_preview=True
+        )
