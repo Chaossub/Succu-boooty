@@ -44,9 +44,11 @@ from handlers import (
     xp,
     fun,
     flyer,
-    debug_thread  # for /test command
 )
+# Import debug_thread from its module
+from handlers.debug_thread import register as register_debug_thread
 
+# Register handlers
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -55,12 +57,11 @@ summon.register(app)
 xp.register(app)
 fun.register(app)
 
-# Register the test debug command (for forum thread IDs)
-debug_thread.register(app)
+# Register the /test debug command
+register_debug_thread(app)
 
-# Register flyer handlers with scheduler
-after = flyer.register(app, scheduler)
+# Register flyer handlers with the scheduler
+flyer.register(app, scheduler)
 
 print("✅ SuccuBot is running...")
 app.run()
-
