@@ -1,8 +1,14 @@
+# handlers/flyer.py
+
 import os
 import json
+import logging
 from pytz import timezone as pytz_timezone
 from pyrogram import Client, filters
 from pyrogram.types import Message
+
+# ─── Set up logging ───────────────────────────────────
+logger = logging.getLogger(__name__)
 
 # ─── Superuser override ─────────────────────────────────
 SUPERUSERS = {6964994611}
@@ -68,7 +74,7 @@ def resolve_target(target: str) -> int:
 
 # ─── Job executors ────────────────────────────────────
 async def _send_flyer(client: Client, job: dict):
-    # make sure the peer is known
+    logger.info("🏷 [_send_flyer] running job %r", job)
     try:
         await client.get_chat(job["chat_id"])
     except:
@@ -78,10 +84,23 @@ async def _send_flyer(client: Client, job: dict):
         kwargs["message_thread_id"] = job["thread_id"]
     flyers = load_flyers(job["origin_chat_id"])
     f = flyers.get(job["name"])
-    if f:
-        await client.send_photo(job["chat_id"], f["file_id"], caption=f["caption"], **kwargs)
+    if not f:
+        logger.warning("🏷 [_send_flyer] flyer %r not found in origin %s",
+                       job["name"], job["origin_chat_id"])
+        return
+    try:
+        msg = await client.send_photo(
+            job["chat_id"],
+            f["file_id"],
+            caption=f["caption"],
+            **kwargs
+        )
+        logger.info("🏷 [_send_flyer] sent! message_id=%s", msg.message_id)
+    except Exception:
+        logger.exception("🏷 [_send_flyer] FAILED to send flyer")
 
 async def _send_text(client: Client, job: dict):
+    logger.info("✉️ [_send_text] running job %r", job)
     try:
         await client.get_chat(job["chat_id"])
     except:
@@ -89,24 +108,14 @@ async def _send_text(client: Client, job: dict):
     kwargs = {}
     if job.get("thread_id") is not None:
         kwargs["message_thread_id"] = job["thread_id"]
-    await client.send_message(job["chat_id"], job["text"], **kwargs)
+    try:
+        msg = await client.send_message(job["chat_id"], job["text"], **kwargs)
+        logger.info("✉️ [_send_text] sent! message_id=%s", msg.message_id)
+    except Exception:
+        logger.exception("✉️ [_send_text] FAILED to send text")
 
 # ─── Registration ────────────────────────────────────
 def register(app: Client, scheduler):
-    # ─── Admin-only job listing ──────────────────────────
-    @app.on_message(filters.command("jobs"))
-    async def jobs_handler(client: Client, message: Message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
-            return await message.reply("❌ Only admins can view scheduled jobs.")
-        jobs_list = scheduler.get_jobs()
-        if not jobs_list:
-            return await message.reply("❌ No active scheduled jobs.")
-        lines = ["<b>Scheduled Jobs:</b>"]
-        for job in jobs_list:
-            nxt = job.next_run_time.strftime("%Y-%m-%d %H:%M:%S %Z") if job.next_run_time else "N/A"
-            lines.append(f"{job.id} ({job.func.__name__}) → Next run: {nxt}")
-        await message.reply("\n".join(lines), disable_web_page_preview=True)
-
     # ─── Flyer CRUD ─────────────────────────────────
     @app.on_message(filters.command("addflyer") & filters.photo)
     async def addflyer_handler(client, message: Message):
