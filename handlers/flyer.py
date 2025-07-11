@@ -1,5 +1,3 @@
-# handlers/flyer.py
-
 import os
 import json
 from pytz import timezone as pytz_timezone
@@ -24,10 +22,8 @@ FLYER_DIR = "flyers"
 SCHEDULE_FILE = "scheduled_flyers.json"
 os.makedirs(FLYER_DIR, exist_ok=True)
 
-
 def flyer_file(chat_id: int) -> str:
     return os.path.join(FLYER_DIR, f"{chat_id}.json")
-
 
 def load_flyers(chat_id: int) -> dict:
     path = flyer_file(chat_id)
@@ -36,11 +32,9 @@ def load_flyers(chat_id: int) -> dict:
             return json.load(f)
     return {}
 
-
 def save_flyers(chat_id: int, data: dict):
     with open(flyer_file(chat_id), "w") as f:
         json.dump(data, f, indent=2)
-
 
 def load_scheduled() -> list:
     if os.path.exists(SCHEDULE_FILE):
@@ -48,11 +42,9 @@ def load_scheduled() -> list:
             return json.load(f)
     return []
 
-
 def save_scheduled(jobs: list):
     with open(SCHEDULE_FILE, "w") as f:
         json.dump(jobs, f, indent=2)
-
 
 # ─── Admin check ──────────────────────────────────────
 async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
@@ -64,7 +56,6 @@ async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
     except:
         return False
 
-
 # ─── Resolve chat shortcuts or numeric IDs ─────────────
 def resolve_target(target: str) -> int:
     try:
@@ -75,10 +66,9 @@ def resolve_target(target: str) -> int:
             return CHAT_SHORTCUTS[key]
         raise ValueError(f"Unknown chat shortcut or invalid ID: {target}")
 
-
 # ─── Job executors ────────────────────────────────────
 async def _send_flyer(client: Client, job: dict):
-    # ensure peer is known
+    # make sure the peer is known
     try:
         await client.get_chat(job["chat_id"])
     except:
@@ -91,9 +81,7 @@ async def _send_flyer(client: Client, job: dict):
     if f:
         await client.send_photo(job["chat_id"], f["file_id"], caption=f["caption"], **kwargs)
 
-
 async def _send_text(client: Client, job: dict):
-    # ensure peer is known
     try:
         await client.get_chat(job["chat_id"])
     except:
@@ -103,9 +91,22 @@ async def _send_text(client: Client, job: dict):
         kwargs["message_thread_id"] = job["thread_id"]
     await client.send_message(job["chat_id"], job["text"], **kwargs)
 
-
 # ─── Registration ────────────────────────────────────
 def register(app: Client, scheduler):
+    # ─── Admin-only job listing ──────────────────────────
+    @app.on_message(filters.command("jobs"))
+    async def jobs_handler(client: Client, message: Message):
+        if not await is_admin(client, message.chat.id, message.from_user.id):
+            return await message.reply("❌ Only admins can view scheduled jobs.")
+        jobs_list = scheduler.get_jobs()
+        if not jobs_list:
+            return await message.reply("❌ No active scheduled jobs.")
+        lines = ["<b>Scheduled Jobs:</b>"]
+        for job in jobs_list:
+            nxt = job.next_run_time.strftime("%Y-%m-%d %H:%M:%S %Z") if job.next_run_time else "N/A"
+            lines.append(f"{job.id} ({job.func.__name__}) → Next run: {nxt}")
+        await message.reply("\n".join(lines), disable_web_page_preview=True)
+
     # ─── Flyer CRUD ─────────────────────────────────
     @app.on_message(filters.command("addflyer") & filters.photo)
     async def addflyer_handler(client, message: Message):
