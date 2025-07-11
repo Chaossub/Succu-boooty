@@ -8,6 +8,18 @@ from pyrogram.types import Message
 # ─── Superuser override ─────────────────────────────────
 SUPERUSERS = {6964994611}
 
+# ─── Chat shortcuts from environment ─────────────────────────
+# provide friendly names to numeric chat IDs via env vars:
+CHAT_SHORTCUTS = {}
+for name in ["SUCCUBUS_SANCTUARY", "MODELS_CHAT", "TEST_GROUP"]:
+    val = os.environ.get(name)
+    if val:
+        try:
+            CHAT_SHORTCUTS[name.lower()] = int(val)
+        except ValueError:
+            pass
+# usage: target may be numeric ID or shortcut key like 'succubus_sanctuary'
+
 # ─── Storage paths ────────────────────────────────────
 FLYER_DIR = "flyers"
 SCHEDULE_FILE = "scheduled_flyers.json"
@@ -41,14 +53,12 @@ def save_scheduled(jobs: list):
     with open(SCHEDULE_FILE, "w") as f:
         json.dump(jobs, f, indent=2)
 
-
 # ─── Admin check ──────────────────────────────────────
 async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
     if user_id in SUPERUSERS:
         return True
     member = await client.get_chat_member(chat_id, user_id)
     return member.status in ("creator", "administrator")
-
 
 # ─── Scheduled job tasks ───────────────────────────────
 async def _send_flyer(client: Client, job: dict):
@@ -57,10 +67,8 @@ async def _send_flyer(client: Client, job: dict):
     if f:
         await client.send_photo(job["chat_id"], f["file_id"], caption=f["caption"])
 
-
 async def _send_text(client: Client, job: dict):
     await client.send_message(job["chat_id"], job["text"])
-
 
 # ─── Reschedule on startup ─────────────────────────────
 def _schedule_existing(scheduler: BackgroundScheduler, client: Client):
@@ -77,6 +85,15 @@ def _schedule_existing(scheduler: BackgroundScheduler, client: Client):
         else:
             scheduler.add_job(_send_text, **trigger, args=[client, job])
 
+# ─── Helper to resolve chat targets ─────────────────────
+def resolve_target(target: str) -> int:
+    # numeric IDs start with optional '-' and digits
+    if target.lstrip('-').isdigit():
+        return int(target)
+    key = target.lower()
+    if key in CHAT_SHORTCUTS:
+        return CHAT_SHORTCUTS[key]
+    raise ValueError(f"Unknown chat shortcut or invalid ID: {target}")
 
 # ─── Registration ────────────────────────────────────
 def register(app: Client, scheduler: BackgroundScheduler):
@@ -147,13 +164,13 @@ def register(app: Client, scheduler: BackgroundScheduler):
             return await message.reply("❌ Only admins can schedule flyers.")
         cmd = message.command
         if len(cmd) != 4:
-            return await message.reply("❌ Usage: /scheduleflyer <name> <HH:MM> <chat_id>")
+            return await message.reply("❌ Usage: /scheduleflyer <name> <HH:MM> <chat_id|shortcut>")
         name, time_str, target = cmd[1], cmd[2], cmd[3]
         try:
-            h, m = map(int, time_str.split(":"))
-            dest = int(target)
-        except ValueError:
-            return await message.reply("❌ Invalid time or chat_id.")
+            hour, minute = map(int, time_str.split(':'))
+            dest = resolve_target(target)
+        except Exception as e:
+            return await message.reply(f"❌ {e}")
         flyers = load_flyers(message.chat.id)
         if name not in flyers:
             return await message.reply(f"❌ Flyer “{name}” not found.")
@@ -163,8 +180,8 @@ def register(app: Client, scheduler: BackgroundScheduler):
         scheduler.add_job(
             _send_flyer,
             trigger="cron",
-            hour=h,
-            minute=m,
+            hour=hour,
+            minute=minute,
             timezone=pytz_timezone(os.environ.get("SCHEDULER_TZ", "US/Pacific")),
             args=[client, job]
         )
@@ -176,22 +193,22 @@ def register(app: Client, scheduler: BackgroundScheduler):
             return await message.reply("❌ Only admins can schedule text.")
         cmd = message.command
         if len(cmd) < 4:
-            return await message.reply("❌ Usage: /scheduletext <HH:MM> <chat_id> <text…>")
+            return await message.reply("❌ Usage: /scheduletext <HH:MM> <chat_id|shortcut> <text…>")
         time_str, target = cmd[1], cmd[2]
         text = " ".join(cmd[3:])
         try:
-            h, m = map(int, time_str.split(":"))
-            dest = int(target)
-        except ValueError:
-            return await message.reply("❌ Invalid time or chat_id.")
+            hour, minute = map(int, time_str.split(':'))
+            dest = resolve_target(target)
+        except Exception as e:
+            return await message.reply(f"❌ {e}")
         job = {"type": "text", "time": time_str, "chat_id": dest, "text": text}
         data = load_scheduled() + [job]
         save_scheduled(data)
         scheduler.add_job(
             _send_text,
             trigger="cron",
-            hour=h,
-            minute=m,
+            hour=hour,
+            minute=minute,
             timezone=pytz_timezone(os.environ.get("SCHEDULER_TZ", "US/Pacific")),
             args=[client, job]
         )
@@ -203,11 +220,11 @@ def register(app: Client, scheduler: BackgroundScheduler):
         if not data:
             return await message.reply("❌ No scheduled posts.")
         text = "<b>⏰ Scheduled Posts:</b>\n"
-        for i, j in enumerate(data, 1):
-            if j["type"] == "flyer":
-                text += f"{i}. Flyer “{j['name']}” @ {j['time']} → <code>{j['chat_id']}</code>\n"
+        for idx, job in enumerate(data, 1):
+            if job["type"] == "flyer":
+                text += f"{idx}. Flyer “{job['name']}” @ {job['time']} → <code>{job['chat_id']}</code>\n"
             else:
-                text += f"{i}. Text @ {j['time']} → <code>{j['chat_id']}</code>\n"
+                text += f"{idx}. Text @ {job['time']} → <code>{job['chat_id']}</code>\n"
         await message.reply(text)
 
     @app.on_message(filters.command("cancelflyer"))
@@ -223,6 +240,5 @@ def register(app: Client, scheduler: BackgroundScheduler):
         save_scheduled(data)
         await message.reply(f"✅ Canceled scheduled post #{idx+1}: {job}")
 
-    # schedule saved jobs on startup
+    # finally, re-schedule saved jobs on startup
     _schedule_existing(scheduler, app)
-
