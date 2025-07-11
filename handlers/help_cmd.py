@@ -93,8 +93,8 @@ def register(app: Client):
             lines.append("/listscheduled — View scheduled posts")
             lines.append("/cancelflyer <index> — Cancel a scheduled post")
 
-        await message.reply_text(
-            "\n".join(lines),
-            disable_web_page_preview=True,
-            parse_mode="html"
+                await message.reply_text(
+            "
+".join(lines),
+            disable_web_page_preview=True
         )
