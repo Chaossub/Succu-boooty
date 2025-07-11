@@ -71,6 +71,11 @@ def resolve_target(target: str) -> int:
 
 # ─── Job executors ────────────────────────────────────
 async def _send_flyer(client: Client, job: dict):
+    # ensure the chat is known to the client storage
+    try:
+        await client.get_chat(job["chat_id"])
+    except Exception:
+        pass
     # send to forum thread if provided
     kwargs = {}
     if job.get("thread_id") is not None:
@@ -81,6 +86,18 @@ async def _send_flyer(client: Client, job: dict):
         await client.send_photo(job["chat_id"], f["file_id"], caption=f["caption"], **kwargs)
 
 async def _send_text(client: Client, job: dict):
+    # ensure the chat is known to the client storage
+    try:
+        await client.get_chat(job["chat_id"])
+    except Exception:
+        pass
+    kwargs = {}
+    if job.get("thread_id") is not None:
+        kwargs["message_thread_id"] = job["thread_id"]
+    await client.send_message(job["chat_id"], job["text"], **kwargs)
+
+# ─── Registration ────────────────────────────────────
+def register(app: Client, scheduler):(client: Client, job: dict):
     kwargs = {}
     if job.get("thread_id") is not None:
         kwargs["message_thread_id"] = job["thread_id"]
