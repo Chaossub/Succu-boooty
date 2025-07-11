@@ -49,7 +49,6 @@ def save_scheduled(jobs: list):
     with open(SCHEDULE_FILE, "w") as f:
         json.dump(jobs, f, indent=2)
 
-
 # ─── Admin check ──────────────────────────────────────
 async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
     if user_id in SUPERUSERS:
@@ -60,7 +59,6 @@ async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
     except:
         return False
 
-
 # ─── Resolve chat shortcuts or numeric IDs ─────────────
 def resolve_target(target: str) -> int:
     if target.lstrip('-').isdigit():
@@ -70,26 +68,21 @@ def resolve_target(target: str) -> int:
         return CHAT_SHORTCUTS[key]
     raise ValueError(f"Unknown chat shortcut or invalid ID: {target}")
 
-
 # ─── Job executors ────────────────────────────────────
 async def _send_flyer(client: Client, job: dict):
-    # ensure the chat is known
     try:
         await client.get_chat(job["chat_id"])
     except:
         pass
-    # send to forum thread if provided
     kwargs = {}
     if job.get("thread_id") is not None:
         kwargs["message_thread_id"] = job["thread_id"]
-    flyers = load_flyers(job["origin_chat_id"])]
+    flyers = load_flyers(job["origin_chat_id"])
     f = flyers.get(job["name"])
     if f:
         await client.send_photo(job["chat_id"], f["file_id"], caption=f["caption"], **kwargs)
 
-
 async def _send_text(client: Client, job: dict):
-    # ensure the chat is known
     try:
         await client.get_chat(job["chat_id"])
     except:
@@ -99,11 +92,8 @@ async def _send_text(client: Client, job: dict):
         kwargs["message_thread_id"] = job["thread_id"]
     await client.send_message(job["chat_id"], job["text"], **kwargs)
 
-
 # ─── Registration ────────────────────────────────────
 def register(app: Client, scheduler):
-    # (CRUD handlers omitted for brevity—assume your existing add/change/list/delete are here)
-
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def scheduleflyer_handler(client, message: Message):
         if not await is_admin(client, message.chat.id, message.from_user.id):
