@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 
 # Load environment variables
@@ -21,11 +21,11 @@ app = Client(
     parse_mode=ParseMode.HTML,
 )
 
-# Initialize and start the scheduler
-scheduler = BackgroundScheduler(timezone=os.environ.get("SCHEDULER_TZ", "US/Pacific"))
+# Initialize and start the AsyncIO scheduler
+scheduler = AsyncIOScheduler(timezone=os.environ.get("SCHEDULER_TZ", "US/Pacific"))
 scheduler.start()
 
-# Add a listener to log successes and failures
+# Scheduler listener for logging job outcomes
 def job_listener(event):
     if event.exception:
         print(f"[Scheduler] Job {event.job_id} FAILED: {event.exception!r}")
@@ -34,7 +34,7 @@ def job_listener(event):
 
 scheduler.add_listener(job_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
 
-# Import and register all handler modules
+# Import and register handler modules
 from handlers import (
     welcome,
     help_cmd,
@@ -44,6 +44,7 @@ from handlers import (
     xp,
     fun,
     flyer,
+    debug_thread  # for /test command
 )
 
 welcome.register(app)
@@ -54,8 +55,12 @@ summon.register(app)
 xp.register(app)
 fun.register(app)
 
-# Pass the scheduler into the flyer module
-flyer.register(app, scheduler)
+# Register the test debug command (for forum thread IDs)
+debug_thread.register(app)
+
+# Register flyer handlers with scheduler
+after = flyer.register(app, scheduler)
 
 print("✅ SuccuBot is running...")
 app.run()
+
