@@ -9,12 +9,15 @@ from pyrogram.types import Message
 SUPERUSERS = {6964994611}
 
 # ─── Storage paths ────────────────────────────────────
-FLYER_DIR     = "flyers"
+FLYER_DIR = "flyers"
 SCHEDULE_FILE = "scheduled_flyers.json"
+
 os.makedirs(FLYER_DIR, exist_ok=True)
+
 
 def flyer_file(chat_id: int) -> str:
     return os.path.join(FLYER_DIR, f"{chat_id}.json")
+
 
 def load_flyers(chat_id: int) -> dict:
     path = flyer_file(chat_id)
@@ -22,18 +25,22 @@ def load_flyers(chat_id: int) -> dict:
         return json.load(open(path))
     return {}
 
+
 def save_flyers(chat_id: int, data: dict):
     with open(flyer_file(chat_id), "w") as f:
         json.dump(data, f, indent=2)
+
 
 def load_scheduled() -> list:
     if os.path.exists(SCHEDULE_FILE):
         return json.load(open(SCHEDULE_FILE))
     return []
 
+
 def save_scheduled(jobs: list):
     with open(SCHEDULE_FILE, "w") as f:
         json.dump(jobs, f, indent=2)
+
 
 # ─── Admin check ──────────────────────────────────────
 async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
@@ -42,6 +49,7 @@ async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
     member = await client.get_chat_member(chat_id, user_id)
     return member.status in ("creator", "administrator")
 
+
 # ─── Scheduled job tasks ───────────────────────────────
 async def _send_flyer(client: Client, job: dict):
     flyers = load_flyers(job["origin_chat_id"])
@@ -49,23 +57,26 @@ async def _send_flyer(client: Client, job: dict):
     if f:
         await client.send_photo(job["chat_id"], f["file_id"], caption=f["caption"])
 
+
 async def _send_text(client: Client, job: dict):
     await client.send_message(job["chat_id"], job["text"])
+
 
 # ─── Reschedule on startup ─────────────────────────────
 def _schedule_existing(scheduler: BackgroundScheduler, client: Client):
     for job in load_scheduled():
         h, m = map(int, job["time"].split(':'))
-        trigger = dict(
-            trigger="cron",
-            hour=h,
-            minute=m,
-            timezone=pytz_timezone(os.environ.get("SCHEDULER_TZ", "US/Pacific"))
-        )
+        trigger = {
+            "trigger": "cron",
+            "hour": h,
+            "minute": m,
+            "timezone": pytz_timezone(os.environ.get("SCHEDULER_TZ", "US/Pacific"))
+        }
         if job["type"] == "flyer":
             scheduler.add_job(_send_flyer, **trigger, args=[client, job])
         else:
             scheduler.add_job(_send_text, **trigger, args=[client, job])
+
 
 # ─── Registration ────────────────────────────────────
 def register(app: Client, scheduler: BackgroundScheduler):
@@ -141,7 +152,7 @@ def register(app: Client, scheduler: BackgroundScheduler):
         try:
             h, m = map(int, time_str.split(":"))
             dest = int(target)
-        except:
+        except ValueError:
             return await message.reply("❌ Invalid time or chat_id.")
         flyers = load_flyers(message.chat.id)
         if name not in flyers:
@@ -152,7 +163,8 @@ def register(app: Client, scheduler: BackgroundScheduler):
         scheduler.add_job(
             _send_flyer,
             trigger="cron",
-            hour=h, minute=m,
+            hour=h,
+            minute=m,
             timezone=pytz_timezone(os.environ.get("SCHEDULER_TZ", "US/Pacific")),
             args=[client, job]
         )
@@ -169,16 +181,17 @@ def register(app: Client, scheduler: BackgroundScheduler):
         text = " ".join(cmd[3:])
         try:
             h, m = map(int, time_str.split(":"))
-           	dest = int(target)
-        except:
-           	return await message.reply("❌ Invalid time or chat_id.")
-        job = {"type":"text","time":time_str,"chat_id":dest,"text":text}
+            dest = int(target)
+        except ValueError:
+            return await message.reply("❌ Invalid time or chat_id.")
+        job = {"type": "text", "time": time_str, "chat_id": dest, "text": text}
         data = load_scheduled() + [job]
         save_scheduled(data)
         scheduler.add_job(
             _send_text,
             trigger="cron",
-            hour=h, minute=m,
+            hour=h,
+            minute=m,
             timezone=pytz_timezone(os.environ.get("SCHEDULER_TZ", "US/Pacific")),
             args=[client, job]
         )
@@ -212,3 +225,4 @@ def register(app: Client, scheduler: BackgroundScheduler):
 
     # schedule saved jobs on startup
     _schedule_existing(scheduler, app)
+
