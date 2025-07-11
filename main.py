@@ -22,10 +22,10 @@ app = Client(
 )
 
 # Initialize and start the AsyncIO scheduler
-scheduler = AsyncIOScheduler(timezone=os.environ.get("SCHEDULER_TZ", "US/Pacific"))
+scheduler = AsyncIOScheduler(timezone=os.getenv("SCHEDULER_TZ", "US/Pacific"))
 scheduler.start()
 
-# Scheduler listener for logging job outcomes
+# Listener to log job outcomes
 def job_listener(event):
     if event.exception:
         print(f"[Scheduler] Job {event.job_id} FAILED: {event.exception!r}")
@@ -35,20 +35,9 @@ def job_listener(event):
 scheduler.add_listener(job_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
 
 # Import and register handler modules
-from handlers import (
-    welcome,
-    help_cmd,
-    moderation,
-    federation,
-    summon,
-    xp,
-    fun,
-    flyer,
-)
-# Import debug_thread from its module
+from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
 from handlers.debug_thread import register as register_debug_thread
 
-# Register handlers
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -57,7 +46,7 @@ summon.register(app)
 xp.register(app)
 fun.register(app)
 
-# Register the /test debug command
+# Register the /test debug command for forum topics
 register_debug_thread(app)
 
 # Register flyer handlers with the scheduler
