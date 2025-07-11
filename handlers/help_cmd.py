@@ -3,7 +3,7 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Superuser override
+# Super‐admin override
 SUPER_ADMIN_ID = 6964994611
 
 async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
@@ -14,7 +14,6 @@ async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
         return member.status in ("administrator", "creator")
     except:
         return False
-
 
 def register(app: Client):
     @app.on_message(filters.command(["start", "help"]) & (filters.group | filters.private))
@@ -46,7 +45,7 @@ def register(app: Client):
         lines.append("/spank <code>@username</code> — Playful spank & earn XP")
         lines.append("/tease <code>@username</code> — Playful tease & earn XP")
 
-        # XP & Leaderboard
+        # XP
         lines.append("\n📈 <b>XP & Leaderboard</b>")
         lines.append("/naughty — Show your XP")
         lines.append("/leaderboard — Show the XP leaderboard")
@@ -93,7 +92,8 @@ def register(app: Client):
             lines.append("/listscheduled — View scheduled posts")
             lines.append("/cancelflyer <index> — Cancel a scheduled post")
 
-        message.reply_text(
+        # **THIS** needs to be awaited so Telegram actually sends it:
+        await message.reply_text(
             "\n".join(lines),
             disable_web_page_preview=True
         )
