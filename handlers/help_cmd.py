@@ -46,7 +46,7 @@ def register(app: Client):
         lines.append("/spank <code>@username</code> — Playful spank & earn XP")
         lines.append("/tease <code>@username</code> — Playful tease & earn XP")
 
-        # XP
+        # XP & Leaderboard
         lines.append("\n📈 <b>XP & Leaderboard</b>")
         lines.append("/naughty — Show your XP")
         lines.append("/leaderboard — Show the XP leaderboard")
@@ -93,8 +93,7 @@ def register(app: Client):
             lines.append("/listscheduled — View scheduled posts")
             lines.append("/cancelflyer <index> — Cancel a scheduled post")
 
-                await message.reply_text(
-            "
-".join(lines),
+        message.reply_text(
+            "\n".join(lines),
             disable_web_page_preview=True
         )
