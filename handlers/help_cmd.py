@@ -35,16 +35,16 @@ def register(app: Client):
         lines.append("\n🔔 <b>Summon</b>")
         if admin:
             lines.append("/trackall — Track all group members (admin only)")
-        lines.append("/summon <username> — Summon one user")
+        lines.append("/summon <code>@username</code> — Summon one user")
         lines.append("/summonall — Summon all tracked users")
-        lines.append("/flirtysummon <username> — Flirty summon one user")
+        lines.append("/flirtysummon <code>@username</code> — Flirty summon one user")
         lines.append("/flirtysummonall — Flirty summon all users")
 
         # Fun
         lines.append("\n🎉 <b>Fun</b>")
-        lines.append("/bite <username> — Playful bite & earn XP")
-        lines.append("/spank <username> — Playful spank & earn XP")
-        lines.append("/tease <username> — Playful tease & earn XP")
+        lines.append("/bite <code>@username</code> — Playful bite & earn XP")
+        lines.append("/spank <code>@username</code> — Playful spank & earn XP")
+        lines.append("/tease <code>@username</code> — Playful tease & earn XP")
 
         # XP
         lines.append("\n📈 <b>XP & Leaderboard</b>")
@@ -85,7 +85,7 @@ def register(app: Client):
             lines.append("\n📂 <b>Flyers</b>")
             lines.append("/flyer <name> — Retrieve a flyer")
             lines.append("/listflyers — List all flyers")
-            lines.append("/addflyer <name> — Add a flyer (photo with caption)")
+            lines.append("/addflyer <name> — Add a flyer (photo + caption)")
             lines.append("/changeflyer <name> — Update flyer image")
             lines.append("/deleteflyer <name> — Delete a flyer")
             lines.append("/scheduleflyer <name> <HH:MM> <chat> — Schedule flyer")
