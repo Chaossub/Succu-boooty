@@ -96,5 +96,5 @@ def register(app: Client):
         await message.reply_text(
             "\n".join(lines),
             disable_web_page_preview=True,
-            parse_mode="HTML"
+            parse_mode="html"
         )
