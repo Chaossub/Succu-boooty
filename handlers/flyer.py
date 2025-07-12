@@ -113,23 +113,22 @@ async def _send_text(client: Client, job: dict):
 
 # ─── Register handlers ────────────────────────────────
 def register(app: Client, scheduler):
-    # Flyer CRUD
+    # ─── Flyer CRUD ─────────────────────────────────
     @app.on_message(filters.command("addflyer") & filters.photo)
     async def addflyer(client, message: Message):
         if not await is_admin(client, message.chat.id, message.from_user.id):
             return await message.reply("❌ Only admins can add flyers.")
-        # split into: ["/addflyer", "short_name", "rest of caption..."]
-        caption_text = message.caption or ""
-        parts = caption_text.split(None, 2)
+        # split into: ["/addflyer", "short_name", "caption..."]
+        cap = message.caption or ""
+        parts = cap.split(None, 2)
         if len(parts) < 2:
             return await message.reply("❌ Usage: /addflyer <name> [caption]")
         name = parts[1].strip()
-        # optional custom caption
-        custom_caption = parts[2].strip() if len(parts) == 3 else name
+        caption_text = parts[2].strip() if len(parts) == 3 else name
         flyers = load_flyers(message.chat.id)
         if name in flyers:
             return await message.reply(f"❌ Flyer “{name}” already exists.")
-        flyers[name] = {"file_id": message.photo.file_id, "caption": custom_caption}
+        flyers[name] = {"file_id": message.photo.file_id, "caption": caption_text}
         save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” added.")
 
@@ -137,18 +136,18 @@ def register(app: Client, scheduler):
     async def changeflyer(client, message: Message):
         if not await is_admin(client, message.chat.id, message.from_user.id):
             return await message.reply("❌ Only admins can change flyers.")
-        caption_text = message.caption or ""
-        parts = caption_text.split(None, 2)
+        cap = message.caption or ""
+        parts = cap.split(None, 2)
         if len(parts) < 2:
             return await message.reply("❌ Usage: /changeflyer <name> [new caption]")
         name = parts[1].strip()
-        custom_caption = parts[2].strip() if len(parts) == 3 else None
+        new_caption = parts[2].strip() if len(parts) == 3 else None
         flyers = load_flyers(message.chat.id)
         if name not in flyers:
             return await message.reply(f"❌ Flyer “{name}” not found.")
         flyers[name]["file_id"] = message.photo.file_id
-        if custom_caption:
-            flyers[name]["caption"] = custom_caption
+        if new_caption:
+            flyers[name]["caption"] = new_caption
         save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” updated.")
 
@@ -169,8 +168,8 @@ def register(app: Client, scheduler):
         if not flyers:
             return await message.reply("❌ No flyers.")
         text = "<b>📌 Flyers:</b>\n"
-        for key, val in flyers.items():
-            text += f"• <code>{key}</code> — {val.get('caption','')}\n"
+        for k, v in flyers.items():
+            text += f"• <code>{k}</code> — {v['caption']}\n"
         await message.reply(text)
 
     @app.on_message(filters.command("deleteflyer"))
@@ -187,20 +186,24 @@ def register(app: Client, scheduler):
         save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” deleted.")
 
-    # Scheduling (inherit origin from current chat if only 4 args)
+    # ─── Scheduling ─────────────────────────────────
     @app.on_message(filters.command("scheduleflyer"))
     async def scheduleflyer(client, message: Message):
         parts = message.command
-        # /scheduleflyer <name> <HH:MM> <dest> [thread]
-        if len(parts) in (4,5):
-            origin = message.chat.id
+        # detect short vs full form by position of time "HH:MM"
+        origin = message.chat.id
+        thread_id = None
+        if len(parts) >= 4 and ":" in parts[2]:
+            # /scheduleflyer <name> <HH:MM> <dest> [thread]
             name, time_str, dest = parts[1], parts[2], parts[3]
-            thread_id = int(parts[4]) if len(parts)==5 else None
-        # /scheduleflyer <source> <name> <HH:MM> <dest> [thread]
-        elif len(parts) in (5,6):
+            if len(parts) >=5 and parts[4].isdigit():
+                thread_id = int(parts[4])
+        elif len(parts) >= 5 and ":" in parts[3]:
+            # /scheduleflyer <source> <name> <HH:MM> <dest> [thread]
             origin = resolve_target(parts[1])
             name, time_str, dest = parts[2], parts[3], parts[4]
-            thread_id = int(parts[5]) if len(parts)==6 else None
+            if len(parts) >=6 and parts[5].isdigit():
+                thread_id = int(parts[5])
         else:
             return await message.reply(
                 "❌ Usage:\n"
@@ -221,51 +224,46 @@ def register(app: Client, scheduler):
                "thread_id":thread_id}
         data = load_scheduled() + [job]
         save_scheduled(data)
-        scheduler.add_job(_send_flyer, trigger='cron', hour=hour, minute=minute,
+        scheduler.add_job(_send_flyer,
+                          trigger='cron', hour=hour, minute=minute,
                           timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','US/Pacific')),
                           args=[app, job])
         await message.reply(f"✅ Scheduled flyer “{name}” at {time_str} → {dest_id} (thread={thread_id}).")
 
-    # /scheduletext similar pattern …
     @app.on_message(filters.command("scheduletext"))
     async def scheduletext(client, message: Message):
         parts = message.command
-        if len(parts) < 5:
+        origin = message.chat.id
+        thread_id = None
+        if len(parts) >= 4 and ":" in parts[1]:
+            # /scheduletext <HH:MM> <dest> <text...>
+            time_str, dest = parts[1], parts[2]
+            text = " ".join(parts[3:])
+        elif len(parts) >=5 and ":" in parts[2]:
+            # /scheduletext <source> <HH:MM> <dest> <text...>
+            origin = resolve_target(parts[1])
+            time_str, dest = parts[2], parts[3]
+            text = " ".join(parts[4:])
+        else:
             return await message.reply(
                 "❌ Usage:\n"
-                "/scheduletext <name> <HH:MM> <chat> [thread] <text>\n"
+                "/scheduletext <HH:MM> <chat> <text>\n"
                 "or\n"
-                "/scheduletext <source> <HH:MM> <dest> [thread] <text>"
+                "/scheduletext <source> <HH:MM> <dest> <text>"
             )
-        # detect if source omitted
-        if resolve_target(parts[1]) in CHAT_SHORTCUTS.values() or parts[1].lstrip('-').isdigit():
-            # this was source, shift
-            origin = resolve_target(parts[1])
-            time_str = parts[2]
-            dest_id = resolve_target(parts[3])
-            idx = 4
-        else:
-            origin = message.chat.id
-            time_str = parts[1]
-            dest_id = resolve_target(parts[2])
-            idx = 3
-        thread_id = None
-        if parts[idx].isdigit():
-            thread_id = int(parts[idx])
-            idx += 1
-        text = " ".join(parts[idx:])
         try:
             hour, minute = map(int, time_str.split(':'))
-        except:
-            return await message.reply("❌ Invalid time format.")
+            dest_id = resolve_target(dest)
+        except Exception as e:
+            return await message.reply(f"❌ {e}")
         job = {"type":"text","time":time_str,
-               "origin_chat_id":origin,
-               "chat_id":dest_id,
+               "origin_chat_id":origin,"chat_id":dest_id,
                "thread_id":thread_id,
                "text":text}
         data = load_scheduled() + [job]
         save_scheduled(data)
-        scheduler.add_job(_send_text, trigger='cron', hour=hour, minute=minute,
+        scheduler.add_job(_send_text,
+                          trigger='cron', hour=hour, minute=minute,
                           timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','US/Pacific')),
                           args=[app, job])
         await message.reply(f"✅ Scheduled text at {time_str} → {dest_id} (thread={thread_id}).")
@@ -301,6 +299,7 @@ def register(app: Client, scheduler):
     for job in load_scheduled():
         hour, minute = map(int, job['time'].split(':'))
         fn = _send_flyer if job['type']=='flyer' else _send_text
-        scheduler.add_job(fn, trigger='cron', hour=hour, minute=minute,
+        scheduler.add_job(fn,
+                          trigger='cron', hour=hour, minute=minute,
                           timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','US/Pacific')),
                           args=[app, job])
