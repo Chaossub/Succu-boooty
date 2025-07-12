@@ -127,9 +127,11 @@ def register(app: Client, scheduler):
         flyers = load_flyers(message.chat.id)
         if not flyers:
             return await message.reply("❌ No flyers.")
-        text = "<b>📌 Flyers:</b>\n"
+        text = "<b>📌 Flyers:</b>
+"
         for k, v in flyers.items():
-            text += f"• <code>{k}</code> — {v['caption']}\n"
+            text += f"• <code>{k}</code> — {v['caption']}
+"
         await message.reply(text)
 
     @app.on_message(filters.command("deleteflyer"))
@@ -146,41 +148,84 @@ def register(app: Client, scheduler):
         save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” deleted.")
 
-    # Scheduling — only time, no days or threads
+    # Scheduling with optional days of week support
     @app.on_message(filters.command("scheduleflyer"))
     async def scheduleflyer(client, message: Message):
         parts = message.command
-        if len(parts) != 4:
-            return await message.reply("❌ Usage: /scheduleflyer <name> <HH:MM> <dest_chat>")
-        name, time_str, dest = parts[1], parts[2], parts[3]
+        origin = message.chat.id
+        # defaults
+        day_of_week = '*'
+        # Usage variations:
+        # 1) /scheduleflyer <name> <HH:MM> <dest>
+        # 2) /scheduleflyer <name> <HH:MM> <days> <dest>
+        # 3) /scheduleflyer <source> <name> <HH:MM> <dest>
+        # 4) /scheduleflyer <source> <name> <HH:MM> <days> <dest>
+        try:
+            # identify time position
+            if len(parts) == 4:
+                name, time_str, dest = parts[1], parts[2], parts[3]
+            elif len(parts) == 5 and (',' in parts[3] or parts[3].lower() in ['daily','weekdays','weekends']):
+                name, time_str, days, dest = parts[1], parts[2], parts[3].lower(), parts[4]
+                if days == 'daily': day_of_week = '*'
+                elif days == 'weekdays': day_of_week = 'mon,tue,wed,thu,fri'
+                elif days == 'weekends': day_of_week = 'sat,sun'
+                else: day_of_week = days
+            elif len(parts) == 5:
+                origin = resolve_target(parts[1])
+                name, time_str, dest = parts[2], parts[3], parts[4]
+            elif len(parts) == 6:
+                origin = resolve_target(parts[1])
+                name, time_str, days, dest = parts[2], parts[3], parts[4].lower(), parts[5]
+                if days == 'daily': day_of_week = '*'
+                elif days == 'weekdays': day_of_week = 'mon,tue,wed,thu,fri'
+                elif days == 'weekends': day_of_week = 'sat,sun'
+                else: day_of_week = days
+            else:
+                raise ValueError
+        except ValueError:
+            return await message.reply(
+                "❌ Usage:
+"
+                "/scheduleflyer <name> <HH:MM> [<days>] <dest_chat>
+"
+                "or
+"
+                "/scheduleflyer <source> <name> <HH:MM> [<days>] <dest_chat>"
+            )
         try:
             hour, minute = map(int, time_str.split(':'))
             dest_id = resolve_target(dest)
         except Exception as e:
             return await message.reply(f"❌ {e}")
-        flyers = load_flyers(message.chat.id)
+        flyers = load_flyers(origin)
         if name not in flyers:
             return await message.reply(f"❌ Flyer “{name}” not found.")
         job = {"type":"flyer","name":name,"time":time_str,
-               "origin_chat_id":message.chat.id,"chat_id":dest_id}
+               "origin_chat_id":origin,"chat_id":dest_id,
+               "day_of_week":day_of_week}
         data = load_scheduled() + [job]
         save_scheduled(data)
         scheduler.add_job(
             _send_flyer,
-            trigger='cron', hour=hour, minute=minute,
+            trigger='cron', day_of_week=day_of_week,
+            hour=hour, minute=minute,
             timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','America/Los_Angeles')),
             args=[app, job]
         )
-        await message.reply(f"✅ Scheduled flyer “{name}” at {time_str} → {dest_id}.")
+        await message.reply(
+            f"✅ Scheduled flyer “{name}” at {time_str} ({day_of_week}) → {dest_id}."
+        )
 
     @app.on_message(filters.command("listscheduled"))
     async def list_scheduled(client, message: Message):
         data = load_scheduled()
         if not data:
             return await message.reply("❌ No scheduled posts.")
-        text = "<b>⏰ Scheduled Flyers:</b>\n"
+        text = "<b>⏰ Scheduled Flyers:</b>
+"
         for i, j in enumerate(data, 1):
-            text += f"{i}. {j['name']} @ {j['time']} → {j['chat_id']}\n"
+            text += f"{i}. {j['name']} @ {j['time']} ({j.get('day_of_week','*')}) → {j['chat_id']}
+"
         await message.reply(text)
 
     @app.on_message(filters.command("cancelflyer"))
@@ -201,7 +246,8 @@ def register(app: Client, scheduler):
         hour, minute = map(int, job['time'].split(':'))
         scheduler.add_job(
             _send_flyer,
-            trigger='cron', hour=hour, minute=minute,
+            trigger='cron', day_of_week=job.get('day_of_week','*'),
+            hour=hour, minute=minute,
             timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','America/Los_Angeles')),
             args=[app, job]
         )
