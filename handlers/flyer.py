@@ -1,5 +1,3 @@
-# handlers/flyer.py
-
 import os
 import json
 import logging
@@ -57,8 +55,8 @@ async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
     if user_id in SUPERUSERS:
         return True
     try:
-        m = await client.get_chat_member(chat_id, user_id)
-        return m.status in ("creator", "administrator")
+        member = await client.get_chat_member(chat_id, user_id)
+        return member.status in ("creator", "administrator")
     except:
         return False
 
@@ -120,30 +118,38 @@ def register(app: Client, scheduler):
     async def addflyer(client, message: Message):
         if not await is_admin(client, message.chat.id, message.from_user.id):
             return await message.reply("❌ Only admins can add flyers.")
-        parts = (message.caption or "").split(None, 1)
+        # split into: ["/addflyer", "short_name", "rest of caption..."]
+        caption_text = message.caption or ""
+        parts = caption_text.split(None, 2)
         if len(parts) < 2:
-            return await message.reply("❌ Usage: /addflyer <name>")
+            return await message.reply("❌ Usage: /addflyer <name> [caption]")
         name = parts[1].strip()
-        fdict = load_flyers(message.chat.id)
-        if name in fdict:
+        # optional custom caption
+        custom_caption = parts[2].strip() if len(parts) == 3 else name
+        flyers = load_flyers(message.chat.id)
+        if name in flyers:
             return await message.reply(f"❌ Flyer “{name}” already exists.")
-        fdict[name] = {"file_id": message.photo.file_id, "caption": name}
-        save_flyers(message.chat.id, fdict)
+        flyers[name] = {"file_id": message.photo.file_id, "caption": custom_caption}
+        save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” added.")
 
     @app.on_message(filters.command("changeflyer") & filters.photo)
     async def changeflyer(client, message: Message):
         if not await is_admin(client, message.chat.id, message.from_user.id):
             return await message.reply("❌ Only admins can change flyers.")
-        parts = (message.caption or "").split(None, 1)
+        caption_text = message.caption or ""
+        parts = caption_text.split(None, 2)
         if len(parts) < 2:
-            return await message.reply("❌ Usage: /changeflyer <name>")
+            return await message.reply("❌ Usage: /changeflyer <name> [new caption]")
         name = parts[1].strip()
-        fdict = load_flyers(message.chat.id)
-        if name not in fdict:
+        custom_caption = parts[2].strip() if len(parts) == 3 else None
+        flyers = load_flyers(message.chat.id)
+        if name not in flyers:
             return await message.reply(f"❌ Flyer “{name}” not found.")
-        fdict[name]["file_id"] = message.photo.file_id
-        save_flyers(message.chat.id, fdict)
+        flyers[name]["file_id"] = message.photo.file_id
+        if custom_caption:
+            flyers[name]["caption"] = custom_caption
+        save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” updated.")
 
     @app.on_message(filters.command("flyer"))
@@ -151,19 +157,19 @@ def register(app: Client, scheduler):
         if len(message.command) < 2:
             return await message.reply("❌ Usage: /flyer <name>")
         name = message.command[1]
-        fdict = load_flyers(message.chat.id)
-        f = fdict.get(name)
+        flyers = load_flyers(message.chat.id)
+        f = flyers.get(name)
         if not f:
             return await message.reply("❌ Flyer not found.")
         await client.send_photo(message.chat.id, f["file_id"], caption=f["caption"])
 
     @app.on_message(filters.command("listflyers"))
     async def listflyers(client, message: Message):
-        fdict = load_flyers(message.chat.id)
-        if not fdict:
+        flyers = load_flyers(message.chat.id)
+        if not flyers:
             return await message.reply("❌ No flyers.")
         text = "<b>📌 Flyers:</b>\n"
-        for key, val in fdict.items():
+        for key, val in flyers.items():
             text += f"• <code>{key}</code> — {val.get('caption','')}\n"
         await message.reply(text)
 
@@ -174,101 +180,96 @@ def register(app: Client, scheduler):
         if len(message.command) < 2:
             return await message.reply("❌ Usage: /deleteflyer <name>")
         name = message.command[1]
-        fdict = load_flyers(message.chat.id)
-        if name not in fdict:
+        flyers = load_flyers(message.chat.id)
+        if name not in flyers:
             return await message.reply(f"❌ Flyer “{name}” not found.")
-        del fdict[name]
-        save_flyers(message.chat.id, fdict)
+        del flyers[name]
+        save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” deleted.")
 
-    # Schedule flyer: now takes a source chat + name + time + dest chat + optional thread
+    # Scheduling (inherit origin from current chat if only 4 args)
     @app.on_message(filters.command("scheduleflyer"))
     async def scheduleflyer(client, message: Message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
-            return await message.reply("❌ Only admins can schedule flyers.")
         parts = message.command
-        if len(parts) not in (5, 6):
+        # /scheduleflyer <name> <HH:MM> <dest> [thread]
+        if len(parts) in (4,5):
+            origin = message.chat.id
+            name, time_str, dest = parts[1], parts[2], parts[3]
+            thread_id = int(parts[4]) if len(parts)==5 else None
+        # /scheduleflyer <source> <name> <HH:MM> <dest> [thread]
+        elif len(parts) in (5,6):
+            origin = resolve_target(parts[1])
+            name, time_str, dest = parts[2], parts[3], parts[4]
+            thread_id = int(parts[5]) if len(parts)==6 else None
+        else:
             return await message.reply(
-                "❌ Usage: /scheduleflyer <source_chat> <name> <HH:MM> <dest_chat> [<thread_id>]"
+                "❌ Usage:\n"
+                "/scheduleflyer <name> <HH:MM> <chat> [thread]\n"
+                "or\n"
+                "/scheduleflyer <source> <name> <HH:MM> <dest> [thread]"
             )
-        source_id  = resolve_target(parts[1])
-        name       = parts[2]
-        time_str   = parts[3]
-        dest_id    = resolve_target(parts[4])
-        thread_id  = int(parts[5]) if len(parts) == 6 else None
-
-        fdict = load_flyers(source_id)
-        if name not in fdict:
-            return await message.reply(f"❌ Flyer “{name}” not found in {parts[1]}.")
         try:
-            hour, minute = map(int, time_str.split(":"))
-        except:
-            return await message.reply("❌ Invalid time. Use HH:MM.")
-        job = {
-            "type": "flyer",
-            "name": name,
-            "time": time_str,
-            "origin_chat_id": source_id,
-            "chat_id": dest_id,
-            "thread_id": thread_id
-        }
+            hour, minute = map(int, time_str.split(':'))
+            dest_id = resolve_target(dest)
+        except Exception as e:
+            return await message.reply(f"❌ {e}")
+        flyers = load_flyers(origin)
+        if name not in flyers:
+            return await message.reply(f"❌ Flyer “{name}” not found in that chat.")
+        job = {"type":"flyer","name":name,"time":time_str,
+               "origin_chat_id":origin,"chat_id":dest_id,
+               "thread_id":thread_id}
         data = load_scheduled() + [job]
         save_scheduled(data)
-        scheduler.add_job(
-            _send_flyer,
-            trigger="cron",
-            hour=hour,
-            minute=minute,
-            timezone=pytz_timezone(os.getenv("SCHEDULER_TZ", "US/Pacific")),
-            args=[app, job]
-        )
-        await message.reply(f"✅ Scheduled flyer “{name}” from {parts[1]} to {parts[4]} at {time_str} (thread={thread_id}).")
+        scheduler.add_job(_send_flyer, trigger='cron', hour=hour, minute=minute,
+                          timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','US/Pacific')),
+                          args=[app, job])
+        await message.reply(f"✅ Scheduled flyer “{name}” at {time_str} → {dest_id} (thread={thread_id}).")
 
-    # Schedule text (same pattern for source → dest)
+    # /scheduletext similar pattern …
     @app.on_message(filters.command("scheduletext"))
     async def scheduletext(client, message: Message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
-            return await message.reply("❌ Only admins can schedule text.")
         parts = message.command
         if len(parts) < 5:
             return await message.reply(
-                "❌ Usage: /scheduletext <source_chat> <HH:MM> <dest_chat> [<thread_id>] <text>"
+                "❌ Usage:\n"
+                "/scheduletext <name> <HH:MM> <chat> [thread] <text>\n"
+                "or\n"
+                "/scheduletext <source> <HH:MM> <dest> [thread] <text>"
             )
-        source_id = resolve_target(parts[1])
-        time_str  = parts[2]
-        dest_id   = resolve_target(parts[3])
-        idx       = 4
+        # detect if source omitted
+        if resolve_target(parts[1]) in CHAT_SHORTCUTS.values() or parts[1].lstrip('-').isdigit():
+            # this was source, shift
+            origin = resolve_target(parts[1])
+            time_str = parts[2]
+            dest_id = resolve_target(parts[3])
+            idx = 4
+        else:
+            origin = message.chat.id
+            time_str = parts[1]
+            dest_id = resolve_target(parts[2])
+            idx = 3
         thread_id = None
-        if parts[4].isdigit():
-            thread_id = int(parts[4])
+        if parts[idx].isdigit():
+            thread_id = int(parts[idx])
             idx += 1
         text = " ".join(parts[idx:])
-
         try:
-            hour, minute = map(int, time_str.split(":"))
+            hour, minute = map(int, time_str.split(':'))
         except:
             return await message.reply("❌ Invalid time format.")
-        job = {
-            "type": "text",
-            "time": time_str,
-            "origin_chat_id": source_id,
-            "chat_id": dest_id,
-            "thread_id": thread_id,
-            "text": text
-        }
+        job = {"type":"text","time":time_str,
+               "origin_chat_id":origin,
+               "chat_id":dest_id,
+               "thread_id":thread_id,
+               "text":text}
         data = load_scheduled() + [job]
         save_scheduled(data)
-        scheduler.add_job(
-            _send_text,
-            trigger="cron",
-            hour=hour,
-            minute=minute,
-            timezone=pytz_timezone(os.getenv("SCHEDULER_TZ", "US/Pacific")),
-            args=[app, job]
-        )
-        await message.reply(f"✅ Scheduled text from {parts[1]} to {parts[3]} at {time_str} (thread={thread_id}).")
+        scheduler.add_job(_send_text, trigger='cron', hour=hour, minute=minute,
+                          timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','US/Pacific')),
+                          args=[app, job])
+        await message.reply(f"✅ Scheduled text at {time_str} → {dest_id} (thread={thread_id}).")
 
-    # List and cancel remain the same...
     @app.on_message(filters.command("listscheduled"))
     async def list_scheduled(client, message: Message):
         data = load_scheduled()
@@ -276,21 +277,21 @@ def register(app: Client, scheduler):
             return await message.reply("❌ No scheduled posts.")
         lines = []
         for i, j in enumerate(data, 1):
-            ti = f" thread={j.get('thread_id')}" if j.get("thread_id") else ""
-            if j["type"] == "flyer":
-                lines.append(f"{i}. Flyer '{j['name']}' from {j['origin_chat_id']} to {j['chat_id']} @ {j['time']}{ti}")
+            ti = f" thread={j.get('thread_id')}" if j.get('thread_id') else ''
+            if j['type']=='flyer':
+                lines.append(f"{i}. Flyer '{j['name']}' @ {j['time']} → {j['chat_id']}{ti}")
             else:
-                lines.append(f"{i}. Text @ {j['time']} → from {j['origin_chat_id']} to {j['chat_id']}{ti}: {j['text']}")
+                lines.append(f"{i}. Text @ {j['time']} → {j['chat_id']}{ti}: {j['text']}")
         await message.reply("\n".join(lines))
 
     @app.on_message(filters.command("cancelflyer"))
     async def cancel_flyer(client, message: Message):
         parts = message.command
-        if len(parts) != 2 or not parts[1].isdigit():
+        if len(parts)!=2 or not parts[1].isdigit():
             return await message.reply("❌ Usage: /cancelflyer <index>")
         idx = int(parts[1]) - 1
         data = load_scheduled()
-        if idx < 0 or idx >= len(data):
+        if idx<0 or idx>=len(data):
             return await message.reply("❌ Invalid index.")
         data.pop(idx)
         save_scheduled(data)
@@ -298,14 +299,8 @@ def register(app: Client, scheduler):
 
     # Reschedule on startup
     for job in load_scheduled():
-        hour, minute = map(int, job["time"].split(":"))
-        fn = _send_flyer if job["type"] == "flyer" else _send_text
-        scheduler.add_job(
-            fn,
-            trigger="cron",
-            hour=hour,
-            minute=minute,
-            timezone=pytz_timezone(os.getenv("SCHEDULER_TZ", "US/Pacific")),
-            args=[app, job]
-        )
-
+        hour, minute = map(int, job['time'].split(':'))
+        fn = _send_flyer if job['type']=='flyer' else _send_text
+        scheduler.add_job(fn, trigger='cron', hour=hour, minute=minute,
+                          timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','US/Pacific')),
+                          args=[app, job])
