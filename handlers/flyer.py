@@ -22,12 +22,13 @@ for name in ["SUCCUBUS_SANCTUARY", "MODELS_CHAT", "TEST_GROUP"]:
             pass
 
 # ─── Storage paths ────────────────────────────────────
-FLYER_DIR    = "flyers"
+FLYER_DIR = "flyers"
 SCHEDULE_FILE = "scheduled_flyers.json"
 os.makedirs(FLYER_DIR, exist_ok=True)
 
 def flyer_file(chat_id: int) -> str:
     return os.path.join(FLYER_DIR, f"{chat_id}.json")
+
 
 def load_flyers(chat_id: int) -> dict:
     path = flyer_file(chat_id)
@@ -36,15 +37,18 @@ def load_flyers(chat_id: int) -> dict:
             return json.load(f)
     return {}
 
+
 def save_flyers(chat_id: int, data: dict):
     with open(flyer_file(chat_id), "w") as f:
         json.dump(data, f, indent=2)
+
 
 def load_scheduled() -> list:
     if os.path.exists(SCHEDULE_FILE):
         with open(SCHEDULE_FILE, "r") as f:
             return json.load(f)
     return []
+
 
 def save_scheduled(jobs: list):
     with open(SCHEDULE_FILE, "w") as f:
@@ -113,14 +117,11 @@ async def _send_text(client: Client, job: dict):
 
 # ─── Register handlers ────────────────────────────────
 def register(app: Client, scheduler):
-    # ─── Flyer CRUD ─────────────────────────────────
     @app.on_message(filters.command("addflyer") & filters.photo)
     async def addflyer(client, message: Message):
         if not await is_admin(client, message.chat.id, message.from_user.id):
             return await message.reply("❌ Only admins can add flyers.")
-        # split into: ["/addflyer", "short_name", "caption..."]
-        cap = message.caption or ""
-        parts = cap.split(None, 2)
+        parts = (message.caption or "").split(None, 2)
         if len(parts) < 2:
             return await message.reply("❌ Usage: /addflyer <name> [caption]")
         name = parts[1].strip()
@@ -136,8 +137,7 @@ def register(app: Client, scheduler):
     async def changeflyer(client, message: Message):
         if not await is_admin(client, message.chat.id, message.from_user.id):
             return await message.reply("❌ Only admins can change flyers.")
-        cap = message.caption or ""
-        parts = cap.split(None, 2)
+        parts = (message.caption or "").split(None, 2)
         if len(parts) < 2:
             return await message.reply("❌ Usage: /changeflyer <name> [new caption]")
         name = parts[1].strip()
@@ -186,31 +186,49 @@ def register(app: Client, scheduler):
         save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” deleted.")
 
-    # ─── Scheduling ─────────────────────────────────
     @app.on_message(filters.command("scheduleflyer"))
     async def scheduleflyer(client, message: Message):
         parts = message.command
-        # detect short vs full form by position of time "HH:MM"
         origin = message.chat.id
         thread_id = None
-        if len(parts) >= 4 and ":" in parts[2]:
-            # /scheduleflyer <name> <HH:MM> <dest> [thread]
+        day_of_week = '*'
+        # detect extended vs short form
+        # extended: /scheduleflyer <name> <HH:MM> <days> <dest> [thread]
+        if len(parts) >= 5 and ':' in parts[2] and ',' in parts[3] or parts[3].lower() in ['daily','weekdays','weekends']:
+            name, time_str, days, dest = parts[1], parts[2], parts[3].lower(), parts[4]
+            idx = 5
+            if days == 'daily': day_of_week = '*'
+            elif days == 'weekdays': day_of_week = 'mon,tue,wed,thu,fri'
+            elif days == 'weekends': day_of_week = 'sat,sun'
+            else: day_of_week = days
+        # source full form
+        elif len(parts) >= 6 and ':' in parts[3] and (',' in parts[4] or parts[4].lower() in ['daily','weekdays','weekends']):
+            origin = resolve_target(parts[1])
+            name, time_str, days, dest = parts[2], parts[3], parts[4].lower(), parts[5]
+            idx = 6
+            if days == 'daily': day_of_week = '*'
+            elif days == 'weekdays': day_of_week = 'mon,tue,wed,thu,fri'
+            elif days == 'weekends': day_of_week = 'sat,sun'
+            else: day_of_week = days
+        # short form: /scheduleflyer <name> <HH:MM> <dest> [thread]
+        elif len(parts) >= 4 and ':' in parts[2]:
             name, time_str, dest = parts[1], parts[2], parts[3]
-            if len(parts) >=5 and parts[4].isdigit():
-                thread_id = int(parts[4])
-        elif len(parts) >= 5 and ":" in parts[3]:
-            # /scheduleflyer <source> <name> <HH:MM> <dest> [thread]
+            idx = 4
+        # source short form
+        elif len(parts) >=5 and ':' in parts[3]:
             origin = resolve_target(parts[1])
             name, time_str, dest = parts[2], parts[3], parts[4]
-            if len(parts) >=6 and parts[5].isdigit():
-                thread_id = int(parts[5])
+            idx = 5
         else:
             return await message.reply(
                 "❌ Usage:\n"
-                "/scheduleflyer <name> <HH:MM> <chat> [thread]\n"
+                "/scheduleflyer <name> <HH:MM> [<days>] <dest> [thread]\n"
                 "or\n"
-                "/scheduleflyer <source> <name> <HH:MM> <dest> [thread]"
+                "/scheduleflyer <source> <name> <HH:MM> [<days>] <dest> [thread]"
             )
+        # thread id
+        if len(parts) > idx and parts[idx].isdigit():
+            thread_id = int(parts[idx])
         try:
             hour, minute = map(int, time_str.split(':'))
             dest_id = resolve_target(dest)
@@ -219,54 +237,87 @@ def register(app: Client, scheduler):
         flyers = load_flyers(origin)
         if name not in flyers:
             return await message.reply(f"❌ Flyer “{name}” not found in that chat.")
-        job = {"type":"flyer","name":name,"time":time_str,
-               "origin_chat_id":origin,"chat_id":dest_id,
-               "thread_id":thread_id}
+        job = {
+            "type": "flyer", "name": name, "time": time_str,
+            "origin_chat_id": origin, "chat_id": dest_id,
+            "thread_id": thread_id, "day_of_week": day_of_week
+        }
         data = load_scheduled() + [job]
         save_scheduled(data)
-        scheduler.add_job(_send_flyer,
-                          trigger='cron', hour=hour, minute=minute,
-                          timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','US/Pacific')),
-                          args=[app, job])
-        await message.reply(f"✅ Scheduled flyer “{name}” at {time_str} → {dest_id} (thread={thread_id}).")
+        scheduler.add_job(
+            _send_flyer,
+            trigger='cron',
+            day_of_week=day_of_week,
+            hour=hour, minute=minute,
+            timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','America/Los_Angeles')),
+            args=[app, job]
+        )
+        await message.reply(f"✅ Scheduled flyer “{name}” at {time_str} ({day_of_week}) → {dest_id} (thread={thread_id}).")
 
     @app.on_message(filters.command("scheduletext"))
     async def scheduletext(client, message: Message):
         parts = message.command
         origin = message.chat.id
         thread_id = None
-        if len(parts) >= 4 and ":" in parts[1]:
-            # /scheduletext <HH:MM> <dest> <text...>
+        day_of_week = '*'
+        # extended: /scheduletext <HH:MM> <days> <dest> <text>
+        if len(parts) >=5 and ':' in parts[1] and (',' in parts[2] or parts[2].lower() in ['daily','weekdays','weekends']):
+            time_str, days, dest = parts[1], parts[2].lower(), parts[3]
+            idx = 4
+            if days == 'daily': day_of_week = '*'
+            elif days == 'weekdays': day_of_week = 'mon,tue,wed,thu,fri'
+            elif days == 'weekends': day_of_week = 'sat,sun'
+            else: day_of_week = days
+            text = " ".join(parts[idx:])
+        # source extended: /scheduletext <source> <HH:MM> <days> <dest> <text>
+        elif len(parts) >=6 and ':' in parts[2] and (',' in parts[3] or parts[3].lower() in ['daily','weekdays','weekends']):
+            origin = resolve_target(parts[1])
+            time_str, days, dest = parts[2], parts[3].lower(), parts[4]
+            idx = 5
+            if days == 'daily': day_of_week = '*'
+            elif days == 'weekdays': day_of_week = 'mon,tue,wed,thu,fri'
+            elif days == 'weekends': day_of_week = 'sat,sun'
+            else: day_of_week = days
+            text = " ".join(parts[idx:])
+        # short: /scheduletext <HH:MM> <dest> <text>
+        elif len(parts) >=4 and ':' in parts[1]:
             time_str, dest = parts[1], parts[2]
             text = " ".join(parts[3:])
-        elif len(parts) >=5 and ":" in parts[2]:
-            # /scheduletext <source> <HH:MM> <dest> <text...>
+        # source short: /scheduletext <source> <HH:MM> <dest> <text>
+        elif len(parts) >=5 and ':' in parts[2]:
             origin = resolve_target(parts[1])
             time_str, dest = parts[2], parts[3]
             text = " ".join(parts[4:])
         else:
             return await message.reply(
                 "❌ Usage:\n"
-                "/scheduletext <HH:MM> <chat> <text>\n"
+                "/scheduletext <HH:MM> [<days>] <dest> <text>\n"
                 "or\n"
-                "/scheduletext <source> <HH:MM> <dest> <text>"
+                "/scheduletext <source> <HH:MM> [<days>] <dest> <text>"
             )
+        # thread
+        # no thread for text
         try:
             hour, minute = map(int, time_str.split(':'))
             dest_id = resolve_target(dest)
         except Exception as e:
             return await message.reply(f"❌ {e}")
-        job = {"type":"text","time":time_str,
-               "origin_chat_id":origin,"chat_id":dest_id,
-               "thread_id":thread_id,
-               "text":text}
+        job = {
+            "type":"text","text":text,"time":time_str,
+            "origin_chat_id":origin,"chat_id":dest_id,
+            "thread_id":thread_id,"day_of_week":day_of_week
+        }
         data = load_scheduled() + [job]
         save_scheduled(data)
-        scheduler.add_job(_send_text,
-                          trigger='cron', hour=hour, minute=minute,
-                          timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','US/Pacific')),
-                          args=[app, job])
-        await message.reply(f"✅ Scheduled text at {time_str} → {dest_id} (thread={thread_id}).")
+        scheduler.add_job(
+            _send_text,
+            trigger='cron',
+            day_of_week=day_of_week,
+            hour=hour, minute=minute,
+            timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','America/Los_Angeles')),
+            args=[app, job]
+        )
+        await message.reply(f"✅ Scheduled text at {time_str} ({day_of_week}) → {dest_id}.")
 
     @app.on_message(filters.command("listscheduled"))
     async def list_scheduled(client, message: Message):
@@ -276,10 +327,11 @@ def register(app: Client, scheduler):
         lines = []
         for i, j in enumerate(data, 1):
             ti = f" thread={j.get('thread_id')}" if j.get('thread_id') else ''
+            dow = j.get('day_of_week', '*')
             if j['type']=='flyer':
-                lines.append(f"{i}. Flyer '{j['name']}' @ {j['time']} → {j['chat_id']}{ti}")
+                lines.append(f"{i}. Flyer '{j['name']}' @ {j['time']} ({dow}) → {j['chat_id']}{ti}")
             else:
-                lines.append(f"{i}. Text @ {j['time']} → {j['chat_id']}{ti}: {j['text']}")
+                lines.append(f"{i}. Text @ {j['time']} ({dow}) → {j['chat_id']}{ti}: {j['text']}")
         await message.reply("\n".join(lines))
 
     @app.on_message(filters.command("cancelflyer"))
@@ -299,7 +351,9 @@ def register(app: Client, scheduler):
     for job in load_scheduled():
         hour, minute = map(int, job['time'].split(':'))
         fn = _send_flyer if job['type']=='flyer' else _send_text
-        scheduler.add_job(fn,
-                          trigger='cron', hour=hour, minute=minute,
-                          timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','US/Pacific')),
-                          args=[app, job])
+        scheduler.add_job(
+            fn,
+            trigger='cron', day_of_week=job.get('day_of_week','*'), hour=hour, minute=minute,
+            timezone=pytz_timezone(os.getenv('SCHEDULER_TZ','America/Los_Angeles')),
+            args=[app, job]
+        )
