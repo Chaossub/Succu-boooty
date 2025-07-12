@@ -141,7 +141,6 @@ def register(app: Client, scheduler):
         save_flyers(message.chat.id, flyers)
         await message.reply(f"✅ Flyer “{name}” deleted.")
 
-    # Scheduling with optional days of week
     @app.on_message(filters.command("scheduleflyer"))
     async def scheduleflyer(client, message: Message):
         parts = message.command
@@ -205,7 +204,7 @@ def register(app: Client, scheduler):
             args=[app, job]
         )
         await message.reply(
-            f"✅ Scheduled flyer “{name}” at {time_str} ({day_of_week}) → {dest_id}."
+            f"✅ Scheduled flyer “{name}” at {time_str} (daily if day_of_week=='*' else day_of_week) → {dest_id}."
         )
 
     @app.on_message(filters.command("listscheduled"))
