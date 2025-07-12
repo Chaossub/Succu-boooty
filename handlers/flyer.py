@@ -178,4 +178,4 @@ async def cancel_flyer(client: Client, message: Message):
     logger.debug(f"/cancelflyer invoked: {message.text}")
     parts = message.text.split()
     if len(parts) != 2 or not parts[1].isdigit():
-        return await message.reply("❌ Usage: /cancelflyer <    # truncated due to length
+        return await message.reply("❌ Usage: /cancelflyer <index>")
