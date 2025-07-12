@@ -1,18 +1,24 @@
 import os
+import logging
 from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 
-# Load environment variables
+# ─── Configure Logging ─────────────────────────────────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ─── Load Environment Variables ────────────────────────
 load_dotenv()
+API_ID    = int(os.getenv("API_ID"))
+API_HASH  = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+# Default to America/Los_Angeles if not set explicitly
+TZ = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
 
-API_ID   = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN= os.getenv("BOT_TOKEN")
-
-# Initialize the bot client
+# ─── Initialize Pyrogram Client ───────────────────────
 app = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -21,20 +27,20 @@ app = Client(
     parse_mode=ParseMode.HTML,
 )
 
-# Initialize and start the AsyncIO scheduler
-scheduler = AsyncIOScheduler(timezone=os.getenv("SCHEDULER_TZ", "US/Pacific"))
+# ─── Initialize and Start Scheduler ───────────────────
+scheduler = AsyncIOScheduler(timezone=TZ)
 scheduler.start()
 
-# Listener to log job outcomes
+# ─── Job Execution Listener ───────────────────────────
 def job_listener(event):
     if event.exception:
-        print(f"[Scheduler] Job {event.job_id} FAILED: {event.exception!r}")
+        logger.error("Job %s failed: %s", event.job_id, event.exception)
     else:
-        print(f"[Scheduler] Job {event.job_id} ran successfully at {event.scheduled_run_time!r}")
+        logger.info("Job %s executed successfully at %s", event.job_id, event.scheduled_run_time)
 
 scheduler.add_listener(job_listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
 
-# Import and register handler modules
+# ─── Register Handler Modules ─────────────────────────
 from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
 from handlers.debug_thread import register as register_debug_thread
 
@@ -45,12 +51,10 @@ federation.register(app)
 summon.register(app)
 xp.register(app)
 fun.register(app)
-
-# Register the /test debug command for forum topics
 register_debug_thread(app)
 
-# Register flyer handlers with the scheduler
+# ─── Register Flyer Handlers with Scheduler ──────────
 flyer.register(app, scheduler)
 
-print("✅ SuccuBot is running...")
+logger.info("✅ SuccuBot is running (Scheduler TZ: %s)", TZ)
 app.run()
