@@ -337,13 +337,45 @@ def register(app: Client, scheduler: BackgroundScheduler):
     tz = timezone(os.getenv('SCHEDULER_TZ', 'America/Los_Angeles'))
     logger.info('Rescheduling %d jobs on startup', len(jobs))
     for job in jobs:
-        if 'run_date' in job:
-            run_date = datetime.fromisoformat(job['run_date'])
-            scheduler.add_job(_send_text if job['type'] == 'text' else _send_flyer,
-                              trigger='date', run_date=run_date, args=[app, job])
-        else:
-            h, m = map(int, job['time'].split(':'))
-            scheduler.add_job(_send_text if job['type'] == 'text' else _send_flyer,
-                              trigger='cron', hour=h, minute=m, day_of_week=job.get('day_of_week', '*'), timezone=tz,
-                              args=[app, job])
-
+        # schedule text jobs
+        if job.get('type') == 'text':
+            if 'run_date' in job:
+                run_date = datetime.fromisoformat(job['run_date'])
+                scheduler.add_job(
+                    _send_text,
+                    trigger='date',
+                    run_date=run_date,
+                    args=[app, job]
+                )
+            else:
+                h, m = map(int, job['time'].split(':'))
+                scheduler.add_job(
+                    _send_text,
+                    trigger='cron',
+                    hour=h,
+                    minute=m,
+                    day_of_week=job.get('day_of_week', '*'),
+                    timezone=tz,
+                    args=[app, job]
+                )
+        # schedule flyer jobs
+        elif job.get('type') == 'flyer':
+            if 'run_date' in job:
+                run_date = datetime.fromisoformat(job['run_date'])
+                scheduler.add_job(
+                    _send_flyer,
+                    trigger='date',
+                    run_date=run_date,
+                    args=[app, job]
+                )
+            else:
+                h, m = map(int, job['time'].split(':'))
+                scheduler.add_job(
+                    _send_flyer,
+                    trigger='cron',
+                    hour=h,
+                    minute=m,
+                    day_of_week=job.get('day_of_week', '*'),
+                    timezone=tz,
+                    args=[app, job]
+                )
