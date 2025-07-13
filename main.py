@@ -2,12 +2,14 @@
 
 import os
 import logging
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
+import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait
 from apscheduler.schedulers.background import BackgroundScheduler
 from pytz import timezone
 
@@ -68,6 +70,17 @@ xp.register(app)
 fun.register(app)
 flyer.register(app, scheduler)
 
-# ─── Run ────────────────────────────────────────────────────────────────────
-logger.info("✅ SuccuBot is running…")
-app.run()
+# ─── Run bot (with FloodWait retry) ─────────────────────────────────────────
+def run_bot():
+    try:
+        logger.info("✅ Starting SuccuBot…")
+        app.run()
+    except FloodWait as e:
+        wait = e.value if hasattr(e, "value") else getattr(e, "x", None) or e.seconds or e.args[0]
+        logger.warning(f"🚧 FloodWait received—sleeping for {wait} seconds before retrying.")
+        time.sleep(int(wait) + 1)
+        logger.info("🔄 Retrying SuccuBot start…")
+        app.run()
+
+if __name__ == "__main__":
+    run_bot()
