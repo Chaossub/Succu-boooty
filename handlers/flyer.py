@@ -26,7 +26,7 @@ def load_flyers(chat_id: int):
     return all_flyers.get(str(chat_id), {})
 
 def save_flyers(chat_id: int, flyers: Dict):
-    all_flyers      = load_json(FLYER_FILE)
+    all_flyers            = load_json(FLYER_FILE)
     all_flyers[str(chat_id)] = flyers
     save_json(FLYER_FILE, all_flyers)
 
@@ -46,6 +46,7 @@ async def _send_flyer(app, job):
 
 def register(app, scheduler: BackgroundScheduler):
     logger = logging.getLogger(__name__)
+    logger.info("📢 flyer.register() called")
 
     @app.on_message(filters.command("addflyer") & filters.photo)
     async def add_flyer(client, message: Message):
@@ -152,12 +153,11 @@ def register(app, scheduler: BackgroundScheduler):
         if len(parts) < 2:
             return await message.reply("❌ Usage: /cancelflyer <name>")
         name = parts[1].strip()
-        jobs = load_scheduled()
+        jobs     = load_scheduled()
         new_jobs = [j for j in jobs if not (j["name"] == name and j["chat_id"] == message.chat.id)]
         if len(new_jobs) == len(jobs):
             return await message.reply("ℹ️ No scheduled flyer found by that name.")
         save_scheduled(new_jobs)
-        # also remove from APScheduler
         for j in scheduler.get_jobs():
             args = getattr(j, "args", [])
             if len(args) == 2 and isinstance(args[1], dict) and args[1].get("name") == name:
