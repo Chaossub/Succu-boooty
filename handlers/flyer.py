@@ -179,4 +179,55 @@ async def schedule_text_cmd(client: Client, message: Message):
     data.append(job)
     save_scheduled(data)
     label = 'daily' if dow=='*' else dow
-    await message.reply(f"✅ Scheduled text @{timestr} ({label}) -> {chat_id}")\್
+    await message.reply(f"✅ Scheduled text @{timestr} ({label}) -> {chat_id}")
+
+# --- Internal runners ---
+async def _send_flyer(client: Client, job):
+    logger.info(f"Running flyer job: {job}")
+    flyers = load_flyers(job['origin_chat'])
+    f = flyers.get(job['name'])
+    if not f:
+        logger.error("Missing flyer %s", job['name'])
+        return
+    try:
+        await client.send_photo(job['target_chat'], f['file_id'], caption=f['caption'])
+        logger.info("Sent flyer to %s", job['target_chat'])
+    except Exception:
+        logger.exception("Failed flyer job %s", job)
+
+async def _send_text(client: Client, job):
+    logger.info(f"Running text job: {job}")
+    try:
+        await client.send_message(job['target_chat'], job['text'])
+        logger.info("Sent text to %s", job['target_chat'])
+    except Exception:
+        logger.exception("Failed text job %s", job)
+
+# --- Register function ---
+def register(app: Client, scheduler: BackgroundScheduler):
+    jobs = load_scheduled()
+    logger.info(f"Rescheduling {len(jobs)} jobs on startup")
+    for job in jobs:
+        h, m = map(int, job['time'].split(':'))
+        trigger_args = {
+            'trigger': 'cron',
+            'hour': h,
+            'minute': m,
+            'day_of_week': job.get('day_of_week', '*'),
+            'timezone': tz(os.getenv('SCHEDULER_TZ', 'America/Los_Angeles'))
+        }
+        if job['type'] == 'flyer':
+            scheduler.add_job(_send_flyer, **trigger_args, args=[app, job])
+        else:
+            scheduler.add_job(_send_text, **trigger_args, args=[app, job])
+
+    # Register handlers with Pyrogram
+    app.add_handler(add_flyer)
+    app.add_handler(change_flyer)
+    app.add_handler(delete_flyer)
+    app.add_handler(list_flyers)
+    app.add_handler(send_flyer)
+    app.add_handler(schedule_flyer_cmd)
+    app.add_handler(schedule_text_cmd)
+    app.add_handler(list_scheduled)
+    app.add_handler(cancel_flyer)
