@@ -4,10 +4,12 @@ import logging
 from dotenv import load_dotenv
 from pytz import timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pyrogram import Client, idle
+from fastapi import FastAPI
+from pyrogram import Client
 from pyrogram.enums import ParseMode
+import uvicorn
 
-# ─── Environment & Logging ─────────────────────────────────────────────────────
+# ─── Config & Logging ──────────────────────────────────────────────────────────
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -16,8 +18,16 @@ API_ID    = int(os.getenv("API_ID"))
 API_HASH  = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TZ        = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
+PORT      = int(os.getenv("PORT", 8000))  # use platform‐assigned PORT
 
-# ─── Pyrogram Bot ───────────────────────────────────────────────────────────────
+# ─── FastAPI “Keep-Alive” ───────────────────────────────────────────────────────
+app = FastAPI()
+
+@app.get("/")
+async def health_check():
+    return {"status": "ok"}
+
+# ─── Pyrogram Bot & APScheduler ────────────────────────────────────────────────
 bot = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -26,22 +36,13 @@ bot = Client(
     parse_mode=ParseMode.HTML,
 )
 
-# ─── AsyncIO Scheduler ─────────────────────────────────────────────────────────
-sched_tz   = timezone(TZ)
-scheduler  = AsyncIOScheduler(timezone=sched_tz)
+scheduler = AsyncIOScheduler(timezone=timezone(TZ))
 
-# ─── Register Handlers ─────────────────────────────────────────────────────────
+# register your handlers (flyer needs scheduler)
 from handlers import (
-    welcome,
-    help_cmd,
-    moderation,
-    federation,
-    summon,
-    xp,
-    fun,
-    flyer
+    welcome, help_cmd, moderation, federation,
+    summon, xp, fun, flyer
 )
-
 welcome.register(bot)
 help_cmd.register(bot)
 moderation.register(bot)
@@ -49,23 +50,29 @@ federation.register(bot)
 summon.register(bot)
 xp.register(bot)
 fun.register(bot)
-# flyer needs the scheduler reference
 flyer.register(bot, scheduler)
 
-# ─── Boot Sequence ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    # 1) Start the scheduler
+# ─── Lifespan Hooks ────────────────────────────────────────────────────────────
+@app.on_event("startup")
+async def on_startup():
+    logger.info("🔌 Starting scheduler & bot")
     scheduler.start()
-    logger.info("✅ AsyncIO Scheduler started")
+    await bot.start()
+    logger.info("✅ Scheduler & bot are running")
 
-    # 2) Start the bot
-    bot.start()
-    logger.info("🤖 Pyrogram bot started")
-
-    # 3) Block here until you press CTRL+C or get a SIGTERM
-    idle()
-
-    # (If idle() ever returns, clean up)
-    bot.stop()
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("🛑 Shutting down scheduler & bot")
     scheduler.shutdown(wait=False)
-    logger.info("🛑 Clean shutdown complete")
+    await bot.stop()
+    logger.info("✅ Clean shutdown complete")
+
+# ─── Entrypoint ───────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",        # module:app
+        host="0.0.0.0",
+        port=PORT,
+        log_level="info",
+        lifespan="on"      # ensure startup/shutdown fire
+    )
