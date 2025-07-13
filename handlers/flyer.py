@@ -10,6 +10,9 @@ from utils.check_admin import is_admin
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+# ─── Global Scheduler Reference ───────────────────────────────────────────────────
+SCHEDULER: BackgroundScheduler = None
+
 # ─── Paths ──────────────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
@@ -152,6 +155,18 @@ async def schedule_flyer_cmd(client: Client, message: Message):
     scheduled = load_scheduled()
     scheduled.append(job)
     save_scheduled(scheduled)
+
+    # schedule immediately
+    tzinfo = timezone(os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
+    trigger = dict(
+        trigger="cron",
+        hour=hour,
+        minute=minute,
+        day_of_week=dow,
+        timezone=tzinfo
+    )
+    SCHEDULER.add_job(_send_flyer, **trigger, args=[client, job])
+
     label = "daily" if dow == "*" else dow
     await message.reply(f"✅ Scheduled '{name}' @ {timestr} ({label}) → {chat_id}")
 
@@ -182,6 +197,18 @@ async def schedule_text_cmd(client: Client, message: Message):
     scheduled = load_scheduled()
     scheduled.append(job)
     save_scheduled(scheduled)
+
+    # schedule immediately
+    tzinfo = timezone(os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
+    trigger = dict(
+        trigger="cron",
+        hour=hour,
+        minute=minute,
+        day_of_week=dow,
+        timezone=tzinfo
+    )
+    SCHEDULER.add_job(_send_text, **trigger, args=[client, job])
+
     label = "daily" if dow == "*" else dow
     await message.reply(f"✅ Scheduled text @ {timestr} ({label}) → {chat_id}")
 
@@ -237,6 +264,9 @@ async def _send_text(client: Client, job):
 
 # ─── Registration ─────────────────────────────────────────────────────────────
 def register(app: Client, scheduler: BackgroundScheduler):
+    global SCHEDULER
+    SCHEDULER = scheduler
+
     jobs = load_scheduled()
     logger.info("Rescheduling %d jobs on startup", len(jobs))
     tzinfo = timezone(os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
@@ -247,3 +277,4 @@ def register(app: Client, scheduler: BackgroundScheduler):
             scheduler.add_job(_send_flyer, **trigger, args=[app, job])
         else:
             scheduler.add_job(_send_text, **trigger, args=[app, job])
+
