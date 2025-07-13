@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import time
 
 from dotenv import load_dotenv
 from pytz import timezone
@@ -10,6 +11,7 @@ import uvicorn
 
 from pyrogram import Client, idle
 from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait
 
 # ─── Environment & Logging ─────────────────────────────────────────────────────
 load_dotenv()
@@ -61,7 +63,7 @@ flyer.register(bot, scheduler)
 # ─── Boot Sequence ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     # 1) Start FastAPI in non-daemon thread
-    t = threading.Thread(target=run_api)   # daemon=False by default
+    t = threading.Thread(target=run_api)
     t.start()
     logger.info(f"🚀 FastAPI server listening on port {PORT}")
 
@@ -69,7 +71,16 @@ if __name__ == "__main__":
     scheduler.start()
     logger.info("✅ AsyncIO Scheduler started")
 
-    # 3) Start the bot and block forever
-    bot.start()
+    # 3) Start the bot, handling potential FloodWait
+    while True:
+        try:
+            bot.start()
+            break
+        except FloodWait as e:
+            wait = getattr(e, 'x', None) or getattr(e, 'value', None) or 60
+            logger.warning(f"FloodWait: sleeping for {wait} seconds before retry")
+            time.sleep(wait)
     logger.info("🤖 Pyrogram bot started")
+
+    # 4) Block the main thread to keep process alive
     idle()
