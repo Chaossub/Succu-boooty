@@ -8,7 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 import uvicorn
 
-from pyrogram import Client
+from pyrogram import Client, idle
 from pyrogram.enums import ParseMode
 
 # ─── Environment & Logging ─────────────────────────────────────────────────────
@@ -55,14 +55,13 @@ federation.register(bot)
 summon.register(bot)
 xp.register(bot)
 fun.register(bot)
-
-# Flyer needs the scheduler reference
-flyer.register(bot, scheduler)
+# flyer needs the scheduler reference
+ayer.register(bot, scheduler)
 
 # ─── Boot Sequence ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     # 1) Start FastAPI in non-daemon thread
-    t = threading.Thread(target=run_api)   # daemon=False by default
+    t = threading.Thread(target=run_api)
     t.start()
     logger.info(f"🚀 FastAPI server listening on port {PORT}")
 
@@ -70,8 +69,7 @@ if __name__ == "__main__":
     scheduler.start()
     logger.info("✅ AsyncIO Scheduler started")
 
-    # 3) Start the bot and block forever
+    # 3) Start the bot and block
     bot.start()
     logger.info("🤖 Pyrogram bot started")
-    bot.idle()
-    # (never reaches here until SIGTERM/Ctrl+C)
+    idle()
