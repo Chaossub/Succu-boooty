@@ -130,87 +130,87 @@ async def send_flyer(client: Client, message: Message):
 async def schedule_flyer_cmd(client: Client, message: Message):
     parts = message.text.split()
     if len(parts) < 5:
-        return await message.reply("❌ Usage: /scheduleflyer <name> <HH:MM> <days|daily> <chat_id>")
+        return await message.reply("❌ Usage: /scheduleflyer <name> <HH:MM> <days|daily> <chat_id|ENV_VAR>")
     name, timestr, dayspec, target = parts[1], parts[2], parts[3], parts[4]
     try:
-        hour, minute = map(int, timestr.split(":"))
+        hour, minute = map(int, timestr.split(':'))
     except ValueError:
         return await message.reply("❌ Invalid time format. Use HH:MM.")
-    dow = "*" if dayspec.lower() in ("daily", "*") else dayspec.lower()
+    dow = '*' if dayspec.lower() in ('daily', '*') else dayspec.lower()
+    # resolve chat_id or env var
     try:
         chat_id = int(target)
     except ValueError:
-        return await message.reply("❌ Invalid chat ID.")
+        env_val = os.getenv(target)
+        if env_val:
+            try:
+                chat_id = int(env_val)
+            except ValueError:
+                return await message.reply("❌ Invalid chat ID or unknown shortcut.")
+        else:
+            return await message.reply("❌ Invalid chat ID or unknown shortcut.")
     flyers = load_flyers(message.chat.id)
     if name not in flyers:
         return await message.reply("❌ Flyer not found.")
     job = {
-        "type": "flyer",
-        "name": name,
-        "time": timestr,
-        "day_of_week": dow,
-        "origin_chat": message.chat.id,
-        "target_chat": chat_id
+        'type': 'flyer',
+        'name': name,
+        'time': timestr,
+        'day_of_week': dow,
+        'origin_chat': message.chat.id,
+        'target_chat': chat_id,
     }
     scheduled = load_scheduled()
     scheduled.append(job)
     save_scheduled(scheduled)
-
     # schedule immediately
-    tzinfo = timezone(os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
-    trigger = dict(
-        trigger="cron",
-        hour=hour,
-        minute=minute,
-        day_of_week=dow,
-        timezone=tzinfo
-    )
+    tzinfo = timezone(os.getenv('SCHEDULER_TZ', 'America/Los_Angeles'))
+    trigger = dict(trigger='cron', hour=hour, minute=minute, day_of_week=dow, timezone=tzinfo)
     SCHEDULER.add_job(_send_flyer, **trigger, args=[client, job])
-
-    label = "daily" if dow == "*" else dow
-    await message.reply(f"✅ Scheduled '{name}' @ {timestr} ({label}) → {chat_id}")
+    label = 'daily' if dow == '*' else dow
+    await message.reply(f"✅ Scheduled '{name}' @ {timestr} ({label}) → {target}")
 
 @Client.on_message(filters.command("scheduletext"))
 async def schedule_text_cmd(client: Client, message: Message):
     parts = message.text.split()
     if len(parts) < 5:
-        return await message.reply("❌ Usage: /scheduletext <HH:MM> <days|daily> <chat_id> <text>")
+        return await message.reply("❌ Usage: /scheduletext <HH:MM> <days|daily> <chat_id|ENV_VAR> <text>")
     timestr, dayspec, target = parts[1], parts[2], parts[3]
-    text = " ".join(parts[4:])
+    text = ' '.join(parts[4:])
     try:
-        hour, minute = map(int, timestr.split(":"))
+        hour, minute = map(int, timestr.split(':'))
     except ValueError:
         return await message.reply("❌ Invalid time format. Use HH:MM.")
-    dow = "*" if dayspec.lower() in ("daily", "*") else dayspec.lower()
+    dow = '*' if dayspec.lower() in ('daily', '*') else dayspec.lower()
+    # resolve chat_id or env var
     try:
         chat_id = int(target)
     except ValueError:
-        return await message.reply("❌ Invalid chat ID.")
+        env_val = os.getenv(target)
+        if env_val:
+            try:
+                chat_id = int(env_val)
+            except ValueError:
+                return await message.reply("❌ Invalid chat ID or unknown shortcut.")
+        else:
+            return await message.reply("❌ Invalid chat ID or unknown shortcut.")
     job = {
-        "type": "text",
-        "time": timestr,
-        "day_of_week": dow,
-        "origin_chat": message.chat.id,
-        "target_chat": chat_id,
-        "text": text
+        'type': 'text',
+        'time': timestr,
+        'day_of_week': dow,
+        'origin_chat': message.chat.id,
+        'target_chat': chat_id,
+        'text': text,
     }
     scheduled = load_scheduled()
     scheduled.append(job)
     save_scheduled(scheduled)
-
     # schedule immediately
-    tzinfo = timezone(os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
-    trigger = dict(
-        trigger="cron",
-        hour=hour,
-        minute=minute,
-        day_of_week=dow,
-        timezone=tzinfo
-    )
+    tzinfo = timezone(os.getenv('SCHEDULER_TZ', 'America/Los_Angeles'))
+    trigger = dict(trigger='cron', hour=hour, minute=minute, day_of_week=dow, timezone=tzinfo)
     SCHEDULER.add_job(_send_text, **trigger, args=[client, job])
-
-    label = "daily" if dow == "*" else dow
-    await message.reply(f"✅ Scheduled text @ {timestr} ({label}) → {chat_id}")
+    label = 'daily' if dow == '*' else dow
+    await message.reply(f"✅ Scheduled text @ {timestr} ({label}) → {target}")
 
 @Client.on_message(filters.command("listscheduled"))
 async def list_scheduled_cmd(client: Client, message: Message):
@@ -219,11 +219,11 @@ async def list_scheduled_cmd(client: Client, message: Message):
         return await message.reply("❌ No scheduled jobs.")
     lines = []
     for i, j in enumerate(jobs, 1):
-        kind = j["type"]
-        t = j["time"]
-        dow = "daily" if j["day_of_week"] == "*" else j["day_of_week"]
-        tgt = j["target_chat"]
-        name = j.get("name", "(text)")
+        kind = j['type']
+        t = j['time']
+        dow = 'daily' if j['day_of_week'] == '*' else j['day_of_week']
+        tgt = j['target_chat']
+        name = j.get('name', '(text)')
         lines.append(f"{i}. {kind} '{name}' @ {t} ({dow}) → {tgt}")
     await message.reply("⏰ <b>Scheduled jobs:</b>\n" + "\n".join(lines))
 
@@ -246,19 +246,19 @@ async def cancel_flyer_cmd(client: Client, message: Message):
 # ─── Internal Runners ──────────────────────────────────────────────────────────
 async def _send_flyer(client: Client, job):
     logger.info("🏷 Running flyer job %s", job)
-    flyers = load_flyers(job["origin_chat"])
-    f = flyers.get(job["name"])
+    flyers = load_flyers(job['origin_chat'])
+    f = flyers.get(job['name'])
     if not f:
-        return logger.error("Missing flyer %s", job["name"])
+        return logger.error("Missing flyer %s", job['name'])
     try:
-        await client.send_photo(job["target_chat"], f["file_id"], caption=f["caption"])
+        await client.send_photo(job['target_chat'], f['file_id'], caption=f['caption'])
     except Exception:
         logger.exception("Failed flyer job %s", job)
 
 async def _send_text(client: Client, job):
     logger.info("🏷 Running text job %s", job)
     try:
-        await client.send_message(job["target_chat"], job["text"])
+        await client.send_message(job['target_chat'], job['text'])
     except Exception:
         logger.exception("Failed text job %s", job)
 
@@ -266,15 +266,13 @@ async def _send_text(client: Client, job):
 def register(app: Client, scheduler: BackgroundScheduler):
     global SCHEDULER
     SCHEDULER = scheduler
-
     jobs = load_scheduled()
     logger.info("Rescheduling %d jobs on startup", len(jobs))
-    tzinfo = timezone(os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
+    tzinfo = timezone(os.getenv('SCHEDULER_TZ', 'America/Los_Angeles'))
     for job in jobs:
-        h, m = map(int, job["time"].split(":"))
-        trigger = dict(trigger="cron", hour=h, minute=m, day_of_week=job["day_of_week"], timezone=tzinfo)
-        if job["type"] == "flyer":
+        h, m = map(int, job['time'].split(':'))
+        trigger = dict(trigger='cron', hour=h, minute=m, day_of_week=job['day_of_week'], timezone=tzinfo)
+        if job['type'] == 'flyer':
             scheduler.add_job(_send_flyer, **trigger, args=[app, job])
         else:
             scheduler.add_job(_send_text, **trigger, args=[app, job])
-
