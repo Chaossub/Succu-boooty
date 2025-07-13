@@ -1,15 +1,12 @@
 import os
 import logging
-import threading
-
 from dotenv import load_dotenv
 from pytz import timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pyrogram import Client
-from pyrogram.enums import ParseMode
-
 from fastapi import FastAPI
 import uvicorn
+from pyrogram import Client
+from pyrogram.enums import ParseMode
 
 # ─── Environment & Logging ─────────────────────────────────────────────────────
 load_dotenv()
@@ -22,62 +19,60 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 TZ        = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
 PORT      = int(os.getenv("PORT", 8000))
 
-# ─── Pyrogram Bot ───────────────────────────────────────────────────────────────
-app = Client(
-    "SuccuBot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML,
-)
-
-# ─── AsyncIO Scheduler ─────────────────────────────────────────────────────────
-sched_tz   = timezone(TZ)
-scheduler  = AsyncIOScheduler(timezone=sched_tz)
-
-# ─── FastAPI “Keep-Alive” ───────────────────────────────────────────────────────
+# ─── FastAPI App ───────────────────────────────────────────────────────────────
 api = FastAPI()
 
 @api.get("/")
 async def root():
     return {"status": "ok"}
 
-def run_api():
-    """Run uvicorn so the container sees a live HTTP port."""
+# ─── Pyrogram Bot ───────────────────────────────────────────────────────────────
+bot = Client(
+    "SuccuBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML
+)
+
+# ─── Scheduler ─────────────────────────────────────────────────────────────────
+sched_tz  = timezone(TZ)
+scheduler = AsyncIOScheduler(timezone=sched_tz)
+
+# ─── Register Handlers ─────────────────────────────────────────────────────────
+from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
+
+# Register command handlers
+welcome.register(bot)
+help_cmd.register(bot)
+moderation.register(bot)
+federation.register(bot)
+summon.register(bot)
+xp.register(bot)
+fun.register(bot)
+# flyer needs scheduler reference
+flyer.register(bot, scheduler)
+
+# ─── FastAPI Startup/Shutdown Events ───────────────────────────────────────────
+@api.on_event("startup")
+async def startup_event():
+    # start bot and scheduler
+    await bot.start()
+    scheduler.start()
+    logger.info("✅ Bot and AsyncIO Scheduler started")
+
+@api.on_event("shutdown")
+async def shutdown_event():
+    # stop scheduler and bot
+    scheduler.shutdown(wait=False)
+    await bot.stop()
+    logger.info("🛑 Bot and Scheduler stopped")
+
+# ─── Run Server ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
     uvicorn.run(
         api,
         host="0.0.0.0",
         port=PORT,
         log_level="info"
     )
-
-# ─── Register Handlers ─────────────────────────────────────────────────────────
-from handlers import (
-    welcome, help_cmd, moderation, federation,
-    summon, xp, fun, flyer
-)
-welcome.register(app)
-help_cmd.register(app)
-moderation.register(app)
-federation.register(app)
-summon.register(app)
-xp.register(app)
-fun.register(app)
-# Flyer takes a scheduler
-flyer.register(app, scheduler)
-
-# ─── Startup ───────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    # 1) Start FastAPI in a non-daemon thread so it won't get killed
-    server_thread = threading.Thread(target=run_api)  # daemon=False by default
-    server_thread.start()
-    logger.info(f"🚀 FastAPI server started on port {PORT}")
-
-    # 2) Start the AsyncIO scheduler
-    scheduler.start()
-    logger.info("✅ AsyncIO Scheduler started")
-
-    # 3) Run your Telegram bot (blocks until shutdown)
-    app.run()
-
-    # If app.run ever returns, server_thread is still non-daemon so process stays up
