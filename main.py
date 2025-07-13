@@ -52,7 +52,7 @@ fun.register(bot)
 # flyer needs the scheduler reference
 flyer.register(bot, scheduler)
 
-# ─── Bot Startup ────────────────────────────────────────────────────────────────
+# ─── Boot Sequence ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     # 1) Start the scheduler
     scheduler.start()
@@ -62,10 +62,10 @@ if __name__ == "__main__":
     bot.start()
     logger.info("🤖 Pyrogram bot started")
 
-    # 3) Block here until Ctrl+C or SIGTERM
+    # 3) Block here until you press CTRL+C or get a SIGTERM
     idle()
 
-    # (if idle ever returns, clean up)
+    # (If idle() ever returns, clean up)
     bot.stop()
     scheduler.shutdown(wait=False)
     logger.info("🛑 Clean shutdown complete")
