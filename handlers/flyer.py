@@ -13,8 +13,9 @@ logger.setLevel(logging.DEBUG)
 
 # Paths
 BASE_DIR = os.path.dirname(__file__)
-FLYER_DIR = os.path.join(os.path.dirname(BASE_DIR), 'flyers')
-SCHEDULE_FILE = os.path.join(os.path.dirname(BASE_DIR), 'scheduled_flyers.json')
+PROJECT_ROOT = os.path.dirname(BASE_DIR)
+FLYER_DIR = os.path.join(PROJECT_ROOT, 'flyers')
+SCHEDULE_FILE = os.path.join(PROJECT_ROOT, 'scheduled_flyers.json')
 
 # Ensure storage directory
 os.makedirs(FLYER_DIR, exist_ok=True)
@@ -36,30 +37,29 @@ def save_json(path, data):
     except Exception:
         logger.exception(f"Failed to save JSON to {path}")
 
-# Flyer storage functions
-def flyer_file(chat_id):
+# Storage functions
+def flyer_file(chat_id: int) -> str:
     return os.path.join(FLYER_DIR, f"{chat_id}.json")
 
-def load_flyers(chat_id):
+def load_flyers(chat_id: int) -> dict:
     flyers = load_json(flyer_file(chat_id), {})
     logger.debug(f"Loaded {len(flyers)} flyers for chat {chat_id}")
     return flyers
 
-def save_flyers(chat_id, flyers):
+def save_flyers(chat_id: int, flyers: dict):
     save_json(flyer_file(chat_id), flyers)
     logger.debug(f"Saved {len(flyers)} flyers for chat {chat_id}")
 
-# Scheduled jobs storage
-def load_scheduled():
+def load_scheduled() -> list:
     jobs = load_json(SCHEDULE_FILE, [])
     logger.debug(f"Loaded {len(jobs)} scheduled jobs")
     return jobs
 
-def save_scheduled(jobs):
+def save_scheduled(jobs: list):
     save_json(SCHEDULE_FILE, jobs)
     logger.debug(f"Persisted {len(jobs)} scheduled jobs")
 
-# ─── Flyer Management Commands ───────────────────────
+# ─── Flyer Management Commands ─────────────────────
 @Client.on_message(filters.command("addflyer") & filters.photo)
 async def add_flyer(client: Client, message: Message):
     if not await is_admin(client, message.chat.id, message.from_user.id):
@@ -123,15 +123,16 @@ async def send_flyer(client: Client, message: Message):
     f = flyers.get(name)
     if not f:
         return await message.reply("❌ Flyer not found.")
-    await client.send_photo(message.chat.id, f["file_id"], caption=f["caption"])
+    await client.send_photo(message.chat.id, f["file_id"], caption=f['caption'])
 
-# ─── Scheduling Commands ─────────────────────────────
-@Client.on_message(filters.command("scheduleflyer"))
-async def schedule_flyer_cmd(client: Client, message: Message):
+# ─── Text Scheduling Commands ─────────────────────
+@Client.on_message(filters.command("scheduletext"))
+async def schedule_text_cmd(client: Client, message: Message):
     parts = message.text.split()
     if len(parts) < 5:
-        return await message.reply("❌ Usage: /scheduleflyer <name> <HH:MM> <days|daily> <chat_id>")
-    name, timestr, dayspec, target = parts[1], parts[2], parts[3], parts[4]
+        return await message.reply("❌ Usage: /scheduletext <HH:MM> <days|daily> <chat_id> <text>")
+    timestr, dayspec, target = parts[1], parts[2], parts[3]
+    text = " ".join(parts[4:])
     try:
         hour, minute = map(int, timestr.split(':'))
     except ValueError:
@@ -141,16 +142,14 @@ async def schedule_flyer_cmd(client: Client, message: Message):
         chat_id = int(target)
     except ValueError:
         return await message.reply("❌ Invalid chat_id.")
-    flyers = load_flyers(message.chat.id)
-    if name not in flyers:
-        return await message.reply("❌ Flyer not found.")
-    job = {'type':'flyer','name':name,'time':timestr,'day_of_week':dow,
-           'origin_chat':message.chat.id,'target_chat':chat_id}
+    job = {'type':'text', 'time':timestr, 'day_of_week':dow,
+           'origin_chat': message.chat.id, 'target_chat': chat_id,
+           'text': text}
     data = load_scheduled()
     data.append(job)
     save_scheduled(data)
     label = 'daily' if dow=='*' else dow
-    await message.reply(f"✅ Scheduled '{name}' @{timestr} ({label}) -> {chat_id}")
+    await message.reply(f"✅ Scheduled text @{timestr} ({label}) -> {chat_id}")
 
 @Client.on_message(filters.command("listscheduled"))
 async def list_scheduled(client: Client, message: Message):
@@ -158,9 +157,12 @@ async def list_scheduled(client: Client, message: Message):
     if not data:
         return await message.reply("❌ No scheduled jobs.")
     lines = ["⏰ <b>Scheduled:</b>"]
-    for i,j in enumerate(data,1):
-        lbl='daily' if j['day_of_week']=='*' else j['day_of_week']
-        lines.append(f"{i}. {j['name']} @{j['time']} ({lbl}) -> {j['target_chat']}")
+    for i, j in enumerate(data, 1):
+        lbl = 'daily' if j['day_of_week']=='*' else j['day_of_week']
+        if j['type']=='flyer':
+            lines.append(f"{i}. flyer '{j['name']}' @{j['time']} ({lbl}) -> {j['target_chat']}")
+        else:
+            lines.append(f"{i}. text @{j['time']} ({lbl}) -> {j['target_chat']}")
     await message.reply("\n".join(lines))
 
 @Client.on_message(filters.command("cancelflyer"))
@@ -170,15 +172,15 @@ async def cancel_flyer(client: Client, message: Message):
         return await message.reply("❌ Usage: /cancelflyer <index>")
     idx = int(parts[1]) - 1
     data = load_scheduled()
-    if idx < 0 or idx >= len(data):
+    if idx<0 or idx>=len(data):
         return await message.reply("❌ Invalid index.")
     job = data.pop(idx)
     save_scheduled(data)
-    await message.reply(f"✅ Canceled '{job['name']}' schedule.")
+    await message.reply(f"✅ Canceled schedule #{idx+1}.")
 
-# Internal job runner
+# ─── Internal runners ──────────────────────────────
 async def _send_flyer(client: Client, job):
-    logger.info(f"Running job: {job}")
+    logger.info(f"Running flyer job: {job}")
     flyers = load_flyers(job['origin_chat'])
     f = flyers.get(job['name'])
     if not f:
@@ -186,31 +188,41 @@ async def _send_flyer(client: Client, job):
         return
     try:
         await client.send_photo(job['target_chat'], f['file_id'], caption=f['caption'])
-        logger.info("Sent to %s", job['target_chat'])
+        logger.info("Sent flyer to %s", job['target_chat'])
     except Exception:
-        logger.exception("Failed job: %s", job)
+        logger.exception("Failed flyer job %s", job)
 
-# Registration
+async def _send_text(client: Client, job):
+    logger.info(f"Running text job: {job}")
+    try:
+        await client.send_message(job['target_chat'], job['text'])
+        logger.info("Sent text to %s", job['target_chat'])
+    except Exception:
+        logger.exception("Failed text job %s", job)
+
+# ─── Registration hook ─────────────────────────────
 def register(app: Client, scheduler: BackgroundScheduler):
     jobs = load_scheduled()
     logger.info(f"Rescheduling {len(jobs)} jobs on startup")
     for job in jobs:
         h, m = map(int, job['time'].split(':'))
-        scheduler.add_job(
-            _send_flyer,
-            trigger='cron',
-            hour=h, minute=m,
-            day_of_week=job.get('day_of_week', '*'),
-            timezone=tz(os.getenv('SCHEDULER_TZ', 'America/Los_Angeles')),
-            args=[app, job]
+        trigger_args = dict(
+            trigger='cron', hour=h, minute=m,
+            day_of_week=job.get('day_of_week','*'),
+            timezone=tz(os.getenv('SCHEDULER_TZ','America/Los_Angeles'))
         )
+        if job['type']=='flyer':
+            scheduler.add_job(_send_flyer, **trigger_args, args=[app, job])
+        else:
+            scheduler.add_job(_send_text, **trigger_args, args=[app, job])
 
-    # register handlers
+    # Wire up handlers
     app.add_handler(add_flyer)
     app.add_handler(change_flyer)
     app.add_handler(delete_flyer)
     app.add_handler(list_flyers)
     app.add_handler(send_flyer)
+    app.add_handler(schedule_text_cmd)
     app.add_handler(schedule_flyer_cmd)
     app.add_handler(list_scheduled)
     app.add_handler(cancel_flyer)
