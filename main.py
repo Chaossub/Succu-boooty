@@ -25,13 +25,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def run_health_server():
+    port = int(os.environ.get("PORT", 8000))
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+    server = HTTPServer(("0.0.0.0", port), Handler)
+    logger.info(f"🌐 Health-check server listening on :{port}")
+    server.serve_forever()
+
 def run_bot():
-    # Initialize scheduler and Pyrogram client
+    # ─── Scheduler ──────────────────────────────────────────────────────────
     sched_tz   = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
     scheduler  = BackgroundScheduler(timezone=timezone(sched_tz))
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
+    # ─── Bot client ─────────────────────────────────────────────────────────
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -40,7 +52,7 @@ def run_bot():
         parse_mode=ParseMode.HTML
     )
 
-    # Register handlers
+    # ─── Register handlers ──────────────────────────────────────────────────
     from handlers import (
         welcome,
         help_cmd,
@@ -65,18 +77,7 @@ def run_bot():
     app.run()
 
 if __name__ == "__main__":
-    # Start bot in background thread
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-
-    # Health‐check server in main thread
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-
-    port = int(os.environ.get("PORT", 8000))
-    server = HTTPServer(("0.0.0.0", port), Handler)
-    logger.info(f"🌐 Health‐check server listening on :{port}")
-    server.serve_forever()
+    # 1) Health-check on background thread
+    threading.Thread(target=run_health_server, daemon=True).start()
+    # 2) Bot (with scheduler) on main thread
+    run_bot()
