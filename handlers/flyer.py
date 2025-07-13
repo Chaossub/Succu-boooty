@@ -18,7 +18,7 @@ FLYER_DIR = os.path.join(PROJECT_ROOT, 'flyers')
 SCHEDULE_FILE = os.path.join(PROJECT_ROOT, 'scheduled_flyers.json')
 
 # Ensure the flyers directory exists
-ot.makedirs(FLYER_DIR, exist_ok=True)
+os.makedirs(FLYER_DIR, exist_ok=True)
 
 # --- JSON helpers ---
 def load_json(path, default):
@@ -248,9 +248,13 @@ def register(app: Client, scheduler: BackgroundScheduler):
         else:
             scheduler.add_job(_send_text, **trigger_args, args=[app, job])
 
-    # Add handlers
-def main_register(app, scheduler):  # alias to avoid shadowing
-    register(app, scheduler)
-
-# Hook expected by main.py
-register = main_register
+    # Register handlers with Pyrogram
+    app.add_handler(add_flyer)
+    app.add_handler(change_flyer)
+    app.add_handler(delete_flyer)
+    app.add_handler(list_flyers)
+    app.add_handler(send_flyer)
+    app.add_handler(schedule_flyer_cmd)
+    app.add_handler(schedule_text_cmd)
+    app.add_handler(list_scheduled)
+    app.add_handler(cancel_flyer)
