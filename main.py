@@ -56,7 +56,7 @@ summon.register(bot)
 xp.register(bot)
 fun.register(bot)
 # flyer needs the scheduler reference
-ayer.register(bot, scheduler)
+flyer.register(bot, scheduler)
 
 # ─── Boot Sequence ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
