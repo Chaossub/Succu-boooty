@@ -55,13 +55,13 @@ federation.register(bot)
 summon.register(bot)
 xp.register(bot)
 fun.register(bot)
-# flyer needs the scheduler reference
+# Flyer needs the scheduler reference
 flyer.register(bot, scheduler)
 
 # ─── Boot Sequence ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     # 1) Start FastAPI in non-daemon thread
-    t = threading.Thread(target=run_api)
+    t = threading.Thread(target=run_api)   # daemon=False by default
     t.start()
     logger.info(f"🚀 FastAPI server listening on port {PORT}")
 
@@ -69,7 +69,7 @@ if __name__ == "__main__":
     scheduler.start()
     logger.info("✅ AsyncIO Scheduler started")
 
-    # 3) Start the bot and block
+    # 3) Start the bot and block forever
     bot.start()
     logger.info("🤖 Pyrogram bot started")
     idle()
