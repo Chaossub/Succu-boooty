@@ -9,9 +9,12 @@ from pytz import timezone
 
 # ─── Load environment ───────────────────────────────────────────────────────
 load_dotenv()
-API_ID    = int(os.getenv("API_ID"))
-API_HASH  = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_ID    = int(os.getenv("API_ID", "0"))
+API_HASH  = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
+# ─── Debug print to confirm env vars ────────────────────────────────────────
+print(f"🔍 Loaded ENV → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
 # ─── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -46,6 +49,7 @@ from handlers import (
     flyer,
 )
 
+logger.info("📢 Registering handlers…")
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
