@@ -1,40 +1,32 @@
 import os
 import logging
-import threading
-import time
 
 from dotenv import load_dotenv
 from pytz import timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
-import uvicorn
-
-from pyrogram import Client, idle
+from pyrogram import Client
 from pyrogram.enums import ParseMode
-from pyrogram.errors import FloodWait
 
-# ─── Environment & Logging ─────────────────────────────────────────────────────
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Environment
 API_ID    = int(os.getenv("API_ID"))
 API_HASH  = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TZ        = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
 PORT      = int(os.getenv("PORT", 8000))
 
-# ─── FastAPI “Keep-Alive” ───────────────────────────────────────────────────────
-api = FastAPI()
+# FastAPI app (will keep container alive)
+app = FastAPI()
 
-@api.get("/")
-async def root():
+@app.get("/")
+async def health_check():
     return {"status": "ok"}
 
-def run_api():
-    uvicorn.run(api, host="0.0.0.0", port=PORT, log_level="info")
-
-# ─── Pyrogram Bot ───────────────────────────────────────────────────────────────
+# Pyrogram client
 bot = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -43,13 +35,15 @@ bot = Client(
     parse_mode=ParseMode.HTML,
 )
 
-# ─── AsyncIO Scheduler ─────────────────────────────────────────────────────────
+# AsyncIO scheduler
 sched_tz   = timezone(TZ)
 scheduler  = AsyncIOScheduler(timezone=sched_tz)
 
-# ─── Register Handlers ─────────────────────────────────────────────────────────
-from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
-
+# Register your handlers
+from handlers import (
+    welcome, help_cmd, moderation, federation,
+    summon, xp, fun, flyer
+)
 welcome.register(bot)
 help_cmd.register(bot)
 moderation.register(bot)
@@ -57,30 +51,29 @@ federation.register(bot)
 summon.register(bot)
 xp.register(bot)
 fun.register(bot)
-# Flyer needs the scheduler reference
 flyer.register(bot, scheduler)
 
-# ─── Boot Sequence ─────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    # 1) Start FastAPI in non-daemon thread
-    t = threading.Thread(target=run_api)
-    t.start()
-    logger.info(f"🚀 FastAPI server listening on port {PORT}")
-
-    # 2) Start the AsyncIO scheduler
+# FastAPI startup/shutdown events
+@app.on_event("startup")
+async def on_startup():
+    logger.info("🔌 Starting bot and scheduler...")
+    await bot.start()
     scheduler.start()
-    logger.info("✅ AsyncIO Scheduler started")
+    logger.info("✅ Bot and scheduler running.")
 
-    # 3) Start the bot, handling potential FloodWait
-    while True:
-        try:
-            bot.start()
-            break
-        except FloodWait as e:
-            wait = getattr(e, 'x', None) or getattr(e, 'value', None) or 60
-            logger.warning(f"FloodWait: sleeping for {wait} seconds before retry")
-            time.sleep(wait)
-    logger.info("🤖 Pyrogram bot started")
+@app.on_event("shutdown")
+async def on_shutdown():
+    logger.info("🛑 Shutting down scheduler and bot...")
+    scheduler.shutdown(wait=False)
+    await bot.stop()
+    logger.info("✅ Clean shutdown complete.")
 
-    # 4) Block the main thread to keep process alive
-    idle()
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "main:app",       # module:app
+        host="0.0.0.0",
+        port=PORT,
+        log_level="info",
+        lifespan="on"     # ensure startup/shutdown events fire
+    )
