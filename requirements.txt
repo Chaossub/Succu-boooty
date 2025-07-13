@@ -1,10 +1,22 @@
-setuptools
-wheel
+# Packaging
+setuptools>=65.0.0
+wheel>=0.38.4
 
+# Telegram client
 git+https://github.com/pyrogram/pyrogram.git@master#egg=pyrogram
 tgcrypto==1.2.5
+
+# Environment vars
 python-dotenv==1.0.1
+
+# Database
 pymongo==4.7.2
+
+# Scheduling
 apscheduler==3.10.1
-fastapi
-uvicorn
+python-dateutil==2.8.2
+pytz>=2023.3
+
+# Web server (if you expose FastAPI)
+fastapi==0.95.1
+uvicorn[standard]==0.23.2
