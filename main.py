@@ -1,31 +1,35 @@
 import os
-from dotenv import load_dotenv
 import logging
+from dotenv import load_dotenv
 from pytz import timezone
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 
-# Load environment
+# — Load environment —
 load_dotenv()
-API_ID = int(os.getenv('API_ID'))
-API_HASH = os.getenv('API_HASH')
-BOT_TOKEN = os.getenv('BOT_TOKEN')
+API_ID    = int(os.getenv("API_ID"))
+API_HASH  = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Initialize Pyrogram client
+# — Configure logging —
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# — Initialize Pyrogram client —
 app = Client(
-    'SuccuBot',
+    "SuccuBot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     parse_mode=ParseMode.HTML
 )
 
-# Initialize scheduler with timezone
-sched_tz = timezone(os.getenv('SCHEDULER_TZ', 'America/Los_Angeles'))
-scheduler = BackgroundScheduler(timezone=sched_tz)
+# — Initialize AsyncIO scheduler with your TZ —
+sched_tz  = timezone(os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
+scheduler = AsyncIOScheduler(timezone=sched_tz)
 
-# Register handlers
+# — Register all handlers —
 from handlers import (
     welcome,
     help_cmd,
@@ -36,6 +40,7 @@ from handlers import (
     fun,
     flyer
 )
+
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -43,12 +48,13 @@ federation.register(app)
 summon.register(app)
 xp.register(app)
 fun.register(app)
-# Flyer needs scheduler reference
+
+# flyer needs the scheduler reference
 flyer.register(app, scheduler)
 
-# Start scheduler and bot
+# — Start the scheduler —
 scheduler.start()
-logging.info('✅ Scheduler started')
-print('✅ Scheduler started')
-print('✅ SuccuBot is running...')
+logger.info("✅ AsyncIO Scheduler started")
+
+# — Run the bot (this will drive both Pyrogram and AsyncIO) —
 app.run()
