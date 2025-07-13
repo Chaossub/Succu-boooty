@@ -42,7 +42,6 @@ scheduler = AsyncIOScheduler(timezone=sched_tz)
 # ─── Register Handlers ─────────────────────────────────────────────────────────
 from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
 
-# Register command handlers
 welcome.register(bot)
 help_cmd.register(bot)
 moderation.register(bot)
@@ -50,28 +49,26 @@ federation.register(bot)
 summon.register(bot)
 xp.register(bot)
 fun.register(bot)
-# flyer needs scheduler reference
+# Flyer needs the scheduler reference
 flyer.register(bot, scheduler)
 
-# ─── FastAPI Startup/Shutdown Events ───────────────────────────────────────────
+# ─── Startup/Shutdown Events ───────────────────────────────────────────────────
 @api.on_event("startup")
-async def startup_event():
-    # start bot and scheduler
+async def on_startup():
     await bot.start()
     scheduler.start()
     logger.info("✅ Bot and AsyncIO Scheduler started")
 
 @api.on_event("shutdown")
-async def shutdown_event():
-    # stop scheduler and bot
+async def on_shutdown():
     scheduler.shutdown(wait=False)
     await bot.stop()
     logger.info("🛑 Bot and Scheduler stopped")
 
-# ─── Run Server ────────────────────────────────────────────────────────────────
+# ─── Run Uvicorn ASGI Server ──────────────────────────────────────────────────
 if __name__ == "__main__":
     uvicorn.run(
-        api,
+        "main:api",   # module:app
         host="0.0.0.0",
         port=PORT,
         log_level="info"
