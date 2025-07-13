@@ -166,16 +166,20 @@ async def schedule_flyer_cmd(client: Client, message: Message):
     jobs = load_scheduled()
     tz = timezone(os.getenv('SCHEDULER_TZ', 'America/Los_Angeles'))
     if repeat:
-        job = {'type': 'flyer', 'time': time_str, 'day_of_week': '*', 'origin_chat': message.chat.id, 'target_chat': chat_id, 'name': name}
+        job = {'type': 'flyer', 'time': time_str, 'day_of_week': '*',
+               'origin_chat': message.chat.id, 'target_chat': chat_id, 'name': name}
         jobs.append(job)
         save_scheduled(jobs)
-        SCHEDULER.add_job(_send_flyer, trigger='cron', hour=hour, minute=minute, day_of_week='*', timezone=tz, args=[client, job])
+        SCHEDULER.add_job(_send_flyer, trigger='cron',
+                          hour=hour, minute=minute, day_of_week='*',
+                          timezone=tz, args=[client, job])
         return await message.reply(f"✅ Flyer '{name}' scheduled daily at {time_str} → {chat_id}")
     now = datetime.now(tz)
     run_date = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if run_date <= now:
         run_date += timedelta(days=1)
-    job = {'type': 'flyer', 'run_date': run_date.isoformat(), 'origin_chat': message.chat.id, 'target_chat': chat_id, 'name': name}
+    job = {'type': 'flyer', 'run_date': run_date.isoformat(),
+           'origin_chat': message.chat.id, 'target_chat': chat_id, 'name': name}
     jobs.append(job)
     save_scheduled(jobs)
     SCHEDULER.add_job(_send_flyer, run_date=run_date, args=[client, job])
@@ -185,7 +189,7 @@ async def schedule_flyer_cmd(client: Client, message: Message):
 async def schedule_text_cmd(client: Client, message: Message):
     if not await is_admin(client, message.chat.id, message.from_user.id):
         return await message.reply('❌ Only admins can schedule text.')
-    parts = message.text.split()
+    parts = message.text.split(maxsplit=3)
     if len(parts) < 3:
         return await message.reply('❌ Usage: /scheduletext <HH:MM> [daily] <chat_id|ENV_VAR> <text>')
     time_str = parts[1]
@@ -193,38 +197,48 @@ async def schedule_text_cmd(client: Client, message: Message):
         hour, minute = map(int, time_str.split(':'))
     except ValueError:
         return await message.reply('❌ Invalid time format. Use HH:MM.')
+    # decide if there's a 'daily' flag
     if parts[2].lower() == 'daily':
         repeat = True
-        target = parts[3]
-        text_idx = 4
+        if len(parts) < 4:
+            return await message.reply('❌ You must provide <chat_id> and <text> after "daily".')
+        rest = parts[3]
     else:
         repeat = False
-        target = parts[2]
-        text_idx = 3
-    if len(parts) <= text_idx:
+        rest = parts[2] + (' ' + parts[3] if len(parts) > 3 else '')
+    # split rest into target and text
+    target, sep, text_body = rest.partition(' ')
+    if not sep or not text_body.strip():
         return await message.reply('❌ Usage: /scheduletext <HH:MM> [daily] <chat_id|ENV_VAR> <text>')
-    text = ' '.join(parts[text_idx:])
+    # resolve chat_id
     try:
         chat_id = int(target)
     except ValueError:
-        env_val = os.getenv(target)
-        if env_val and env_val.lstrip('-').isdigit():
-            chat_id = int(env_val)
+        if target.startswith('@'):
+            chat_id = target
         else:
-            return await message.reply('❌ Invalid chat ID or unknown shortcut.')
+            env_val = os.getenv(target)
+            try:
+                chat_id = int(env_val)
+            except Exception:
+                return await message.reply('❌ Invalid chat ID, unknown shortcut, or username.')
     jobs = load_scheduled()
     tz = timezone(os.getenv('SCHEDULER_TZ', 'America/Los_Angeles'))
     if repeat:
-        job = {'type': 'text', 'time': time_str, 'day_of_week': '*', 'origin_chat': message.chat.id, 'target_chat': chat_id, 'text': text}
+        job = {'type': 'text', 'time': time_str, 'day_of_week': '*',
+               'origin_chat': message.chat.id, 'target_chat': chat_id, 'text': text_body}
         jobs.append(job)
         save_scheduled(jobs)
-        SCHEDULER.add_job(_send_text, trigger='cron', hour=hour, minute=minute, day_of_week='*', timezone=tz, args=[client, job])
+        SCHEDULER.add_job(_send_text, trigger='cron',
+                          hour=hour, minute=minute, day_of_week='*',
+                          timezone=tz, args=[client, job])
         return await message.reply(f"✅ Text scheduled daily at {time_str} → {chat_id}")
     now = datetime.now(tz)
     run_date = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if run_date <= now:
         run_date += timedelta(days=1)
-    job = {'type': 'text', 'run_date': run_date.isoformat(), 'origin_chat': message.chat.id, 'target_chat': chat_id, 'text': text}
+    job = {'type': 'text', 'run_date': run_date.isoformat(),
+           'origin_chat': message.chat.id, 'target_chat': chat_id, 'text': text_body}
     jobs.append(job)
     save_scheduled(jobs)
     SCHEDULER.add_job(_send_text, run_date=run_date, args=[client, job])
@@ -273,14 +287,18 @@ async def _send_flyer(client: Client, job):
     await client.send_photo(job['target_chat'], f['file_id'], caption=f['caption'])
     if 'run_date' in job:
         jobs = load_scheduled()
-        jobs = [x for x in jobs if not (x.get('run_date') == job['run_date'] and x['type'] == 'flyer' and x.get('name') == job.get('name'))]
+        jobs = [x for x in jobs if not (x.get('run_date') == job['run_date']
+                                         and x['type'] == 'flyer'
+                                         and x.get('name') == job.get('name'))]
         save_scheduled(jobs)
 
 async def _send_text(client: Client, job):
     await client.send_message(job['target_chat'], job['text'])
     if 'run_date' in job:
         jobs = load_scheduled()
-        jobs = [x for x in jobs if not (x.get('run_date') == job['run_date'] and x['type'] == 'text' and x.get('text') == job.get('text'))]
+        jobs = [x for x in jobs if not (x.get('run_date') == job['run_date']
+                                         and x['type'] == 'text'
+                                         and x.get('text') == job.get('text'))]
         save_scheduled(jobs)
 
 # ─── Registration ─────────────────────────────────────────────────────────────
@@ -298,5 +316,9 @@ def register(app: Client, scheduler: BackgroundScheduler):
         else:
             h, m = map(int, job['time'].split(':'))
             scheduler.add_job(_send_flyer if job['type'] == 'flyer' else _send_text,
-                              trigger='cron', hour=h, minute=m, day_of_week=job.get('day_of_week', '*'), timezone=tz,
+                              trigger='cron',
+                              hour=h,
+                              minute=m,
+                              day_of_week=job.get('day_of_week', '*'),
+                              timezone=tz,
                               args=[app, job])
