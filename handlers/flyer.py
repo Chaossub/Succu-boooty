@@ -154,7 +154,7 @@ async def schedule_flyer_cmd(client: Client, message: Message):
         chat_id = int(target)
     except ValueError:
         env_val = os.getenv(target)
-        if env_val and env_val.isdigit():
+        if env_val and env_val.lstrip('-').isdigit():
             chat_id = int(env_val)
         else:
             return await message.reply("❌ Invalid chat ID or unknown shortcut.")
@@ -222,7 +222,7 @@ async def schedule_text_cmd(client: Client, message: Message):
         chat_id = int(target)
     except ValueError:
         env_val = os.getenv(target)
-        if env_val and env_val.isdigit():
+        if env_val and env_val.lstrip('-').isdigit():
             chat_id = int(env_val)
         else:
             return await message.reply("❌ Invalid chat ID or unknown shortcut.")
@@ -263,87 +263,4 @@ async def schedule_text_cmd(client: Client, message: Message):
 @Client.on_message(filters.command("listscheduled"))
 async def list_scheduled_cmd(client: Client, message: Message):
     jobs = load_scheduled()
-    if not jobs:
-        return await message.reply("❌ No scheduled jobs.")
-    lines = []
-    for i, j in enumerate(jobs, 1):
-        if 'run_date' in j:
-            rd = datetime.fromisoformat(j['run_date'])
-            desc = rd.strftime('%Y-%m-%d %H:%M')
-            kind = j['type']
-            name = j.get('name', '(text)')
-            lines.append(f"{i}. one-off {kind} '{name}' @ {desc} → {j['target_chat']}")
-        else:
-            t = j['time']
-            desc = 'daily'
-            kind = j['type']
-            name = j.get('name', '(text)')
-            lines.append(f"{i}. recurring {kind} '{name}' @ {t} ({desc}) → {j['target_chat']}")
-    await message.reply("⏰ <b>Scheduled jobs:</b>\n" + "\n".join(lines))
-
-@Client.on_message(filters.command("cancelflyer"))
-async def cancel_flyer_cmd(client: Client, message: Message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        return await message.reply("❌ Usage: /cancelflyer <job_index>")
-    try:
-        idx = int(parts[1]) - 1
-    except ValueError:
-        return await message.reply("❌ Invalid index.")
-    jobs = load_scheduled()
-    if idx < 0 or idx >= len(jobs):
-        return await message.reply("❌ Index out of range.")
-    removed = jobs.pop(idx)
-    save_scheduled(jobs)
-    await message.reply(f"✅ Removed scheduled job #{idx+1}: {removed}")
-
-# ─── Internal Runners ──────────────────────────────────────────────────────────
-async def _send_flyer(client: Client, job):
-    logger.info("🏷 Running flyer job %s", job)
-    flyers = load_flyers(job['origin_chat'])
-    f = flyers.get(job['name'])
-    if not f:
-        return logger.error("Missing flyer %s", job['name'])
-    try:
-        await client.send_photo(job['target_chat'], f['file_id'], caption=f['caption'])
-        # cleanup one-off
-        if 'run_date' in job:
-            jobs = load_scheduled()
-            jobs = [j for j in jobs if not (j.get('run_date') == job['run_date'] and j['type']=='flyer' and j['name']==job['name'])]
-            save_scheduled(jobs)
-    except Exception:
-        logger.exception("Failed flyer job %s", job)
-
-async def _send_text(client: Client, job):
-    logger.info("🏷 Running text job %s", job)
-    try:
-        await client.send_message(job['target_chat'], job['text'])
-        # cleanup one-off
-        if 'run_date' in job:
-            jobs = load_scheduled()
-            jobs = [j for j in jobs if not (j.get('run_date') == job['run_date'] and j['type']=='text' and j['text']==job['text'])]
-            save_scheduled(jobs)
-    except Exception:
-        logger.exception("Failed text job %s", job)
-
-# ─── Registration ─────────────────────────────────────────────────────────────
-def register(app: Client, scheduler: BackgroundScheduler):
-    global SCHEDULER
-    SCHEDULER = scheduler
-    jobs = load_scheduled()
-    logger.info("Rescheduling %d jobs on startup", len(jobs))
-    tzinfo = timezone(os.getenv('SCHEDULER_TZ', 'America/Los_Angeles'))
-    for job in jobs:
-        if 'run_date' in job:
-            run_date = datetime.fromisoformat(job['run_date'])
-            scheduler.add_job(_send_flyer if job['type']=='flyer' else _send_text,
-                              run_date=run_date,
-                              args=[app, job])
-        else:
-            h, m = map(int, job['time'].split(':'))
-            trigger = dict(trigger='cron', hour=h, minute=m, day_of_week=job['day_of_week'], timezone=tzinfo)
-            if job['type'] == 'flyer':
-                scheduler.add_job(_send_flyer, **trigger, args=[app, job])
-            else:
-                scheduler.add_job(_send_text, **trigger, args=[app, job])
-
+    if not> \
