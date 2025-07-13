@@ -43,7 +43,7 @@ async def root():
     return {"status": "ok"}
 
 def run_api():
-    """Run uvicorn in a separate thread so it doesn’t block Pyrogram."""
+    """Run uvicorn so the container sees a live HTTP port."""
     uvicorn.run(
         api,
         host="0.0.0.0",
@@ -63,18 +63,21 @@ federation.register(app)
 summon.register(app)
 xp.register(app)
 fun.register(app)
-# flyer needs the scheduler reference:
+# Flyer takes a scheduler
 flyer.register(app, scheduler)
 
 # ─── Startup ───────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # 1) Start FastAPI so your platform sees an open HTTP port
-    threading.Thread(target=run_api, daemon=True).start()
+    # 1) Start FastAPI in a non-daemon thread so it won't get killed
+    server_thread = threading.Thread(target=run_api)  # daemon=False by default
+    server_thread.start()
     logger.info(f"🚀 FastAPI server started on port {PORT}")
 
     # 2) Start the AsyncIO scheduler
     scheduler.start()
     logger.info("✅ AsyncIO Scheduler started")
 
-    # 3) Run your Telegram bot (this hands control to Pyrogram’s loop)
+    # 3) Run your Telegram bot (blocks until shutdown)
     app.run()
+
+    # If app.run ever returns, server_thread is still non-daemon so process stays up
