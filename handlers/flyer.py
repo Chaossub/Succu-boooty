@@ -63,12 +63,18 @@ def save_scheduled(jobs: list):
 
 # ─── Alias Resolution ────────────────────────────────────────────────────────────
 # Environment variables ending in _ID become chat aliases (e.g. MODELS_CHAT_ID)
-ALIASES = {name[:-3]: int(val) for name, val in os.environ.items() if name.endswith("_ID")}
+ALIASES = {}
+for name, val in os.environ.items():
+    if name.endswith("_ID"):
+        if val.lstrip('-').isdigit():
+            ALIASES[name[:-3]] = int(val)
+        else:
+            logger.warning("Skipping alias %s=%s (not an integer)", name, val)
 logger.debug("Chat aliases loaded: %r", ALIASES)
 
 def resolve_chat(target_key: str) -> int | None:
     # Numeric ID or alias
-    if target_key.isdigit() or (target_key.startswith("-") and target_key[1:].isdigit()):
+    if target_key.lstrip('-').isdigit():
         return int(target_key)
     return ALIASES.get(target_key)
 
@@ -145,13 +151,11 @@ async def schedule_flyer_cmd(client: Client, message: Message):
     if len(parts) < 5:
         return await message.reply("❌ Usage: /scheduleflyer <name> <HH:MM> <days|daily> <chat_id|ALIAS>")
     name, timestr, dayspec, target_key = parts[1], parts[2], parts[3], parts[4]
-    # parse time
     try:
         hour, minute = map(int, timestr.split(':'))
     except ValueError:
         return await message.reply("❌ Invalid time format. Use HH:MM.")
     dow = '*' if dayspec.lower() in ('daily','*') else dayspec.lower()
-    # resolve chat id
     chat_id = resolve_chat(target_key)
     if chat_id is None:
         return await message.reply("❌ Invalid chat ID or alias.")
@@ -197,7 +201,7 @@ async def list_scheduled_cmd(client: Client, message: Message):
     if not jobs:
         return await message.reply("❌ No scheduled jobs.")
     lines = []
-    for i, j in enumerate(jobs,1):
+    for i,	j in enumerate(jobs,1):
         kind=j['type']; t=j['time']; dow='daily' if j['day_of_week']=='*' else j['day_of_week']; tgt=j['target_chat']; name=j.get('name','(text)')
         lines.append(f"{i}. {kind} '{name}' @ {t} ({dow}) → {tgt}")
     await message.reply("⏰ <b>Scheduled jobs:</b>\n" + "\n".join(lines))
@@ -210,32 +214,32 @@ async def cancel_flyer_cmd(client: Client, message: Message):
     try:
         idx = int(parts[1]) - 1
     except ValueError:
-        return await message.reply("❌ Invalid index.")
+        return	await message.reply("❌ Invalid index.")
     jobs = load_scheduled()
     if idx<0 or idx>=len(jobs):
-        return await message.reply("❌ Index out of range.")
+        return	await message.reply("❌ Index out of range.")
     removed = jobs.pop(idx)
     save_scheduled(jobs)
     await message.reply(f"✅ Removed scheduled job #{idx+1}: {removed}")
 
 # ─── Internal Runners ──────────────────────────────────────────────────────────
-async def _send_flyer(client: Client, job):
-    logger.info("🏷 Firing flyer job: %r", job)
+async def _send_flyer(client: Client,	job):
+    logger.info("🏷 Firing flyer job: %r",	job)
     flyers = load_flyers(job['origin_chat'])
     f = flyers.get(job['name'])
     if not f:
-        return logger.error("Missing flyer %s", job['name'])
+        return	logger.error("Missing flyer %s", job['name'])
     try:
         await client.send_photo(job['target_chat'], f['file_id'], caption=f['caption'])
         logger.info("✅ Flyer sent to %s", job['target_chat'])
     except Exception:
         logger.exception("❌ Failed flyer job %s", job)
 
-async def _send_text(client: Client, job):
+async def _send_text(client:	Client, job):
     logger.info("🏷 Firing text job: %r", job)
     try:
         await client.send_message(job['target_chat'], job['text'])
-        logger.info("✅ Text sent to %s", job['target_chat'])
+        logger.info("✅ Text sent to %s",	job['target_chat'])
     except Exception:
         logger.exception("❌ Failed text job %s", job)
 
@@ -245,10 +249,9 @@ def register(app: Client, scheduler: BackgroundScheduler):
     logger.info("Rescheduling %d jobs on startup", len(jobs))
     tzinfo = timezone(os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
     for job in jobs:
-        h, m = map(int, job['time'].split(':'))
+        h,	m = map(int, job['time'].split(':'))
         trigger = dict(trigger='cron', hour=h, minute=m, day_of_week=job['day_of_week'], timezone=tzinfo)
         if job['type']=='flyer':
             scheduler.add_job(_send_flyer, **trigger, args=[app, job])
         else:
             scheduler.add_job(_send_text, **trigger, args=[app, job])
-
