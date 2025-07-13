@@ -55,8 +55,8 @@ def register(app, scheduler: BackgroundScheduler):
         parts = (message.caption or "").split(None, 1)
         if len(parts) < 2:
             return await message.reply("❌ Usage: /addflyer <name>")
-        name    = parts[1].strip()
-        flyers  = load_flyers(message.chat.id)
+        name   = parts[1].strip()
+        flyers = load_flyers(message.chat.id)
         if name in flyers:
             return await message.reply("❌ Flyer already exists.")
         flyers[name] = {"file_id": message.photo.file_id, "caption": message.caption}
@@ -152,11 +152,11 @@ def register(app, scheduler: BackgroundScheduler):
         parts = message.text.split(maxsplit=1)
         if len(parts) < 2:
             return await message.reply("❌ Usage: /cancelflyer <name>")
-        name = parts[1].strip()
-        jobs     = load_scheduled()
+        name    = parts[1].strip()
+        jobs    = load_scheduled()
         new_jobs = [j for j in jobs if not (j["name"] == name and j["chat_id"] == message.chat.id)]
         if len(new_jobs) == len(jobs):
-            return await message.reply("ℹ️ No scheduled flyer found by that name.")
+            return await message.reply("ℹ️ No scheduled flyer found.")
         save_scheduled(new_jobs)
         for j in scheduler.get_jobs():
             args = getattr(j, "args", [])
