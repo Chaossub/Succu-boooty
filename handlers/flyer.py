@@ -214,4 +214,3 @@ def register(app: Client, scheduler: BackgroundScheduler):
     app.add_handler(schedule_flyer_cmd)
     app.add_handler(list_scheduled)
     app.add_handler(cancel_flyer)
-
