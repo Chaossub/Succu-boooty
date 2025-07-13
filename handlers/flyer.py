@@ -15,7 +15,6 @@ BASE_DIR = os.path.dirname(__file__)
 PROJECT_ROOT = os.path.dirname(BASE_DIR)
 FLYER_DIR = os.path.join(PROJECT_ROOT, "flyers")
 SCHEDULE_FILE = os.path.join(PROJECT_ROOT, "scheduled_flyers.json")
-
 os.makedirs(FLYER_DIR, exist_ok=True)
 
 # ─── JSON Helpers ───────────────────────────────────────────────────────────────
@@ -187,7 +186,7 @@ async def schedule_text_cmd(client: Client, message: Message):
     await message.reply(f"✅ Scheduled text @ {timestr} ({label}) → {chat_id}")
 
 @Client.on_message(filters.command("listscheduled"))
-async def list_scheduled(client: Client, message: Message):
+async def list_scheduled_cmd(client: Client, message: Message):
     jobs = load_scheduled()
     if not jobs:
         return await message.reply("❌ No scheduled jobs.")
@@ -202,7 +201,7 @@ async def list_scheduled(client: Client, message: Message):
     await message.reply("⏰ <b>Scheduled jobs:</b>\n" + "\n".join(lines))
 
 @Client.on_message(filters.command("cancelflyer"))
-async def cancel_flyer(client: Client, message: Message):
+async def cancel_flyer_cmd(client: Client, message: Message):
     parts = message.text.split()
     if len(parts) < 2:
         return await message.reply("❌ Usage: /cancelflyer <job_index>")
@@ -223,21 +222,18 @@ async def _send_flyer(client: Client, job):
     flyers = load_flyers(job["origin_chat"])
     f = flyers.get(job["name"])
     if not f:
-        logger.error("Missing flyer %s", job["name"])
-        return
+        return logger.error("Missing flyer %s", job["name"])
     try:
         await client.send_photo(job["target_chat"], f["file_id"], caption=f["caption"])
-        logger.info("Sent flyer to %s", job["target_chat"])
     except Exception:
-        logger.exception("Failed to send flyer job %s", job)
+        logger.exception("Failed flyer job %s", job)
 
 async def _send_text(client: Client, job):
     logger.info("🏷 Running text job %s", job)
     try:
         await client.send_message(job["target_chat"], job["text"])
-        logger.info("Sent text to %s", job["target_chat"])
     except Exception:
-        logger.exception("Failed to send text job %s", job)
+        logger.exception("Failed text job %s", job)
 
 # ─── Registration ─────────────────────────────────────────────────────────────
 def register(app: Client, scheduler: BackgroundScheduler):
@@ -251,14 +247,3 @@ def register(app: Client, scheduler: BackgroundScheduler):
             scheduler.add_job(_send_flyer, **trigger, args=[app, job])
         else:
             scheduler.add_job(_send_text, **trigger, args=[app, job])
-
-    # Attach handlers
-    app.add_handler(add_flyer)
-    app.add_handler(change_flyer)
-    app.add_handler(delete_flyer)
-    app.add_handler(list_flyers)
-    app.add_handler(send_flyer)
-    app.add_handler(schedule_flyer_cmd)
-    app.add_handler(schedule_text_cmd)
-    app.add_handler(list_scheduled)
-    app.add_handler(cancel_flyer)
