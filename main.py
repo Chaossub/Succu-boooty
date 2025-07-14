@@ -22,16 +22,20 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 async def runner():
-    # THIS IS THE CORRECT WAY
     app = Client(
-        "SuccuBot",          # <-- REQUIRED SESSION NAME!
+        "SuccuBot",  # REQUIRED session name!
         api_id=API_ID,
         api_hash=API_HASH,
         bot_token=BOT_TOKEN,
         parse_mode=ParseMode.HTML,
     )
 
-    # Register handlers
+    # Setup the flyer scheduler
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler.start()
+
+    # Register all handlers
     from handlers import (
         welcome,
         help_cmd,
@@ -49,7 +53,7 @@ async def runner():
     summon.register(app)
     xp.register(app)
     fun.register(app)
-    flyer.register(app)
+    flyer.register(app, scheduler)  # pass scheduler!
 
     logger.info("✅ SuccuBot is running...")
     async with app:
