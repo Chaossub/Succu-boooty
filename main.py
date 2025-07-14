@@ -30,12 +30,12 @@ async def runner():
         parse_mode=ParseMode.HTML,
     )
 
-    # Setup the flyer scheduler
+    # Setup scheduler for flyer handler
     from apscheduler.schedulers.asyncio import AsyncIOScheduler
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.start()
 
-    # Register all handlers
+    # Import and register all handlers
     from handlers import (
         welcome,
         help_cmd,
@@ -53,7 +53,7 @@ async def runner():
     summon.register(app)
     xp.register(app)
     fun.register(app)
-    flyer.register(app, scheduler)  # pass scheduler!
+    flyer.register(app, scheduler)  # <-- Fix: pass scheduler!
 
     logger.info("✅ SuccuBot is running...")
     async with app:
