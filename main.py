@@ -13,10 +13,13 @@ from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
-# ─── Start HTTP health‐check server immediately ─────────────────────────────
-# Railway will inject the correct PORT at runtime, so do NOT hard-code it.
-PORT = int(os.getenv("PORT", "8000"))
+# ─── Load .env (for local dev) before reading PORT ─────────────────────────
+load_dotenv()
 
+# ─── Read PORT strictly from env (Railway will always set this) ────────────
+PORT = int(os.environ["PORT"])
+
+# ─── Health-check server (binds immediately) ──────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -28,34 +31,33 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def serve_health():
     httpd = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    logging.info(f"🌐 Health‐check listening on 0.0.0.0:{PORT}")
+    logging.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
     httpd.serve_forever()
 
 threading.Thread(target=serve_health, daemon=True).start()
 
-# ─── Load environment & configure logging ───────────────────────────────────
-load_dotenv()
-API_ID    = int(os.getenv("API_ID", "0"))
-API_HASH  = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
-
+# ─── Configure logging & load the rest of env ──────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+API_ID    = int(os.getenv("API_ID", "0"))
+API_HASH  = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
+
 logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
-# ─── Main asyncio entrypoint ────────────────────────────────────────────────
+# ─── Main async entrypoint ─────────────────────────────────────────────────
 async def main():
-    # 1) Scheduler
+    # Scheduler
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
-    # 2) Pyrogram client
+    # Bot client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -64,7 +66,7 @@ async def main():
         parse_mode=ParseMode.HTML
     )
 
-    # 3) Register handlers
+    # Register handlers
     from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
     logger.info("📢 Registering handlers…")
     welcome.register(app)
@@ -76,7 +78,7 @@ async def main():
     fun.register(app)
     flyer.register(app, scheduler)
 
-    # 4) Run with FloodWait‐safe loop
+    # Run + FloodWait/Retry
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
