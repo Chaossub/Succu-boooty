@@ -1,17 +1,16 @@
-# main.py
-
 import os
 import logging
 import signal
 import asyncio
 
 from dotenv import load_dotenv
-from pyrogram import Client, idle
+from pyrogram import Client
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
+#── Load env ──────────────────────────────────────────────────────────────────
 load_dotenv()
 API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
@@ -19,6 +18,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
 PORT      = int(os.environ["PORT"])
 
+#── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s | %(levelname)8s | %(message)s"
@@ -27,12 +27,14 @@ logger = logging.getLogger("SuccuBot")
 logging.getLogger("pyrogram").setLevel(logging.INFO)
 logging.getLogger("apscheduler").setLevel(logging.INFO)
 
-logger.debug(f"ENV → API_ID={API_ID}, BOT_TOKEN_len={len(BOT_TOKEN)}, SCHED_TZ={SCHED_TZ}, PORT={PORT}")
+logger.debug(
+    f"ENV → API_ID={API_ID}, BOT_TOKEN_len={len(BOT_TOKEN)}, "
+    f"SCHED_TZ={SCHED_TZ}, PORT={PORT}"
+)
 
-# ─── Asyncio health‐check ───────────────────────────────────────────────────
+#── Asyncio health‐check (always replies 200) ────────────────────────────────
 async def health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    # Read whatever Railway sends (HEAD/GET, etc.) then always reply 200 OK
-    await reader.read(1024)
+    await reader.read(1024)  # swallow HEAD/GET/etc
     writer.write(
         b"HTTP/1.1 200 OK\r\n"
         b"Content-Type: text/plain\r\n"
@@ -49,13 +51,14 @@ async def start_health_server():
     async with server:
         await server.serve_forever()
 
-# ─── Run bot + scheduler with FloodWait retry ───────────────────────────────
+#── Run bot + scheduler, with FloodWait retry on startup ────────────────────
 async def run_bot(stop_event: asyncio.Event):
     # Scheduler + heartbeat
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
-    scheduler.add_job(lambda: logger.info("💓 Heartbeat – scheduler alive"), "interval", seconds=30)
+    scheduler.add_job(lambda: logger.info("💓 Heartbeat – scheduler alive"),
+                      "interval", seconds=30)
 
     # Pyrogram client
     app = Client(
@@ -84,32 +87,32 @@ async def run_bot(stop_event: asyncio.Event):
             break
         except FloodWait as e:
             secs = max(1, int(getattr(e, "value", getattr(e, "x", 0))))
-            logger.warning(f"🚧 FloodWait on start – retry in {secs}s")
+            logger.warning(f"🚧 FloodWait on start – retrying in {secs}s")
             await asyncio.sleep(secs)
         except Exception:
-            logger.exception("🔥 Error starting – retrying in 5s")
+            logger.exception("🔥 Error on start – retrying in 5s")
             await asyncio.sleep(5)
 
+    # Wait on our own stop_event (set by SIGINT or SIGTERM)
     if not stop_event.is_set():
         logger.info("🛑 Bot running; awaiting stop signal…")
-        await idle()
+        await stop_event.wait()
         logger.info("🔄 Stop signal received; shutting down…")
         await app.stop()
 
     scheduler.shutdown()
     logger.info("✅ SuccuBot and scheduler shut down cleanly")
 
-# ─── Entrypoint ─────────────────────────────────────────────────────────────
+#── Entrypoint ─────────────────────────────────────────────────────────────
 async def main():
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, stop_event.set)
     loop.add_signal_handler(signal.SIGINT,  stop_event.set)
 
-    await asyncio.gather(
-        start_health_server(),
-        run_bot(stop_event),
-    )
+    # fire up health‐check, then bot
+    asyncio.create_task(start_health_server())
+    await run_bot(stop_event)
 
 if __name__ == "__main__":
     logger.info("▶️ Launching SuccuBot")
