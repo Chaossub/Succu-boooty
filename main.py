@@ -11,13 +11,13 @@ from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
-# ─── Load .env & configure logging ──────────────────────────────────────────
+# ─── Load environment and configure logging ─────────────────────────────────
 load_dotenv()
 API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
-PORT      = int(os.getenv("PORT", "8000"))  # Railway will inject this
+PORT      = int(os.getenv("PORT", "8000"))  # Railway injects this for you
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -26,14 +26,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
-# ─── Asyncio health‐check server ─────────────────────────────────────────────
+# ─── Asyncio-based health-check server ──────────────────────────────────────
 async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    await reader.read(1024)  # ignore request
-    writer.write(b"HTTP/1.1 200 OK\r\n"
-                 b"Content-Type: text/plain\r\n"
-                 b"Content-Length: 2\r\n"
-                 b"\r\n"
-                 b"OK")
+    await reader.read(1024)  # ignore any request data
+    writer.write(
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: text/plain\r\n"
+        b"Content-Length: 2\r\n"
+        b"\r\n"
+        b"OK"
+    )
     await writer.drain()
     writer.close()
 
@@ -43,14 +45,14 @@ async def start_health_server():
     async with server:
         await server.serve_forever()
 
-# ─── Bot + Scheduler ────────────────────────────────────────────────────────
+# ─── Bot and scheduler runner ────────────────────────────────────────────────
 async def run_bot():
-    # Scheduler
+    # Start the scheduler
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
-    # Pyrogram client
+    # Initialize Pyrogram client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -71,7 +73,7 @@ async def run_bot():
     fun.register(app)
     flyer.register(app, scheduler)
 
-    # Run + FloodWait/Retry
+    # Run loop with FloodWait handling
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -87,9 +89,9 @@ async def run_bot():
             logger.exception("🔥 Unexpected error—waiting 5s then retry")
             await asyncio.sleep(5)
 
-# ─── Entry point ───────────────────────────────────────────────────────────
+# ─── Entry point ────────────────────────────────────────────────────────────
 async def main():
-    # Start health‐check and bot concurrently
+    # Run health-check server and bot concurrently
     await asyncio.gather(
         start_health_server(),
         run_bot(),
