@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 
 # ─── Load environment ──────────────────────────────────────────────────────────
 load_dotenv()
@@ -21,7 +22,7 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    parse_mode="html",  # use lowercase html for Pyrogram v2
+    parse_mode=ParseMode.HTML,  # <-- Correct for Pyrogram v2+
 )
 
 # ─── Import & register handlers ───────────────────────────────────────────────
@@ -49,4 +50,3 @@ flyer.register(app, scheduler)
 
 print("✅ SuccuBot is running...")
 app.run()
-
