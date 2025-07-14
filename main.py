@@ -13,21 +13,32 @@ from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
-# ─── Logging setup ─────────────────────────────────────────────────────────
+# ─── Logging & ENV ─────────────────────────────────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ─── Health-check server (starts immediately in its own thread) ──────────
-PORT = int(os.getenv("PORT", "8000"))
+load_dotenv()
+API_ID    = int(os.getenv("API_ID", "0"))
+API_HASH  = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
+PORT      = int(os.getenv("PORT", "8000"))
 
+logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
+
+# ─── Health‐check server ────────────────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
+    def do_HEAD(self):
+        # support Railway's possible HEAD checks
+        self.send_response(200)
+        self.end_headers()
 
 def run_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
@@ -36,23 +47,14 @@ def run_health_server():
 
 threading.Thread(target=run_health_server, daemon=True).start()
 
-# ─── Load environment ───────────────────────────────────────────────────────
-load_dotenv()
-API_ID    = int(os.getenv("API_ID", "0"))
-API_HASH  = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
-
-logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
-
-# ─── Main coroutine ────────────────────────────────────────────────────────
+# ─── Main async entry ───────────────────────────────────────────────────────
 async def main():
-    # 1) Start scheduler
+    # 1) Scheduler
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
-    # 2) Initialize bot client
+    # 2) Bot client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -73,7 +75,7 @@ async def main():
     fun.register(app)
     flyer.register(app, scheduler)
 
-    # 4) Run in a loop, catching FloodWait to sleep/retry
+    # 4) Run + FloodWait retry
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
