@@ -14,15 +14,15 @@ from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
-# ─── Load env & read PORT (Railway injects this) ───────────────────────────
+# ─── Load env & read PORT ───────────────────────────────────────────────────
 load_dotenv()
 API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
-PORT      = int(os.environ["PORT"])
+PORT      = int(os.environ["PORT"])  # Railway injects this
 
-# ─── Immediate threaded health-check (binds before anything else) ───────────
+# ─── Health‐check server (threaded) ─────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -45,7 +45,6 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)8s | %(message)s"
 )
 logger = logging.getLogger("SuccuBot")
-# Silence noisy libs
 logging.getLogger("pyrogram").setLevel(logging.INFO)
 logging.getLogger("apscheduler").setLevel(logging.INFO)
 
@@ -54,19 +53,17 @@ logger.debug(
     f"SCHED_TZ={SCHED_TZ}, PORT={PORT}"
 )
 
-# ─── Main bot + scheduler logic with FloodWait retry ────────────────────────
+# ─── Run the bot + scheduler with FloodWait retries ──────────────────────────
 async def run_bot(stop_event: asyncio.Event):
-    # 1) Scheduler + heartbeat
+    # Scheduler + heartbeat
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
-
-    def heartbeat():
-        logger.info("💓 Heartbeat – scheduler alive")
-    scheduler.add_job(heartbeat, "interval", seconds=30)
+    scheduler.add_job(lambda: logger.info("💓 Heartbeat – scheduler alive"),
+                      "interval", seconds=30)
     logger.debug("🩺 Heartbeat job scheduled every 30s")
 
-    # 2) Initialize Pyrogram client
+    # Pyrogram client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -75,7 +72,7 @@ async def run_bot(stop_event: asyncio.Event):
         parse_mode=ParseMode.HTML
     )
 
-    # 3) Register handlers
+    # Register handlers
     from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
     logger.info("📢 Registering handlers…")
     for mod in (welcome, help_cmd, moderation, federation, summon, xp, fun):
@@ -84,7 +81,7 @@ async def run_bot(stop_event: asyncio.Event):
     flyer.register(app, scheduler)
     logger.info("📢 Handlers registered")
 
-    # 4) Retry loop for app.start()
+    # FloodWait‐aware start loop
     while not stop_event.is_set():
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -93,27 +90,25 @@ async def run_bot(stop_event: asyncio.Event):
             break
         except FloodWait as e:
             secs = int(getattr(e, "value", getattr(e, "x", 0)))
-            logger.warning(f"🚧 FloodWait on start – retrying in {secs}s")
+            logger.warning(f"🚧 FloodWait on start – retry in {secs}s")
             await asyncio.sleep(secs + 1)
         except Exception:
-            logger.exception("🔥 Error starting SuccuBot – retrying in 5s")
+            logger.exception("🔥 Error starting SuccuBot – retry in 5s")
             await asyncio.sleep(5)
 
     if stop_event.is_set():
-        logger.info("🛑 Stop signal received before startup; exiting")
+        logger.info("🛑 Stop event set before startup; exiting")
     else:
-        # 5) Idle until stop_event
+        # Run until signaled
         logger.info("🛑 SuccuBot running; awaiting stop signal…")
         await idle()
-
-        # 6) Shutdown
-        logger.info("🔄 Stop signal received; shutting down SuccuBot…")
+        logger.info("🔄 Stop signal received; shutting down…")
         await app.stop()
 
     scheduler.shutdown()
     logger.info("✅ SuccuBot and scheduler shut down cleanly")
 
-# ─── Entrypoint ─────────────────────────────────────────────────────────────
+# ─── Async entrypoint ───────────────────────────────────────────────────────
 async def main():
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
