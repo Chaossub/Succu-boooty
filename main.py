@@ -30,7 +30,8 @@ def start_health_server(port: int):
 async def main():
     # Basic logging setup
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s | %(levelname)-5s | %(message)s"
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)-5s | %(message)s"
     )
 
     # Load required env vars
@@ -57,15 +58,20 @@ async def main():
     scheduler.start()
 
     # Start the bot
-    app = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-    await app.start()
+    bot = Client(
+        session_name="bot_session",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN
+    )
+    await bot.start()
     logging.info("✅ Bot started; awaiting messages…")
 
     # Idle until SIGINT/SIGTERM
     await idle()
 
     # Graceful shutdown
-    await app.stop()
+    await bot.stop()
     scheduler.shutdown()
     logging.info("✅ Shutdown complete")
 
