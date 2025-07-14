@@ -1,68 +1,82 @@
-#!/usr/bin/env python3
-
 import os
 import asyncio
-import logging
-import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from pyrogram import Client, idle
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Configure logging
-testing_logging_level = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, testing_logging_level, logging.INFO), format="%(asctime)s | %(levelname)5s | %(message)s")
+# Import your handlers; adjust path if your flyer module lives elsewhere
+from handlers import (
+    welcome,
+    help_cmd,
+    moderation,
+    federation,
+    summon,
+    xp,
+    fun,
+    flyer,
+)
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/":
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-        else:
-            self.send_response(404)
-            self.end_headers()
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
 
-# Start a simple HTTP health-check server
 def start_health_server(port: int):
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logging.info(f"🌐 Health-check listening on 0.0.0.0:{port}")
+    # run it in the background
+    asyncio.get_event_loop().run_in_executor(None, server.serve_forever)
 
 async def main():
-    # Environment variables
-    API_ID = int(os.getenv("API_ID", "0"))
+    # 1) Load config from env
+    API_ID = int(os.getenv("API_ID", ""))
     API_HASH = os.getenv("API_HASH", "")
     BOT_TOKEN = os.getenv("BOT_TOKEN", "")
     PORT = int(os.getenv("PORT", "8080"))
 
-    # Launch health-check server
+    # 2) Health‐check
     start_health_server(PORT)
+    print(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
 
-    # Heartbeat scheduler
+    # 3) Scheduler
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(lambda: logging.info("💓 Heartbeat – scheduler alive"), "interval", seconds=30)
+    scheduler.add_job(
+        lambda: print("💓 Heartbeat – scheduler alive"),
+        trigger="interval",
+        seconds=30
+    )
     scheduler.start()
 
-    # Initialize and start the bot
+    # 4) Pyrogram bot
     bot = Client(
-        name="succubot",  # session file name
+        name="succubot",       # replaces deprecated session_name
         api_id=API_ID,
         api_hash=API_HASH,
         bot_token=BOT_TOKEN
     )
 
+    # 5) Register all your handlers
+    flyer.register(bot, scheduler)
+    welcome.register(bot)
+    help_cmd.register(bot)
+    moderation.register(bot)
+    federation.register(bot)
+    summon.register(bot)
+    xp.register(bot)
+    fun.register(bot)
+
+    # 6) Start
     await bot.start()
-    logging.info("✅ Bot started; awaiting messages…")
+    print("✅ Bot started; awaiting messages…")
 
-    # Idle until termination signal
+    # 7) Idle keeps the process alive until SIGINT/SIGTERM
     await idle()
-    logging.info("🔄 Shutdown signal received; stopping…")
 
-    # Shutdown
+    # 8) Graceful shutdown
     await bot.stop()
     scheduler.shutdown()
+    print("✅ Shutdown complete.")
 
 if __name__ == "__main__":
     asyncio.run(main())
