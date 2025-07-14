@@ -2,10 +2,7 @@
 
 import os
 import logging
-import threading
 import asyncio
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
 from dotenv import load_dotenv
 from pyrogram import Client, idle
 from pyrogram.enums import ParseMode
@@ -13,43 +10,50 @@ from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
-# ─── Logging setup ─────────────────────────────────────────────────────────
+# ─── Logging & ENV ─────────────────────────────────────────────────────────
 logging.basicConfig(
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ─── Health‐check server ────────────────────────────────────────────────────
-def run_health():
-    port = int(os.environ.get("PORT", "8000"))
-    logger.info(f"🌐 Health-check server listening on 0.0.0.0:{port}")
-    class H(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-    HTTPServer(("0.0.0.0", port), H).serve_forever()
-
-threading.Thread(target=run_health, daemon=True).start()
-
-# ─── Load environment ───────────────────────────────────────────────────────
 load_dotenv()
 API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
+PORT      = int(os.getenv("PORT", "8000"))
 
-logger.info(f"🔍 Loaded ENV → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
+logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
-# ─── Main async entrypoint ─────────────────────────────────────────────────
+# ─── Minimal asyncio HTTP health‐check server ──────────────────────────────
+async def handle_http(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    await reader.read(1024)  # read & ignore request
+    writer.write(b"HTTP/1.1 200 OK\r\n"
+                 b"Content-Type: text/plain\r\n"
+                 b"Content-Length: 2\r\n"
+                 b"\r\n"
+                 b"OK")
+    await writer.drain()
+    writer.close()
+
+async def start_http_server():
+    server = await asyncio.start_server(handle_http, "0.0.0.0", PORT)
+    logger.info(f"🌐 HTTP health‐check listening on 0.0.0.0:{PORT}")
+    async with server:
+        await server.serve_forever()
+
+# ─── Main coroutine ────────────────────────────────────────────────────────
 async def main():
-    # ─── Scheduler ──────────────────────────────────────────────────────────
-    sched_tz  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
-    scheduler = AsyncIOScheduler(timezone=timezone(sched_tz))
+    # 1) Start HTTP server
+    asyncio.create_task(start_http_server())
+
+    # 2) Start scheduler
+    scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
-    # ─── Bot client ─────────────────────────────────────────────────────────
+    # 3) Initialize bot
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -58,7 +62,7 @@ async def main():
         parse_mode=ParseMode.HTML
     )
 
-    # ─── Register handlers ──────────────────────────────────────────────────
+    # 4) Register all handlers
     from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
     logger.info("📢 Registering handlers…")
     welcome.register(app)
@@ -70,7 +74,7 @@ async def main():
     fun.register(app)
     flyer.register(app, scheduler)
 
-    # ─── Run + FloodWait-retry loop ──────────────────────────────────────────
+    # 5) Run in a loop, catching FloodWait to sleep–retry
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -80,7 +84,7 @@ async def main():
             await app.stop()
         except FloodWait as e:
             secs = int(getattr(e, "value", getattr(e, "x", 0)))
-            logger.warning(f"🚧 FloodWait – sleeping {secs}s then retry")
+            logger.warning(f"🚧 FloodWait – sleeping {secs}s before retry")
             await asyncio.sleep(secs + 1)
         except Exception:
             logger.exception("🔥 Unexpected error—restarting in 5s")
