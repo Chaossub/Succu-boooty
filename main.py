@@ -2,7 +2,6 @@ import os
 import logging
 import signal
 import threading
-import socket
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import asyncio
@@ -19,7 +18,7 @@ API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
-PORT      = int(os.environ["PORT"])
+PORT      = int(os.environ.get("PORT", "8000"))
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -32,37 +31,30 @@ logging.getLogger("apscheduler").setLevel(logging.INFO)
 
 logger.debug(f"ENV → API_ID={API_ID}, BOT_TOKEN_len={len(BOT_TOKEN)}, SCHED_TZ={SCHED_TZ}, PORT={PORT}")
 
-# ─── Health‐check handler & servers ──────────────────────────────────────────
+# ─── Health‐check handler & server ───────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
     def log_message(self, fmt, *args):
-        pass  # silence
+        pass  # silence access logs
 
 class HealthHTTPServer(HTTPServer):
     allow_reuse_address = True
 
-class HealthHTTPServer6(HealthHTTPServer):
-    address_family = socket.AF_INET6
-
-def start_health_servers():
-    # IPv4
-    httpd4 = HealthHTTPServer(("0.0.0.0", PORT), HealthHandler)
-    threading.Thread(target=httpd4.serve_forever, daemon=True, name="Health-v4").start()
-    logger.info(f"🌐 Health‐check v4 listening on 0.0.0.0:{PORT}")
-
-    # IPv6 (optional)
+def start_health_server():
     try:
-        httpd6 = HealthHTTPServer6(("::", PORT), HealthHandler)
-        threading.Thread(target=httpd6.serve_forever, daemon=True, name="Health-v6").start()
-        logger.info(f"🌐 Health‐check v6 listening on [::]:{PORT}")
+        srv = HealthHTTPServer(("0.0.0.0", PORT), HealthHandler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True, name="Health-v4")
+        thread.start()
+        logger.info(f"🌐 Health‐check v4 listening on 0.0.0.0:{PORT}")
     except OSError as e:
-        logger.warning(f"⚠️ Could not bind IPv6 health‐check on [::]:{PORT} ({e}); continuing IPv4 only")
+        logger.error(f"❌ Failed to bind health‐check on 0.0.0.0:{PORT}: {e}")
+        raise
 
 # ─── Bot + scheduler with FloodWait retry ────────────────────────────────────
 async def run_bot(stop_event: asyncio.Event):
@@ -83,12 +75,12 @@ async def run_bot(stop_event: asyncio.Event):
     from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
     logger.info("📢 Registering handlers…")
     for mod in (welcome, help_cmd, moderation, federation, summon, xp, fun):
-        logger.debug(f"Registering {mod.__name__}")
+        logger.debug(f"→ {mod.__name__}")
         mod.register(app)
     flyer.register(app, scheduler)
     logger.info("📢 Handlers registered")
 
-    # FloodWait‐aware start loop
+    # FloodWait-aware startup
     while not stop_event.is_set():
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -96,25 +88,27 @@ async def run_bot(stop_event: asyncio.Event):
             logger.info("✅ SuccuBot started")
             break
         except FloodWait as e:
-            secs = max(1, int(getattr(e, "value", getattr(e, "x", 0))))
-            logger.warning(f"🚧 FloodWait on start – retrying in {secs}s")
+            secs = int(getattr(e, "value", getattr(e, "x", 0))) or 10
+            logger.warning(f"🚧 FloodWait – retrying in {secs}s")
             await asyncio.sleep(secs)
         except Exception:
             logger.exception("🔥 Error on start – retrying in 5s")
             await asyncio.sleep(5)
 
-    if not stop_event.is_set():
-        logger.info("🛑 Bot running; awaiting stop signal…")
-        await stop_event.wait()
-        logger.info("🔄 Stop signal received; shutting down…")
-        await app.stop()
+    if stop_event.is_set():
+        return
+
+    logger.info("🛑 Bot running; awaiting stop signal…")
+    await stop_event.wait()
+    logger.info("🔄 Stop signal received; shutting down…")
+    await app.stop()
 
     scheduler.shutdown()
     logger.info("✅ SuccuBot and scheduler shut down cleanly")
 
 # ─── Entrypoint ─────────────────────────────────────────────────────────────
 async def main():
-    start_health_servers()
+    start_health_server()
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -126,4 +120,3 @@ async def main():
 if __name__ == "__main__":
     logger.info("▶️ Launching SuccuBot")
     asyncio.run(main())
-
