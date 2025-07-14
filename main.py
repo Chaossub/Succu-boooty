@@ -2,9 +2,8 @@
 
 import os
 import logging
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import asyncio
+from http import HTTPStatus
 
 from dotenv import load_dotenv
 from pyrogram import Client, idle
@@ -13,51 +12,51 @@ from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
-# ─── Load .env (for local dev) before reading PORT ─────────────────────────
+# ─── Load environment and configure logging ─────────────────────────────────
 load_dotenv()
+API_ID    = int(os.getenv("API_ID", "0"))
+API_HASH  = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
+PORT      = int(os.getenv("PORT", "8000"))
 
-# ─── Read PORT strictly from env (Railway will always set this) ────────────
-PORT = int(os.environ["PORT"])
-
-# ─── Health-check server (binds immediately) ──────────────────────────────
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def do_HEAD(self):
-        self.send_response(200)
-        self.end_headers()
-
-def serve_health():
-    httpd = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    logging.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
-    httpd.serve_forever()
-
-threading.Thread(target=serve_health, daemon=True).start()
-
-# ─── Configure logging & load the rest of env ──────────────────────────────
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-API_ID    = int(os.getenv("API_ID", "0"))
-API_HASH  = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
-
 logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
-# ─── Main async entrypoint ─────────────────────────────────────────────────
-async def main():
+# ─── Health‐check server using asyncio ──────────────────────────────────────
+async def health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    # Read & ignore request
+    await reader.read(1024)
+    # Send HTTP 200 OK
+    writer.write(
+        f"HTTP/1.1 {HTTPStatus.OK.value} {HTTPStatus.OK.phrase}\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 2\r\n"
+        "\r\n"
+        "OK"
+    .encode())
+    await writer.drain()
+    writer.close()
+
+async def start_health_server():
+    server = await asyncio.start_server(health_handler, "0.0.0.0", PORT)
+    logger.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
+    async with server:
+        await server.serve_forever()
+
+# ─── Bot + Scheduler ────────────────────────────────────────────────────────
+async def run_bot():
     # Scheduler
-    scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
-    scheduler.start()
+    sched = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
+    sched.start()
     logger.info("🔌 Scheduler started")
 
-    # Bot client
+    # Pyrogram client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -76,9 +75,9 @@ async def main():
     summon.register(app)
     xp.register(app)
     fun.register(app)
-    flyer.register(app, scheduler)
+    flyer.register(app, sched)
 
-    # Run + FloodWait/Retry
+    # Run loop
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -93,6 +92,14 @@ async def main():
         except Exception:
             logger.exception("🔥 Unexpected error—waiting 5s then retry")
             await asyncio.sleep(5)
+
+# ─── Entry point ───────────────────────────────────────────────────────────
+async def main():
+    # Run health-check and bot concurrently
+    await asyncio.gather(
+        start_health_server(),
+        run_bot(),
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
