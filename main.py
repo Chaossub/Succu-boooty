@@ -22,13 +22,18 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
 PORT      = int(os.environ["PORT"])  # Railway injects this
 
+# Root logger at DEBUG, but silence low-level libs
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s | %(levelname)8s | %(threadName)s | %(message)s"
 )
-logger = logging.getLogger("SuccuBot")
+# Reduce noise from Pyrogram & APScheduler
+logging.getLogger("pyrogram").setLevel(logging.INFO)
+logging.getLogger("apscheduler").setLevel(logging.INFO)
 
-logger.debug(f"ENV → API_ID={API_ID}, BOT_TOKEN=<…{len(BOT_TOKEN)} chars…>, SCHED_TZ={SCHED_TZ}, PORT={PORT}")
+logger = logging.getLogger("SuccuBot")
+logger.debug(f"ENV → API_ID={API_ID}, BOT_TOKEN=<…{len(BOT_TOKEN)} chars…>, "
+             f"SCHED_TZ={SCHED_TZ}, PORT={PORT}")
 
 # ─── Health‐check server (threaded) ─────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
@@ -36,6 +41,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"OK")
+
     def do_HEAD(self):
         self.send_response(200)
         self.end_headers()
@@ -59,7 +65,7 @@ signal.signal(signal.SIGINT, handle_signal)
 
 # ─── Main async entrypoint ─────────────────────────────────────────────────
 async def main():
-    # 1) Scheduler + heartbeat
+    # 1) Start scheduler + heartbeat
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
@@ -69,7 +75,7 @@ async def main():
     scheduler.add_job(heartbeat, "interval", seconds=30)
     logger.debug("🩺 Heartbeat job scheduled every 30s")
 
-    # 2) Pyrogram client
+    # 2) Initialize Pyrogram client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -95,20 +101,16 @@ async def main():
         logger.exception("🔥 Failed to start SuccuBot")
         return
 
-    # 5) Wait until a signal arrives
-    logger.info("🛑 Awaiting stop signal (SIGINT/SIGTERM)…")
+    # 5) Wait for shutdown signal
+    logger.info("🛑 Awaiting SIGINT/SIGTERM to stop...")
     await stop_event.wait()
 
-    # 6) Shutdown
-    logger.info("🔄 Stop event set—stopping SuccuBot…")
+    # 6) Shutdown sequence
+    logger.info("🔄 Stopping SuccuBot…")
     await app.stop()
     scheduler.shutdown()
-    logger.info("✅ SuccuBot and scheduler shut down cleanly")
+    logger.info("✅ Shutdown complete")
 
 if __name__ == "__main__":
-    try:
-        logger.info("▶️ Running asyncio main()")
-        asyncio.run(main())
-    except Exception:
-        logger.exception("💥 Fatal error in __main__")
-        raise
+    logger.info("▶️ Entering asyncio run")
+    asyncio.run(main())
