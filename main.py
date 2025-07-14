@@ -45,16 +45,15 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)8s | %(message)s"
 )
 logger = logging.getLogger("SuccuBot")
-# quiet noisy libs
 logging.getLogger("pyrogram").setLevel(logging.INFO)
 logging.getLogger("apscheduler").setLevel(logging.INFO)
 
 logger.debug(f"ENV → API_ID={API_ID}, BOT_TOKEN_len={len(BOT_TOKEN)}, "
              f"SCHED_TZ={SCHED_TZ}, PORT={PORT}")
 
-# ─── Main bot + scheduler logic with retries ─────────────────────────────────
+# ─── Main bot + scheduler logic with FloodWait retry ────────────────────────
 async def run_bot(stop_event: asyncio.Event):
-    # 1) Start scheduler + heartbeat
+    # 1) Scheduler + heartbeat
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
@@ -82,7 +81,7 @@ async def run_bot(stop_event: asyncio.Event):
     flyer.register(app, scheduler)
     logger.info("📢 Handlers registered")
 
-    # 4) Attempt to start the bot, respecting FloodWait
+    # 4) Retry loop for app.start()
     while not stop_event.is_set():
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -91,24 +90,26 @@ async def run_bot(stop_event: asyncio.Event):
             break
         except FloodWait as e:
             secs = int(getattr(e, "value", getattr(e, "x", 0)))
-            logger.warning(f"🚧 FloodWait on start – sleeping {secs}s")
+            logger.warning(f"🚧 FloodWait on start – retrying in {secs}s")
             await asyncio.sleep(secs + 1)
         except Exception:
-            logger.exception("🔥 Error starting SuccuBot, retrying in 5s")
+            logger.exception("🔥 Error starting SuccuBot – retrying in 5s")
             await asyncio.sleep(5)
 
     if stop_event.is_set():
-        logger.info("🛑 Stop event set before startup, exiting run_bot")
+        logger.info("🛑 Stop signal received before startup; exiting")
     else:
         # 5) Idle until stop_event
         logger.info("🛑 SuccuBot running; awaiting stop signal…")
-        await stop_event.wait()
+        await idle()
+        # or: await stop_event.wait()
 
-        # 6) Shutdown sequence
-        logger.info("🔄 Stop signal received; shutting down…")
+        # 6) Shutdown
+        logger.info("🔄 Stop signal received; shutting down SuccuBot…")
         await app.stop()
+
     scheduler.shutdown()
-    logger.info("✅ Shutdown complete")
+    logger.info("✅ SuccuBot and scheduler shut down cleanly")
 
 # ─── Entrypoint ─────────────────────────────────────────────────────────────
 async def main():
