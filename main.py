@@ -1,11 +1,26 @@
 import os
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 
-# ─── Set logging levels to hide Pyrogram and APScheduler debug spam ──────────
+# ─── Port Listener Hack to keep Railway alive ────────────────────────────────
+class PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot alive.")
+
+def start_web_server():
+    server = HTTPServer(("0.0.0.0", 8080), PingHandler)
+    server.serve_forever()
+
+threading.Thread(target=start_web_server, daemon=True).start()
+
+# ─── Set logging levels ──────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
@@ -59,14 +74,4 @@ fun.register(app)
 flyer.register(app, scheduler)
 
 print("✅ SuccuBot is running...")
-
-# ─── Block forever so Railway/Heroku doesn't kill the process ────────────────
-try:
-    app.run()
-    # This line is only reached if the bot is stopped or crashes.
-    import time
-    while True:
-        time.sleep(10)
-except KeyboardInterrupt:
-    print("Bot stopped by user.")
-
+app.run()
