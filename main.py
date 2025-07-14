@@ -22,7 +22,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
 PORT      = int(os.environ["PORT"])
 
-# ─── Immediate threaded health-check (binds before anything else) ──────────
+# ─── Immediate threaded health-check (binds before anything else) ───────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -45,11 +45,14 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)8s | %(message)s"
 )
 logger = logging.getLogger("SuccuBot")
+# Silence noisy libs
 logging.getLogger("pyrogram").setLevel(logging.INFO)
 logging.getLogger("apscheduler").setLevel(logging.INFO)
 
-logger.debug(f"ENV → API_ID={API_ID}, BOT_TOKEN_len={len(BOT_TOKEN)}, "
-             f"SCHED_TZ={SCHED_TZ}, PORT={PORT}")
+logger.debug(
+    f"ENV → API_ID={API_ID}, BOT_TOKEN_len={len(BOT_TOKEN)}, "
+    f"SCHED_TZ={SCHED_TZ}, PORT={PORT}"
+)
 
 # ─── Main bot + scheduler logic with FloodWait retry ────────────────────────
 async def run_bot(stop_event: asyncio.Event):
@@ -102,7 +105,6 @@ async def run_bot(stop_event: asyncio.Event):
         # 5) Idle until stop_event
         logger.info("🛑 SuccuBot running; awaiting stop signal…")
         await idle()
-        # or: await stop_event.wait()
 
         # 6) Shutdown
         logger.info("🔄 Stop signal received; shutting down SuccuBot…")
