@@ -1,74 +1,50 @@
-#!/usr/bin/env python3
 import os
-import sys
-import asyncio
 import signal
-import logging
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
-from pyrogram import Client, idle
+import asyncio
+from aiohttp import web
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun
+import handlers.flyer as flyer
+from pyrogram import Client
 
-# Configure logging
-title = "%(asctime)s | %(levelname)s | %(threadName)s | %(message)s"
-logging.basicConfig(level=logging.INFO, format=title)
-logger = logging.getLogger()
+# Validate essential env vars
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", "8080"))
 
-# Load environment variables
-API_ID = os.environ.get("API_ID")
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 8080))
+if not all([API_ID, API_HASH, BOT_TOKEN]):
+    raise RuntimeError("API_ID, API_HASH and BOT_TOKEN must be set")
 
-# Validate required credentials
-if not API_ID or not API_HASH or not BOT_TOKEN:
-    logger.error("The API_ID, API_HASH, and BOT_TOKEN environment variables are all required.")
-    sys.exit(1)
-
-# Health check HTTP handler (IPv4 only)
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-Type', 'text/plain')
-        self.end_headers()
-        self.wfile.write(b"OK")
-
-    def log_message(self, format, *args):
-        # suppress default logging
-        return
-
-def start_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    logger.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, server.serve_forever)
-
-# Initialize the bot client
+# Instantiate Pyrogram client
 app = Client(
-    "bot-session",
+    "succubot_session",
     api_id=int(API_ID),
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
 )
 
-# Scheduler for periodic tasks
+# Health check server
+async def handle_health(request):
+    return web.Response(text="OK")
+
+async def start_health_server():
+    srv = web.Application()
+    srv.router.add_get('/', handle_health)
+    runner = web.AppRunner(srv)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    print(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
+
+# Scheduler and heartbeat
+scheduler = AsyncIOScheduler()
+
 def heartbeat():
-    logger.info("💓 Heartbeat – scheduler alive")
+    print("💓 Heartbeat – scheduler alive")
 
-scheduler = AsyncIOScheduler(timezone=os.environ.get("SCHED_TZ"))
-scheduler.add_job(heartbeat, "interval", seconds=30)
-
-# Register handlers from modules
+# Register handlers
 def register_handlers():
-    import handlers.welcome as welcome
-    import handlers.help_cmd as help_cmd
-    import handlers.moderation as moderation
-    import handlers.federation as federation
-    import handlers.summon as summon
-    import handlers.xp as xp
-    import handlers.fun as fun
-    import handlers.flyer as flyer
-
     welcome.register(app)
     help_cmd.register(app)
     moderation.register(app)
@@ -76,39 +52,37 @@ def register_handlers():
     summon.register(app)
     xp.register(app)
     fun.register(app)
-    flyer.register()
-    logger.info("📢 Handlers registered")
+    flyer.register(app, scheduler)
 
-# Graceful shutdown on signals
+# Graceful shutdown
 def shutdown():
-    logger.info("🔄 Stop signal received; shutting down…")
+    print("🔄 Stop signal received; shutting down…")
     scheduler.shutdown(wait=False)
-    # schedule bot stop
     asyncio.create_task(app.stop())
 
-# Main run logic
-async def run_bot():
-    logger.info("✅ Starting SuccuBot…")
-    await app.start()
-    logger.info("✅ SuccuBot started successfully")
-    await idle()
-    await app.stop()
-    logger.info("🛑 SuccuBot stopped")
+async def main():
+    # Start health server
+    await start_health_server()
 
-# Entrypoint
-def main():
-    start_health_server()
-    register_handlers()
+    # Start scheduler and jobs
+    scheduler.add_job(heartbeat, 'interval', seconds=30, id='heartbeat')
     scheduler.start()
+    print("✅ Scheduler started and heartbeat scheduled every 30s")
 
-    loop = asyncio.get_event_loop()
+    # Register handlers
+    register_handlers()
+    print("✅ Handlers registered")
+
+    # Start bot
+    print("✅ Starting SuccuBot…")
+    await app.start()
+    print("✅ SuccuBot started; awaiting stop signal…")
+
+    # Keep running until stopped
+    stop_event = asyncio.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, shutdown)
+        asyncio.get_running_loop().add_signal_handler(sig, shutdown)
+    await stop_event.wait()
 
-    try:
-        loop.run_until_complete(run_bot())
-    finally:
-        logger.info("💥 Exiting main loop")
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    asyncio.run(main())
