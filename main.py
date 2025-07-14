@@ -1,8 +1,11 @@
 import os
 import logging
 import signal
-import asyncio
+import threading
+import socket
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import asyncio
 from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
@@ -10,7 +13,7 @@ from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
-#── Load env ──────────────────────────────────────────────────────────────────
+# ─── Load env ────────────────────────────────────────────────────────────────
 load_dotenv()
 API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
@@ -18,7 +21,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
 PORT      = int(os.environ["PORT"])
 
-#── Logging ─────────────────────────────────────────────────────────────────
+# ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s | %(levelname)8s | %(message)s"
@@ -27,38 +30,39 @@ logger = logging.getLogger("SuccuBot")
 logging.getLogger("pyrogram").setLevel(logging.INFO)
 logging.getLogger("apscheduler").setLevel(logging.INFO)
 
-logger.debug(
-    f"ENV → API_ID={API_ID}, BOT_TOKEN_len={len(BOT_TOKEN)}, "
-    f"SCHED_TZ={SCHED_TZ}, PORT={PORT}"
-)
+logger.debug(f"ENV → API_ID={API_ID}, BOT_TOKEN_len={len(BOT_TOKEN)}, SCHED_TZ={SCHED_TZ}, PORT={PORT}")
 
-#── Asyncio health‐check (always replies 200) ────────────────────────────────
-async def health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    await reader.read(1024)  # swallow HEAD/GET/etc
-    writer.write(
-        b"HTTP/1.1 200 OK\r\n"
-        b"Content-Type: text/plain\r\n"
-        b"Content-Length: 2\r\n"
-        b"\r\n"
-        b"OK"
-    )
-    await writer.drain()
-    writer.close()
+# ─── Health‐check handler ────────────────────────────────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, fmt, *args):
+        # suppress default logs
+        pass
 
-async def start_health_server():
-    server = await asyncio.start_server(health_handler, "0.0.0.0", PORT)
-    logger.info(f"🌐 Health‐check listening on 0.0.0.0:{PORT}")
-    async with server:
-        await server.serve_forever()
+def start_health_servers():
+    # IPv4 server
+    httpd4 = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    threading.Thread(target=httpd4.serve_forever, daemon=True, name="Health-v4").start()
+    # IPv6 server
+    class HTTPServer6(HTTPServer):
+        address_family = socket.AF_INET6
+    httpd6 = HTTPServer6(("::", PORT), HealthHandler)
+    threading.Thread(target=httpd6.serve_forever, daemon=True, name="Health-v6").start()
+    logger.info(f"🌐 Health‐check (v4 & v6) listening on port {PORT}")
 
-#── Run bot + scheduler, with FloodWait retry on startup ────────────────────
+# ─── Bot + scheduler with FloodWait retry ────────────────────────────────────
 async def run_bot(stop_event: asyncio.Event):
     # Scheduler + heartbeat
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
-    scheduler.add_job(lambda: logger.info("💓 Heartbeat – scheduler alive"),
-                      "interval", seconds=30)
+    scheduler.add_job(lambda: logger.info("💓 Heartbeat – scheduler alive"), "interval", seconds=30)
 
     # Pyrogram client
     app = Client(
@@ -78,7 +82,7 @@ async def run_bot(stop_event: asyncio.Event):
     flyer.register(app, scheduler)
     logger.info("📢 Handlers registered")
 
-    # FloodWait‐aware start loop
+    # FloodWait-aware start loop
     while not stop_event.is_set():
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -93,7 +97,7 @@ async def run_bot(stop_event: asyncio.Event):
             logger.exception("🔥 Error on start – retrying in 5s")
             await asyncio.sleep(5)
 
-    # Wait on our own stop_event (set by SIGINT or SIGTERM)
+    # Await termination
     if not stop_event.is_set():
         logger.info("🛑 Bot running; awaiting stop signal…")
         await stop_event.wait()
@@ -103,15 +107,16 @@ async def run_bot(stop_event: asyncio.Event):
     scheduler.shutdown()
     logger.info("✅ SuccuBot and scheduler shut down cleanly")
 
-#── Entrypoint ─────────────────────────────────────────────────────────────
+# ─── Entrypoint ─────────────────────────────────────────────────────────────
 async def main():
+    # fire up dual-stack health servers
+    start_health_servers()
+
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, stop_event.set)
     loop.add_signal_handler(signal.SIGINT,  stop_event.set)
 
-    # fire up health‐check, then bot
-    asyncio.create_task(start_health_server())
     await run_bot(stop_event)
 
 if __name__ == "__main__":
