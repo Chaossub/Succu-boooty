@@ -3,7 +3,6 @@
 import os
 import logging
 import asyncio
-from http import HTTPStatus
 
 from dotenv import load_dotenv
 from pyrogram import Client, idle
@@ -28,29 +27,31 @@ PORT      = int(os.getenv("PORT", "8000"))
 
 logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
-# ─── Async HTTP health-check server ─────────────────────────────────────────
+# ─── Async HTTP health‐check server ─────────────────────────────────────────
 async def health_server():
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        await reader.read(1024)  # read & ignore incoming request
-        response = (
-            f"HTTP/1.1 {HTTPStatus.OK.value} {HTTPStatus.OK.phrase}\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 2\r\n"
-            "\r\n"
-            "OK"
+        # Read and ignore request
+        await reader.read(1024)
+        # Send simple 200 OK
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: text/plain\r\n"
+            b"Content-Length: 2\r\n"
+            b"\r\n"
+            b"OK"
         )
-        writer.write(response.encode())
         await writer.drain()
         writer.close()
 
+    # Bind port immediately
     server = await asyncio.start_server(handler, "0.0.0.0", PORT)
-    logger.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
+    logger.info(f"🌐 Health‐check listening on 0.0.0.0:{PORT}")
     async with server:
         await server.serve_forever()
 
 # ─── Main async entrypoint ─────────────────────────────────────────────────
 async def main():
-    # 1) Launch health-check in background
+    # 1) Start health‐check server before anything else
     asyncio.create_task(health_server())
 
     # 2) Start scheduler
@@ -58,7 +59,7 @@ async def main():
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
-    # 3) Build bot client
+    # 3) Initialize Pyrogram client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -79,7 +80,7 @@ async def main():
     fun.register(app)
     flyer.register(app, scheduler)
 
-    # 5) Run the bot, catching FloodWait to sleep & retry
+    # 5) Run bot with FloodWait-safe loop
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
