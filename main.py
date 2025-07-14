@@ -13,9 +13,17 @@ from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
+# ─── Logging setup ─────────────────────────────────────────────────────────
+logging.basicConfig(
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # ─── Health‐check server ────────────────────────────────────────────────────
 def run_health():
     port = int(os.environ.get("PORT", "8000"))
+    logger.info(f"🌐 Health-check server listening on 0.0.0.0:{port}")
     class H(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
@@ -25,13 +33,7 @@ def run_health():
 
 threading.Thread(target=run_health, daemon=True).start()
 
-# ─── Logging & ENV ─────────────────────────────────────────────────────────
-logging.basicConfig(
-    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
+# ─── Load environment ───────────────────────────────────────────────────────
 load_dotenv()
 API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
@@ -39,9 +41,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 logger.info(f"🔍 Loaded ENV → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
+# ─── Main async entrypoint ─────────────────────────────────────────────────
 async def main():
     # ─── Scheduler ──────────────────────────────────────────────────────────
-    sched_tz = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
+    sched_tz  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
     scheduler = AsyncIOScheduler(timezone=timezone(sched_tz))
     scheduler.start()
     logger.info("🔌 Scheduler started")
@@ -67,21 +70,20 @@ async def main():
     fun.register(app)
     flyer.register(app, scheduler)
 
-    # ─── Run + FloodWait‐retry loop ─────────────────────────────────────────
+    # ─── Run + FloodWait-retry loop ──────────────────────────────────────────
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
             await app.start()
             await idle()
-            logger.info("🔄 Bot stopped—restarting…")
+            logger.info("🔄 SuccuBot stopped—restarting…")
             await app.stop()
         except FloodWait as e:
-            # Extract seconds to wait
-            wait = getattr(e, "value", None) or getattr(e, "x", None) or 0
-            logger.warning(f"🚧 FloodWait – sleeping for {wait}s before retry.")
-            await asyncio.sleep(int(wait) + 1)
+            secs = int(getattr(e, "value", getattr(e, "x", 0)))
+            logger.warning(f"🚧 FloodWait – sleeping {secs}s then retry")
+            await asyncio.sleep(secs + 1)
         except Exception:
-            logger.exception("🔥 Unhandled error—restarting in 5s.")
+            logger.exception("🔥 Unexpected error—restarting in 5s")
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
