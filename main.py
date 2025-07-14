@@ -6,7 +6,15 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import asyncio
 
-# ─── Start health‐check server right away ───────────────────────────────────
+from dotenv import load_dotenv
+from pyrogram import Client, idle
+from pyrogram.enums import ParseMode
+from pyrogram.errors import FloodWait
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pytz import timezone
+
+# ─── Start HTTP health‐check server immediately ─────────────────────────────
+# Railway will inject the correct PORT at runtime, so do NOT hard-code it.
 PORT = int(os.getenv("PORT", "8000"))
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -20,41 +28,34 @@ class HealthHandler(BaseHTTPRequestHandler):
 
 def serve_health():
     httpd = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    logging.info(f"🌐 Health‐check listening on 0.0.0.0:{PORT}")
     httpd.serve_forever()
 
 threading.Thread(target=serve_health, daemon=True).start()
 
-# ─── Now import and start your bot & scheduler ─────────────────────────────
-from dotenv import load_dotenv
-from pyrogram import Client, idle
-from pyrogram.enums import ParseMode
-from pyrogram.errors import FloodWait
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pytz import timezone
-
-# ─── Logging & ENV ─────────────────────────────────────────────────────────
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
+# ─── Load environment & configure logging ───────────────────────────────────
 load_dotenv()
 API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
 
-logger.info(f"🌐 Health‐check listening on 0.0.0.0:{PORT}")
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
+# ─── Main asyncio entrypoint ────────────────────────────────────────────────
 async def main():
     # 1) Scheduler
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
-    # 2) Bot client
+    # 2) Pyrogram client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -75,7 +76,7 @@ async def main():
     fun.register(app)
     flyer.register(app, scheduler)
 
-    # 4) Run + FloodWait/Retry loop
+    # 4) Run with FloodWait‐safe loop
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
