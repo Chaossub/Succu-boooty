@@ -32,7 +32,7 @@ logging.getLogger("apscheduler").setLevel(logging.INFO)
 
 logger.debug(f"ENV → API_ID={API_ID}, BOT_TOKEN_len={len(BOT_TOKEN)}, SCHED_TZ={SCHED_TZ}, PORT={PORT}")
 
-# ─── Health‐check handler ────────────────────────────────────────────────────
+# ─── Health‐check handler & servers ──────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         self.send_response(200)
@@ -42,29 +42,35 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
     def log_message(self, fmt, *args):
-        # suppress default logs
-        pass
+        pass  # silence
+
+class HealthHTTPServer(HTTPServer):
+    allow_reuse_address = True
+
+class HealthHTTPServer6(HealthHTTPServer):
+    address_family = socket.AF_INET6
 
 def start_health_servers():
-    # IPv4 server
-    httpd4 = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    # IPv4
+    httpd4 = HealthHTTPServer(("0.0.0.0", PORT), HealthHandler)
     threading.Thread(target=httpd4.serve_forever, daemon=True, name="Health-v4").start()
-    # IPv6 server
-    class HTTPServer6(HTTPServer):
-        address_family = socket.AF_INET6
-    httpd6 = HTTPServer6(("::", PORT), HealthHandler)
-    threading.Thread(target=httpd6.serve_forever, daemon=True, name="Health-v6").start()
-    logger.info(f"🌐 Health‐check (v4 & v6) listening on port {PORT}")
+    logger.info(f"🌐 Health‐check v4 listening on 0.0.0.0:{PORT}")
+
+    # IPv6 (optional)
+    try:
+        httpd6 = HealthHTTPServer6(("::", PORT), HealthHandler)
+        threading.Thread(target=httpd6.serve_forever, daemon=True, name="Health-v6").start()
+        logger.info(f"🌐 Health‐check v6 listening on [::]:{PORT}")
+    except OSError as e:
+        logger.warning(f"⚠️ Could not bind IPv6 health‐check on [::]:{PORT} ({e}); continuing IPv4 only")
 
 # ─── Bot + scheduler with FloodWait retry ────────────────────────────────────
 async def run_bot(stop_event: asyncio.Event):
-    # Scheduler + heartbeat
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
     scheduler.add_job(lambda: logger.info("💓 Heartbeat – scheduler alive"), "interval", seconds=30)
 
-    # Pyrogram client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -82,7 +88,7 @@ async def run_bot(stop_event: asyncio.Event):
     flyer.register(app, scheduler)
     logger.info("📢 Handlers registered")
 
-    # FloodWait-aware start loop
+    # FloodWait‐aware start loop
     while not stop_event.is_set():
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -97,7 +103,6 @@ async def run_bot(stop_event: asyncio.Event):
             logger.exception("🔥 Error on start – retrying in 5s")
             await asyncio.sleep(5)
 
-    # Await termination
     if not stop_event.is_set():
         logger.info("🛑 Bot running; awaiting stop signal…")
         await stop_event.wait()
@@ -109,7 +114,6 @@ async def run_bot(stop_event: asyncio.Event):
 
 # ─── Entrypoint ─────────────────────────────────────────────────────────────
 async def main():
-    # fire up dual-stack health servers
     start_health_servers()
 
     stop_event = asyncio.Event()
@@ -122,3 +126,4 @@ async def main():
 if __name__ == "__main__":
     logger.info("▶️ Launching SuccuBot")
     asyncio.run(main())
+
