@@ -1,102 +1,80 @@
+#!/usr/bin/env python3
 import os
-import signal
-import threading
-import asyncio
 import logging
+import asyncio
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from socketserver import ThreadingMixIn
 
-from pyrogram import Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pyrogram import Client, idle
 
-# Configure logging
-def setup_logging():
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(asctime)s | %(levelname)5s | %(threadName)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+# ─── Configuration ─────────────────────────────────────────────────────────────
 
-# HTTP health-check handler
+API_ID   = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")            # ← make sure this is set in your env!
+BOT_TOKEN= os.getenv("BOT_TOKEN")
+PORT     = int(os.getenv("PORT", 8080))
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s | %(levelname)7s | %(message)s"
+)
+
+# ─── Health‐check HTTP Server ──────────────────────────────────────────────────
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/health":
+        if self.path in ("/", "/health", "/live", "/ready"):
             self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"OK")
         else:
             self.send_response(404)
             self.end_headers()
 
-# Threaded HTTP server to serve health checks without blocking
-class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-    daemon_threads = True
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    logging.info(f"🌐 Health‐check listening on 0.0.0.0:{PORT}")
 
-# Start health-check server on IPv4
-def start_health_server(port: int):
-    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logging.info(f"🌐 Health-check listening on 0.0.0.0:{port}")
-    return server
+# ─── Heartbeat Job ─────────────────────────────────────────────────────────────
 
-# Run the Telegram bot, auto-restarting on unexpected errors
-async def run_bot(api_id: int, bot_token: str):
-    while True:
-        try:
-            logging.info("✅ Starting SuccuBot…")
-            async with Client(
-                "succubot_session",
-                api_id=api_id,
-                bot_token=bot_token,
-                workdir=os.getcwd(),
-                plugins=dict(root="handlers")
-            ) as app:
-                await app.idle()
-                break
-        except Exception as e:
-            logging.error(f"🔥 Bot crashed: {e}. Restarting in 5s…")
-            await asyncio.sleep(5)
+async def heartbeat():
+    logging.info("💓 Heartbeat – scheduler alive")
+
+# ─── Main Entrypoint ────────────────────────────────────────────────────────────
 
 async def main():
-    # Load configuration
-    api_id = int(os.getenv("API_ID", "0"))
-    bot_token = os.getenv("BOT_TOKEN", "")
-    port = int(os.getenv("PORT", "8000"))
+    # 1) Start health‐check
+    start_health_server()
 
-    # Setup logging
-    setup_logging()
-    logging.debug(f"ENV → API_ID={api_id}, BOT_TOKEN_len={len(bot_token)}, PORT={port}")
-
-    # Start health-check server
-    start_health_server(port)
-
-    # Scheduler for heartbeat logs
+    # 2) Schedule heartbeat every 30s
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(lambda: logging.info("💓 Heartbeat – scheduler alive"), 'interval', seconds=30)
+    scheduler.add_job(heartbeat, "interval", seconds=30)
     scheduler.start()
 
-    # Setup graceful shutdown
-    stop_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop_event.set)
+    # 3) Start the bot
+    app = Client(
+        "succubot-session", 
+        api_id=API_ID, 
+        api_hash=API_HASH, 
+        bot_token=BOT_TOKEN
+    )
+    await app.start()
+    logging.info("✅ SuccuBot started")
 
-    # Launch the bot
-    bot_task = asyncio.create_task(run_bot(api_id, bot_token))
+    # 4) Wait until Ctrl+C / SIGTERM
+    await idle()
 
-    # Wait for termination signal
-    await stop_event.wait()
-    logging.info("🔄 Stop signal received; shutting down…")
-
-    # Clean up
-    bot_task.cancel()
-    try:
-        await bot_task
-    except asyncio.CancelledError:
-        pass
-    await scheduler.shutdown()
-    logging.info("✅ Shutdown complete")
+    # 5) Clean shutdown
+    logging.info("🔄 Shutting down SuccuBot…")
+    await app.stop()
+    scheduler.shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
