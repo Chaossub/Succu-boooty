@@ -44,17 +44,17 @@ def run_health_server():
     logger.info(f"🌐 Health‐check listening on 0.0.0.0:{PORT}")
     server.serve_forever()
 
-# ─── Bot + Scheduler in thread ──────────────────────────────────────────────
-def run_bot_thread():
-    asyncio.run(async_main())
+# Start health‐check thread immediately
+threading.Thread(target=run_health_server, daemon=True).start()
 
-async def async_main():
+# ─── Main async entrypoint ─────────────────────────────────────────────────
+async def main():
     # 1) Scheduler
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
-    # 2) Client
+    # 2) Bot client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -88,16 +88,8 @@ async def async_main():
             logger.warning(f"🚧 FloodWait – sleeping {secs}s before retry")
             await asyncio.sleep(secs + 1)
         except Exception:
-            logger.exception("🔥 Unhandled error—waiting 5s then retry")
+            logger.exception("🔥 Unexpected error—waiting 5s then retry")
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    # 1) Launch health‐check in main thread
-    run_health_server() if threading.current_thread() is threading.main_thread() else None
-
-    # 2) Start bot in background thread
-    bot_thread = threading.Thread(target=run_bot_thread, daemon=True)
-    bot_thread.start()
-
-    # 3) Keep main thread alive serving health
-    bot_thread.join()
+    asyncio.run(main())
