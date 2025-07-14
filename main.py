@@ -1,57 +1,74 @@
-#!/usr/bin/env python3
 import os
-import asyncio
+import sys
+import logging
+import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
-from apscheduler.schedulers.background import BackgroundScheduler
+import asyncio
 from pyrogram import Client
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Import your handler modules so they register their callbacks
-import handlers.welcome
-import handlers.help_cmd
-import handlers.moderation
-import handlers.federation
-import handlers.summon
-import handlers.xp
-import handlers.fun
+# Configure logging
+tlogging_format = "%(asctime)s | %(levelname)s | %(message)s"
+logging.basicConfig(level=logging.INFO, format=tlogging_format)
 
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == '/health':
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b'OK')
-        else:
-            self.send_response(404)
-            self.end_headers()
+# Load required environment variables
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", "8080"))
 
-def start_health_server(port: int):
-    httpd = HTTPServer(('0.0.0.0', port), HealthHandler)
-    httpd.serve_forever()
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    logging.error("Missing one or more required environment variables: API_ID, API_HASH, BOT_TOKEN")
+    sys.exit(1)
+
+try:
+    API_ID = int(API_ID)
+except ValueError:
+    logging.error("API_ID must be an integer")
+    sys.exit(1)
+
+# Simple HTTP health-check server
+def start_health_server(port):
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/health":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(b"OK")
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    logging.info(f"Health-check listening on 0.0.0.0:{port}")
 
 async def main():
-    # Load config from environment
-    API_ID = int(os.environ['API_ID'])
-    BOT_TOKEN = os.environ['BOT_TOKEN']
-    PORT = int(os.environ.get('PORT', 8080))
+    # Start health-check server
+    start_health_server(PORT)
 
-    # Start health endpoint in background thread
-    health_thread = Thread(target=start_health_server, args=(PORT,), daemon=True)
-    health_thread.start()
-
-    # Start scheduler for heartbeat or other jobs
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(lambda: print("💓 Heartbeat – scheduler alive"), 'interval', seconds=30)
+    # Start scheduler and heartbeat job
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(lambda: logging.info("💓 Heartbeat – scheduler alive"), "interval", seconds=30)
     scheduler.start()
+    logging.info("Scheduler started")
 
-    # Initialize and run bot
-    app = Client('bot_session', api_id=API_ID, bot_token=BOT_TOKEN)
-    await app.start()
-    print("✅ SuccuBot started; awaiting events…")
+    # Initialize and start the bot
+    bot = Client(
+        "bot_session",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN
+    )
+    await bot.start()
+    logging.info("✅ Bot started; awaiting messages…")
 
-    # Keep running until interrupted
-    stop_event = asyncio.Event()
-    await stop_event.wait()
+    # Keep the bot running until interrupted
+    await bot.idle()
 
-if __name__ == '__main__':
-    asyncio.run(main())
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Shutting down…")
