@@ -2,7 +2,11 @@
 
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import asyncio
+import signal
+import traceback
 
 from dotenv import load_dotenv
 from pyrogram import Client, idle
@@ -11,48 +15,63 @@ from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
-# ─── Load environment and configure logging ─────────────────────────────────
+# ─── Load env & configure logging ───────────────────────────────────────────
 load_dotenv()
 API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
-PORT      = int(os.getenv("PORT", "8000"))  # Railway injects this for you
+# Railway will inject its real port here
+PORT      = int(os.environ.get("PORT", "8000"))
 
 logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    level=logging.INFO
+    level=logging.DEBUG,  # ← DEBUG for maximum verbosity
+    format="%(asctime)s | %(levelname)8s | %(threadName)s | %(message)s"
 )
-logger = logging.getLogger(__name__)
-logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
+logger = logging.getLogger("SuccuBot")
 
-# ─── Asyncio-based health-check server ──────────────────────────────────────
-async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    await reader.read(1024)  # ignore any request data
-    writer.write(
-        b"HTTP/1.1 200 OK\r\n"
-        b"Content-Type: text/plain\r\n"
-        b"Content-Length: 2\r\n"
-        b"\r\n"
-        b"OK"
-    )
-    await writer.drain()
-    writer.close()
+logger.debug(f"Environment loaded: API_ID={API_ID}, BOT_TOKEN=<{len(BOT_TOKEN)} chars>, SCHED_TZ={SCHED_TZ}, PORT={PORT}")
 
-async def start_health_server():
-    server = await asyncio.start_server(handle_health, "0.0.0.0", PORT)
-    logger.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
-    async with server:
-        await server.serve_forever()
+# ─── Health‐check server ─────────────────────────────────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        logger.debug("Health‐check GET received")
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def do_HEAD(self):
+        logger.debug("Health‐check HEAD received")
+        self.send_response(200)
+        self.end_headers()
 
-# ─── Bot and scheduler runner ────────────────────────────────────────────────
-async def run_bot():
-    # Start the scheduler
+def serve_health():
+    try:
+        httpd = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+        logger.info(f"🌐 Health‐check listening on 0.0.0.0:{PORT}")
+        httpd.serve_forever()
+    except Exception:
+        logger.exception("💥 Health‐check server crashed")
+
+threading.Thread(target=serve_health, name="HealthServer", daemon=True).start()
+
+# ─── Graceful shutdown capture ────────────────────────────────────────────────
+def on_sigterm(*_):
+    logger.info("SIGTERM received, shutting down gracefully…")
+    # flush logs & exit
+    raise SystemExit()
+
+signal.signal(signal.SIGTERM, on_sigterm)
+
+# ─── Main async entrypoint ───────────────────────────────────────────────────
+async def main():
+    # 1) Scheduler
+    logger.debug("Initializing AsyncIOScheduler")
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
-    # Initialize Pyrogram client
+    # 2) Pyrogram client
+    logger.debug("Creating Pyrogram Client")
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -61,41 +80,41 @@ async def run_bot():
         parse_mode=ParseMode.HTML
     )
 
-    # Register handlers
+    # 3) Register handlers
+    logger.debug("Importing and registering handlers")
     from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
-    logger.info("📢 Registering handlers…")
-    welcome.register(app)
-    help_cmd.register(app)
-    moderation.register(app)
-    federation.register(app)
-    summon.register(app)
-    xp.register(app)
-    fun.register(app)
+    for module in (welcome, help_cmd, moderation, federation, summon, xp, fun):
+        logger.debug(f"Registering handlers from {module.__name__}")
+        module.register(app)
+    logger.debug("Registering flyer handler")
     flyer.register(app, scheduler)
+    logger.info("📢 All handlers registered")
 
-    # Run loop with FloodWait handling
+    # 4) Run + FloodWait/Retry loop
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
             await app.start()
+            logger.debug("Client started, entering idle()")
             await idle()
-            logger.info("🔄 SuccuBot stopped—restarting…")
+            logger.info("🔄 SuccuBot idle returned—stopping…")
             await app.stop()
+            logger.info("🔄 SuccuBot stopped cleanly—will restart")
         except FloodWait as e:
-            secs = int(getattr(e, "value", getattr(e, "x", 0)))
-            logger.warning(f"🚧 FloodWait – sleeping {secs}s before retry")
-            await asyncio.sleep(secs + 1)
+            wait = int(getattr(e, "value", getattr(e, "x", 0)))
+            logger.warning(f"🚧 FloodWait – sleeping for {wait}s before retry")
+            await asyncio.sleep(wait + 1)
+        except SystemExit:
+            logger.info("SystemExit raised—exiting main loop")
+            break
         except Exception:
-            logger.exception("🔥 Unexpected error—waiting 5s then retry")
+            logger.error("🔥 Unexpected exception in bot loop:", exc_info=True)
             await asyncio.sleep(5)
 
-# ─── Entry point ────────────────────────────────────────────────────────────
-async def main():
-    # Run health-check server and bot concurrently
-    await asyncio.gather(
-        start_health_server(),
-        run_bot(),
-    )
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        logger.info("▶️ Launching main()")
+        asyncio.run(main())
+    except Exception:
+        logger.error("💥 top‐level exception in __main__:", exc_info=True)
+        traceback.print_exc()
