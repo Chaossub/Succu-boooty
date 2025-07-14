@@ -6,7 +6,12 @@ from pyrogram import Client
 from pyrogram.enums import ParseMode
 
 # ─── Set logging levels to hide Pyrogram and APScheduler debug spam ──────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+)
 logging.getLogger("pyrogram").setLevel(logging.WARNING)
+logging.getLogger("pyrogram.session.session").setLevel(logging.ERROR)
 logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
 # ─── Load environment ────────────────────────────────────────────────────────
@@ -27,7 +32,7 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML,  # Use correct parse mode!
+    parse_mode=ParseMode.HTML,
 )
 
 # ─── Import & register handlers ──────────────────────────────────────────────
@@ -54,4 +59,14 @@ fun.register(app)
 flyer.register(app, scheduler)
 
 print("✅ SuccuBot is running...")
-app.run()
+
+# ─── Block forever so Railway/Heroku doesn't kill the process ────────────────
+try:
+    app.run()
+    # This line is only reached if the bot is stopped or crashes.
+    import time
+    while True:
+        time.sleep(10)
+except KeyboardInterrupt:
+    print("Bot stopped by user.")
+
