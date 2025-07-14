@@ -1,89 +1,59 @@
-#!/usr/bin/env python3
 import os
-import sys
-import signal
 import logging
 import asyncio
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from threading import Thread
+from dotenv import load_dotenv
 
-# Ensure our project root is on sys.path
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+from pyrogram import Client, idle
+from pyrogram.enums import ParseMode
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pyrogram import Client
+# Load environment variables
+load_dotenv()
+API_ID = int(os.environ.get("API_ID", 0))
+API_HASH = os.environ.get("API_HASH", "")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 
-# Try importing handlers.flyer
-try:
-    from handlers import flyer
-    HAS_FLYER = True
-    logging.info("✅ handlers.flyer loaded")
-except ImportError as e:
-    HAS_FLYER = False
-    logging.warning(f"⚠️ Could not import handlers.flyer: {e}")
+if not (API_ID and API_HASH and BOT_TOKEN):
+    raise RuntimeError("Missing API_ID, API_HASH, or BOT_TOKEN in environment variables!")
 
-# Configure logging
-LOG_FMT = "%(asctime)s | %(levelname)s | %(message)s"
-logging.basicConfig(level=logging.INFO, format=LOG_FMT)
-log = logging.getLogger(__name__)
-
-# Env vars
-PORT = int(os.getenv("PORT", "8080"))
-API_ID = int(os.getenv("API_ID", ""))     # must be set
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")    # must be set
-
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/health":
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"OK")
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-def start_health_server():
-    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    server.serve_forever()
-
-def heartbeat():
-    log.info("💓 Heartbeat – scheduler alive")
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger("main")
 
 async def runner():
-    # 1) Health‐check endpoint
-    Thread(target=start_health_server, daemon=True).start()
-    log.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
+    # THIS IS THE CORRECT WAY
+    app = Client(
+        "SuccuBot",          # <-- REQUIRED SESSION NAME!
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN,
+        parse_mode=ParseMode.HTML,
+    )
 
-    # 2) Scheduler for periodic jobs
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(heartbeat, 'interval', seconds=30)
-    scheduler.start()
-    log.info("🗓️ Scheduler started")
+    # Register handlers
+    from handlers import (
+        welcome,
+        help_cmd,
+        moderation,
+        federation,
+        summon,
+        xp,
+        fun,
+        flyer,
+    )
+    welcome.register(app)
+    help_cmd.register(app)
+    moderation.register(app)
+    federation.register(app)
+    summon.register(app)
+    xp.register(app)
+    fun.register(app)
+    flyer.register(app)
 
-    # 3) Telegram bot client
-    app = Client(api_id=API_ID, bot_token=BOT_TOKEN)
-
-    # 4) Register handlers from handlers/flyer.py
-    if HAS_FLYER:
-        flyer.register(app, scheduler)
-
-    # 5) Start the bot
-    await app.start()
-    log.info("✅ Bot started; awaiting shutdown signal…")
-
-    # 6) Graceful shutdown on SIGINT/SIGTERM
-    stop_evt = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop_evt.set)
-    await stop_evt.wait()
-
-    # 7) Teardown
-    log.info("🔄 Shutdown initiated…")
-    await app.stop()
-    scheduler.shutdown()
+    logger.info("✅ SuccuBot is running...")
+    async with app:
+        await idle()
 
 def main():
     asyncio.run(runner())
