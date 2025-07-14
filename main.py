@@ -8,19 +8,19 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import Client
 
-# adjust these imports if your modules live elsewhere
+# ─── Adjust these to match your project layout ────────────────────────────────
 from handlers import flyer, welcome, help_cmd, moderation, federation, summon, xp, fun
 
-# ─── Configuration ──────────────────────────────────────────────────────────────
-API_ID   = int(os.getenv("API_ID",   "0"))
-API_HASH = os.getenv("API_HASH",      "")
-BOT_TOKEN= os.getenv("BOT_TOKEN",     "")
-PORT     = int(os.getenv("PORT",    "8080"))
+# ─── Configuration ─────────────────────────────────────────────────────────────
+API_ID    = int(os.getenv("API_ID",   "0"))
+API_HASH  = os.getenv("API_HASH",      "")
+BOT_TOKEN = os.getenv("BOT_TOKEN",     "")
+PORT      = int(os.getenv("PORT",    "8080"))
 
 if not (API_ID and API_HASH and BOT_TOKEN):
-    raise RuntimeError("API_ID, API_HASH, and BOT_TOKEN must be set")
+    raise RuntimeError("API_ID, API_HASH and BOT_TOKEN environment variables are required")
 
-# ─── Health-check HTTP server ──────────────────────────────────────────────────
+# ─── Health-check HTTP endpoint ────────────────────────────────────────────────
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/health", "/healthz"):
@@ -37,9 +37,9 @@ def start_health_server(port: int):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     print(f"🌐 Health-check listening on 0.0.0.0:{port}")
-    return server  # if you ever want to shutdown: server.shutdown()
+    return server
 
-# ─── Handler registration ───────────────────────────────────────────────────────
+# ─── Register all your Pyrogram handlers here ─────────────────────────────────
 def register_handlers(app: Client, scheduler: AsyncIOScheduler):
     flyer.register(app, scheduler)
     welcome.register(app)
@@ -50,16 +50,16 @@ def register_handlers(app: Client, scheduler: AsyncIOScheduler):
     xp.register(app)
     fun.register(app)
 
-# ─── Main ──────────────────────────────────────────────────────────────────────
+# ─── Application entrypoint ───────────────────────────────────────────────────
 def main():
-    # 1) start health endpoint
+    # 1) start HTTP health-check
     start_health_server(PORT)
 
-    # 2) prepare scheduler (heartbeat every 30s)
+    # 2) prepare APScheduler
     scheduler = AsyncIOScheduler()
     scheduler.add_job(lambda: print("💓 Heartbeat – scheduler alive"), "interval", seconds=30)
 
-    # 3) prepare your bot client
+    # 3) prepare Pyrogram bot
     app = Client(
         "bot-session",
         api_id=API_ID,
@@ -67,23 +67,23 @@ def main():
         bot_token=BOT_TOKEN
     )
 
+    # 4) wire up handlers
     register_handlers(app, scheduler)
 
-    # 4) run everything under asyncio
+    # 5) run everything under a dedicated asyncio loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     async def run():
-        scheduler.start()               # start APScheduler on this loop
-        await app.start()              # connect the bot
+        scheduler.start()
+        await app.start()
         print("✅ SuccuBot started; awaiting stop signal…")
 
-        stop = asyncio.Event()
-        # on SIGINT/SIGTERM, set stop event
+        stop_event = asyncio.Event()
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, stop.set)
+            loop.add_signal_handler(sig, stop_event.set)
 
-        await stop.wait()
+        await stop_event.wait()
         print("🔄 Shutdown initiated…")
         scheduler.shutdown(wait=False)
         await app.stop()
