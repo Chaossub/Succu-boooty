@@ -1,66 +1,52 @@
 import os
-import logging
-import asyncio
 from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
+from pyrogram import Client
 
-from pyrogram import Client, idle
-from pyrogram.enums import ParseMode
-
-# Load environment variables
+# ─── Load environment ──────────────────────────────────────────────────────────
 load_dotenv()
-API_ID = int(os.environ.get("API_ID", 0))
-API_HASH = os.environ.get("API_HASH", "")
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-if not (API_ID and API_HASH and BOT_TOKEN):
-    raise RuntimeError("Missing API_ID, API_HASH, or BOT_TOKEN in environment variables!")
-
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    level=logging.INFO,
+# ─── Init scheduler ───────────────────────────────────────────────────────────
+scheduler = BackgroundScheduler(
+    timezone=os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
 )
-logger = logging.getLogger("main")
+scheduler.start()
 
-async def runner():
-    app = Client(
-        "SuccuBot",  # REQUIRED session name!
-        api_id=API_ID,
-        api_hash=API_HASH,
-        bot_token=BOT_TOKEN,
-        parse_mode=ParseMode.HTML,
-    )
+# ─── Init bot ─────────────────────────────────────────────────────────────────
+app = Client(
+    "SuccuBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    parse_mode="html",  # use lowercase html for Pyrogram v2
+)
 
-    # Setup scheduler for flyer handler
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    scheduler = AsyncIOScheduler(timezone="UTC")
-    scheduler.start()
+# ─── Import & register handlers ───────────────────────────────────────────────
+from handlers import (
+    welcome,
+    help_cmd,
+    moderation,
+    federation,
+    summon,
+    xp,
+    fun,
+    flyer,
+)
 
-    # Import and register all handlers
-    from handlers import (
-        welcome,
-        help_cmd,
-        moderation,
-        federation,
-        summon,
-        xp,
-        fun,
-        flyer,
-    )
-    welcome.register(app)
-    help_cmd.register(app)
-    moderation.register(app)
-    federation.register(app)
-    summon.register(app)
-    xp.register(app)
-    fun.register(app)
-    flyer.register(app, scheduler)  # <-- Fix: pass scheduler!
+welcome.register(app)
+help_cmd.register(app)
+moderation.register(app)
+federation.register(app)
+summon.register(app)
+xp.register(app)
+fun.register(app)
 
-    logger.info("✅ SuccuBot is running...")
-    async with app:
-        await idle()
+# flyer needs the scheduler so it can reschedule persisted jobs on startup
+flyer.register(app, scheduler)
 
-def main():
-    asyncio.run(runner())
+print("✅ SuccuBot is running...")
+app.run()
 
-if __name__ == "__main__":
-    main()
