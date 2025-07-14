@@ -5,7 +5,6 @@ import logging
 import asyncio
 
 from dotenv import load_dotenv
-from aiohttp import web
 from pyrogram import Client, idle
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
@@ -18,7 +17,7 @@ API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SCHED_TZ  = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
-PORT      = int(os.getenv("PORT", "8000"))
+PORT      = int(os.getenv("PORT", "8000"))  # Railway will inject this
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -27,21 +26,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
-# ─── aiohttp health‐check endpoint ──────────────────────────────────────────
-async def health(request):
-    return web.Response(text="OK")
+# ─── Asyncio health‐check server ─────────────────────────────────────────────
+async def handle_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    await reader.read(1024)  # ignore request
+    writer.write(b"HTTP/1.1 200 OK\r\n"
+                 b"Content-Type: text/plain\r\n"
+                 b"Content-Length: 2\r\n"
+                 b"\r\n"
+                 b"OK")
+    await writer.drain()
+    writer.close()
 
 async def start_health_server():
-    app = web.Application()
-    app.router.add_get('/', health)
-    app.router.add_head('/', health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    logger.info(f"🌐 HTTP health‐check listening on 0.0.0.0:{PORT}")
+    server = await asyncio.start_server(handle_health, "0.0.0.0", PORT)
+    logger.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
+    async with server:
+        await server.serve_forever()
 
-# ─── Main bot + scheduler ───────────────────────────────────────────────────
+# ─── Bot + Scheduler ────────────────────────────────────────────────────────
 async def run_bot():
     # Scheduler
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
@@ -85,12 +87,13 @@ async def run_bot():
             logger.exception("🔥 Unexpected error—waiting 5s then retry")
             await asyncio.sleep(5)
 
-# ─── Entrypoint ─────────────────────────────────────────────────────────────
+# ─── Entry point ───────────────────────────────────────────────────────────
 async def main():
-    # 1) Start health‐check
-    await start_health_server()
-    # 2) Run bot
-    await run_bot()
+    # Start health‐check and bot concurrently
+    await asyncio.gather(
+        start_health_server(),
+        run_bot(),
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())
