@@ -2,6 +2,8 @@
 
 import os
 import logging
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import asyncio
 
 from dotenv import load_dotenv
@@ -27,39 +29,32 @@ PORT      = int(os.getenv("PORT", "8000"))
 
 logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
-# ─── Async HTTP health‐check server ─────────────────────────────────────────
-async def health_server():
-    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        # Read and ignore request
-        await reader.read(1024)
-        # Send simple 200 OK
-        writer.write(
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: text/plain\r\n"
-            b"Content-Length: 2\r\n"
-            b"\r\n"
-            b"OK"
-        )
-        await writer.drain()
-        writer.close()
+# ─── Health‐check server (starts immediately) ───────────────────────────────
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def do_HEAD(self):
+        self.send_response(200)
+        self.end_headers()
 
-    # Bind port immediately
-    server = await asyncio.start_server(handler, "0.0.0.0", PORT)
+def run_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
     logger.info(f"🌐 Health‐check listening on 0.0.0.0:{PORT}")
-    async with server:
-        await server.serve_forever()
+    server.serve_forever()
+
+# start HTTP health‐check **before** anything else
+threading.Thread(target=run_health_server, daemon=True).start()
 
 # ─── Main async entrypoint ─────────────────────────────────────────────────
 async def main():
-    # 1) Start health‐check server before anything else
-    asyncio.create_task(health_server())
-
-    # 2) Start scheduler
+    # 1) Scheduler
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
-    # 3) Initialize Pyrogram client
+    # 2) Bot client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -68,7 +63,7 @@ async def main():
         parse_mode=ParseMode.HTML
     )
 
-    # 4) Register handlers
+    # 3) Register handlers
     from handlers import welcome, help_cmd, moderation, federation, summon, xp, fun, flyer
     logger.info("📢 Registering handlers…")
     welcome.register(app)
@@ -80,7 +75,7 @@ async def main():
     fun.register(app)
     flyer.register(app, scheduler)
 
-    # 5) Run bot with FloodWait-safe loop
+    # 4) Run + FloodWait/Retry loop
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
