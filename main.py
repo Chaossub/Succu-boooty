@@ -1,16 +1,20 @@
+#!/usr/bin/env python3
+
 import os
+import asyncio
+import logging
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import logging
-import asyncio
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import Client, idle
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+# Configure logging
+testing_logging_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, testing_logging_level, logging.INFO), format="%(asctime)s | %(levelname)5s | %(message)s")
 
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/health":
+        if self.path == "/":
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
@@ -19,62 +23,46 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
 
-
+# Start a simple HTTP health-check server
 def start_health_server(port: int):
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     logging.info(f"🌐 Health-check listening on 0.0.0.0:{port}")
 
-
 async def main():
-    # Basic logging setup
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)-5s | %(message)s"
-    )
+    # Environment variables
+    API_ID = int(os.getenv("API_ID", "0"))
+    API_HASH = os.getenv("API_HASH", "")
+    BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+    PORT = int(os.getenv("PORT", "8080"))
 
-    # Load required env vars
-    try:
-        API_ID = int(os.environ["API_ID"])
-        API_HASH = os.environ["API_HASH"]
-        BOT_TOKEN = os.environ["BOT_TOKEN"]
-    except KeyError as e:
-        logging.error(f"Missing environment variable: {e.args[0]}")
-        return
-
-    PORT = int(os.environ.get("PORT", "8080"))
-
-    # Start health endpoint
+    # Launch health-check server
     start_health_server(PORT)
 
-    # Scheduler heartbeat
+    # Heartbeat scheduler
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(
-        lambda: logging.info("💓 Heartbeat – scheduler alive"),
-        trigger="interval",
-        seconds=30,
-    )
+    scheduler.add_job(lambda: logging.info("💓 Heartbeat – scheduler alive"), "interval", seconds=30)
     scheduler.start()
 
-    # Start the bot
+    # Initialize and start the bot
     bot = Client(
-        session_name="bot_session",
+        name="succubot",  # session file name
         api_id=API_ID,
         api_hash=API_HASH,
         bot_token=BOT_TOKEN
     )
+
     await bot.start()
     logging.info("✅ Bot started; awaiting messages…")
 
-    # Idle until SIGINT/SIGTERM
+    # Idle until termination signal
     await idle()
+    logging.info("🔄 Shutdown signal received; stopping…")
 
-    # Graceful shutdown
+    # Shutdown
     await bot.stop()
     scheduler.shutdown()
-    logging.info("✅ Shutdown complete")
-
 
 if __name__ == "__main__":
     asyncio.run(main())
