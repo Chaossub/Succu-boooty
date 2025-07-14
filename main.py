@@ -36,25 +36,25 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
     def do_HEAD(self):
-        # support Railway's possible HEAD checks
         self.send_response(200)
         self.end_headers()
 
 def run_health_server():
     server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
-    logger.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
+    logger.info(f"🌐 Health‐check listening on 0.0.0.0:{PORT}")
     server.serve_forever()
 
-threading.Thread(target=run_health_server, daemon=True).start()
+# ─── Bot + Scheduler in thread ──────────────────────────────────────────────
+def run_bot_thread():
+    asyncio.run(async_main())
 
-# ─── Main async entry ───────────────────────────────────────────────────────
-async def main():
+async def async_main():
     # 1) Scheduler
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
     scheduler.start()
     logger.info("🔌 Scheduler started")
 
-    # 2) Bot client
+    # 2) Client
     app = Client(
         "SuccuBot",
         api_id=API_ID,
@@ -75,7 +75,7 @@ async def main():
     fun.register(app)
     flyer.register(app, scheduler)
 
-    # 4) Run + FloodWait retry
+    # 4) Run + FloodWait/Retry loop
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -88,8 +88,16 @@ async def main():
             logger.warning(f"🚧 FloodWait – sleeping {secs}s before retry")
             await asyncio.sleep(secs + 1)
         except Exception:
-            logger.exception("🔥 Unexpected error—waiting 5s then retry")
+            logger.exception("🔥 Unhandled error—waiting 5s then retry")
             await asyncio.sleep(5)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # 1) Launch health‐check in main thread
+    run_health_server() if threading.current_thread() is threading.main_thread() else None
+
+    # 2) Start bot in background thread
+    bot_thread = threading.Thread(target=run_bot_thread, daemon=True)
+    bot_thread.start()
+
+    # 3) Keep main thread alive serving health
+    bot_thread.join()
