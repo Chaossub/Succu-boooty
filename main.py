@@ -3,16 +3,16 @@
 import os
 import logging
 import asyncio
-from http import HTTPStatus
 
 from dotenv import load_dotenv
+from aiohttp import web
 from pyrogram import Client, idle
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pytz import timezone
 
-# ─── Load environment and configure logging ─────────────────────────────────
+# ─── Load .env & configure logging ──────────────────────────────────────────
 load_dotenv()
 API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
@@ -25,35 +25,27 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-
 logger.info(f"🔍 ENV loaded → API_ID={API_ID}, BOT_TOKEN starts with {BOT_TOKEN[:5]}…")
 
-# ─── Health‐check server using asyncio ──────────────────────────────────────
-async def health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    # Read & ignore request
-    await reader.read(1024)
-    # Send HTTP 200 OK
-    writer.write(
-        f"HTTP/1.1 {HTTPStatus.OK.value} {HTTPStatus.OK.phrase}\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 2\r\n"
-        "\r\n"
-        "OK"
-    .encode())
-    await writer.drain()
-    writer.close()
+# ─── aiohttp health‐check endpoint ──────────────────────────────────────────
+async def health(request):
+    return web.Response(text="OK")
 
 async def start_health_server():
-    server = await asyncio.start_server(health_handler, "0.0.0.0", PORT)
-    logger.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
-    async with server:
-        await server.serve_forever()
+    app = web.Application()
+    app.router.add_get('/', health)
+    app.router.add_head('/', health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"🌐 HTTP health‐check listening on 0.0.0.0:{PORT}")
 
-# ─── Bot + Scheduler ────────────────────────────────────────────────────────
+# ─── Main bot + scheduler ───────────────────────────────────────────────────
 async def run_bot():
     # Scheduler
-    sched = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
-    sched.start()
+    scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
+    scheduler.start()
     logger.info("🔌 Scheduler started")
 
     # Pyrogram client
@@ -75,9 +67,9 @@ async def run_bot():
     summon.register(app)
     xp.register(app)
     fun.register(app)
-    flyer.register(app, sched)
+    flyer.register(app, scheduler)
 
-    # Run loop
+    # Run + FloodWait/Retry
     while True:
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -93,13 +85,12 @@ async def run_bot():
             logger.exception("🔥 Unexpected error—waiting 5s then retry")
             await asyncio.sleep(5)
 
-# ─── Entry point ───────────────────────────────────────────────────────────
+# ─── Entrypoint ─────────────────────────────────────────────────────────────
 async def main():
-    # Run health-check and bot concurrently
-    await asyncio.gather(
-        start_health_server(),
-        run_bot(),
-    )
+    # 1) Start health‐check
+    await start_health_server()
+    # 2) Run bot
+    await run_bot()
 
 if __name__ == "__main__":
     asyncio.run(main())
