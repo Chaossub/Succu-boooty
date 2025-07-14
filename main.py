@@ -6,7 +6,7 @@ import signal
 import asyncio
 
 from dotenv import load_dotenv
-from pyrogram import Client
+from pyrogram import Client, idle
 from pyrogram.enums import ParseMode
 from pyrogram.errors import FloodWait
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -29,18 +29,18 @@ logging.getLogger("apscheduler").setLevel(logging.INFO)
 
 logger.debug(f"ENV → API_ID={API_ID}, BOT_TOKEN_len={len(BOT_TOKEN)}, SCHED_TZ={SCHED_TZ}, PORT={PORT}")
 
-# ─── Asyncio health‐check ────────────────────────────────────────────────────
+# ─── Asyncio health‐check ───────────────────────────────────────────────────
 async def health_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-    data = await reader.read(1024)
-    if b"GET" in data:
-        writer.write(
-            b"HTTP/1.1 200 OK\r\n"
-            b"Content-Type: text/plain\r\n"
-            b"Content-Length: 2\r\n"
-            b"\r\n"
-            b"OK"
-        )
-        await writer.drain()
+    # Read whatever Railway sends (HEAD/GET, etc.) then always reply 200 OK
+    await reader.read(1024)
+    writer.write(
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: text/plain\r\n"
+        b"Content-Length: 2\r\n"
+        b"\r\n"
+        b"OK"
+    )
+    await writer.drain()
     writer.close()
 
 async def start_health_server():
@@ -49,7 +49,7 @@ async def start_health_server():
     async with server:
         await server.serve_forever()
 
-# ─── Bot + Scheduler ────────────────────────────────────────────────────────
+# ─── Run bot + scheduler with FloodWait retry ───────────────────────────────
 async def run_bot(stop_event: asyncio.Event):
     # Scheduler + heartbeat
     scheduler = AsyncIOScheduler(timezone=timezone(SCHED_TZ))
@@ -75,7 +75,7 @@ async def run_bot(stop_event: asyncio.Event):
     flyer.register(app, scheduler)
     logger.info("📢 Handlers registered")
 
-    # FloodWait‐aware start
+    # FloodWait‐aware start loop
     while not stop_event.is_set():
         try:
             logger.info("✅ Starting SuccuBot…")
@@ -84,20 +84,20 @@ async def run_bot(stop_event: asyncio.Event):
             break
         except FloodWait as e:
             secs = max(1, int(getattr(e, "value", getattr(e, "x", 0))))
-            logger.warning(f"🚧 FloodWait on start – retrying in {secs}s")
+            logger.warning(f"🚧 FloodWait on start – retry in {secs}s")
             await asyncio.sleep(secs)
         except Exception:
-            logger.exception("🔥 Error on start – retrying in 5s")
+            logger.exception("🔥 Error starting – retrying in 5s")
             await asyncio.sleep(5)
 
     if not stop_event.is_set():
-        logger.info("🛑 Bot running; waiting for stop signal…")
-        await stop_event.wait()
-        logger.info("🔄 Stop signal received; shutting down bot…")
+        logger.info("🛑 Bot running; awaiting stop signal…")
+        await idle()
+        logger.info("🔄 Stop signal received; shutting down…")
         await app.stop()
 
     scheduler.shutdown()
-    logger.info("✅ Shutdown complete")
+    logger.info("✅ SuccuBot and scheduler shut down cleanly")
 
 # ─── Entrypoint ─────────────────────────────────────────────────────────────
 async def main():
