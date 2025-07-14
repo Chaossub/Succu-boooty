@@ -10,11 +10,13 @@ from pyrogram.enums import ParseMode
 # ─── Port Listener Hack to keep Railway alive ────────────────────────────────
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        print("Got a GET request on / (Railway health check?)")
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot alive.")
 
 def start_web_server():
+    print("Starting dummy web server on 0.0.0.0:8080")
     server = HTTPServer(("0.0.0.0", 8080), PingHandler)
     server.serve_forever()
 
@@ -51,27 +53,43 @@ app = Client(
 )
 
 # ─── Import & register handlers ──────────────────────────────────────────────
-from handlers import (
-    welcome,
-    help_cmd,
-    moderation,
-    federation,
-    summon,
-    xp,
-    fun,
-    flyer,
-)
+try:
+    print("Registering handlers...")
+    from handlers import (
+        welcome,
+        help_cmd,
+        moderation,
+        federation,
+        summon,
+        xp,
+        fun,
+        flyer,
+    )
 
-welcome.register(app)
-help_cmd.register(app)
-moderation.register(app)
-federation.register(app)
-summon.register(app)
-xp.register(app)
-fun.register(app)
+    print("Registering welcome...")
+    welcome.register(app)
+    print("Registered welcome.")
+    help_cmd.register(app)
+    print("Registered help_cmd.")
+    moderation.register(app)
+    print("Registered moderation.")
+    federation.register(app)
+    print("Registered federation.")
+    summon.register(app)
+    print("Registered summon.")
+    xp.register(app)
+    print("Registered xp.")
+    fun.register(app)
+    print("Registered fun.")
 
-# Flyer needs the scheduler so it can reschedule persisted jobs on startup
-flyer.register(app, scheduler)
+    print("Registering flyer...")
+    flyer.register(app, scheduler)
+    print("Registered flyer.")
+except Exception as e:
+    print(f"🔥 Exception during handler registration: {e}")
 
 print("✅ SuccuBot is running...")
-app.run()
+try:
+    app.run()
+except Exception as e:
+    print(f"🔥 Exception during app.run(): {e}")
