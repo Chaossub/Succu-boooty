@@ -1,90 +1,76 @@
+#!/usr/bin/env python3
 import os
-import asyncio
 import signal
 import logging
-from pyrogram import Client
+import asyncio
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pyrogram import Client
+import flyer
 
-# Optional flyer registration
-try:
-    from handlers.flyer import register as flyer_register
-except ImportError:
-    flyer_register = None
+# Configure logging
+tlogging_format = "%(asctime)s | %(levelname)s | %(message)s"
+logging.basicConfig(level=logging.INFO, format=tlogging_format)
 
+# Environment variables
+PORT = int(os.getenv("PORT", "8080"))
+API_ID = int(os.getenv("API_ID", ""))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-def start_health_server(port: int):
-    import threading
-    from http.server import HTTPServer, BaseHTTPRequestHandler
-
-    class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"OK")
+        else:
+            self.send_response(404)
+            self.end_headers()
 
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    logging.info(f"🌐 Health-check listening on 0.0.0.0:{port}")
-    return server
+# Start a simple HTTP server in a thread for health checks
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", PORT), HealthHandler)
+    server.serve_forever()
 
+# Heartbeat job
+def heartbeat():
+    logging.info("💓 Heartbeat – scheduler alive")
 
 async def runner():
-    # Environment
-    API_ID = int(os.getenv("API_ID"))
-    BOT_TOKEN = os.getenv("BOT_TOKEN")
-    SCHED_TZ = os.getenv("SCHED_TZ", "UTC")
-    PORT = int(os.getenv("PORT", "8080"))
-
-    # Logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(message)s",
-    )
-
-    # Health check
-    start_health_server(PORT)
+    # Launch health-check server
+    Thread(target=start_health_server, daemon=True).start()
+    logging.info(f"🌐 Health-check listening on 0.0.0.0:{PORT}")
 
     # Scheduler
-    scheduler = AsyncIOScheduler(timezone=SCHED_TZ)
-    scheduler.add_job(
-        lambda: logging.info("💓 Heartbeat – scheduler alive"),
-        trigger="interval",
-        seconds=30,
-        id="heartbeat",
-    )
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(heartbeat, 'interval', seconds=30)
     scheduler.start()
+    logging.info("🗓️ Scheduler started")
 
-    # Flyer handlers
-    if flyer_register:
-        flyer_register(scheduler=scheduler)
+    # Telegram bot client
+    app = Client(api_id=API_ID, bot_token=BOT_TOKEN)
+    # Register additional handlers/tasks
+    flyer.register(app, scheduler)
 
-    # Bot client
-    bot = Client(
-        "bot_session",
-        api_id=API_ID,
-        bot_token=BOT_TOKEN,
-    )
-    await bot.start()
-    logging.info("✅ Bot started; awaiting SIGINT/SIGTERM…")
+    # Start bot
+    await app.start()
+    logging.info("✅ Bot started; awaiting shutdown signal…")
 
-    # Wait for termination signal
+    # Wait for termination
     stop_evt = asyncio.Event()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_evt.set)
     await stop_evt.wait()
 
-    # Graceful shutdown
+    # Shutdown
     logging.info("🔄 Shutdown initiated…")
-    await bot.stop()
+    await app.stop()
     scheduler.shutdown()
-    logging.info("✅ Shutdown complete")
-
 
 def main():
     asyncio.run(runner())
-
 
 if __name__ == "__main__":
     main()
