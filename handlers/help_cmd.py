@@ -3,7 +3,6 @@
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Superuser override
 SUPER_ADMIN_ID = 6964994611
 
 async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
@@ -14,7 +13,6 @@ async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
         return member.status in ("administrator", "creator")
     except:
         return False
-
 
 def register(app: Client):
     @app.on_message(filters.command(["start", "help"]) & (filters.private | filters.group))
@@ -82,18 +80,22 @@ def register(app: Client):
             lines.append("/togglefedaction <fed_id> <kick|mute|off> — Toggle enforcement")
 
             # Flyers
-            lines.append("\n📂 <b>Flyers</b>")
-            lines.append("/flyer <name> — Retrieve a flyer")
-            lines.append("/listflyers — List all flyers")
-            lines.append("/addflyer <name> — Add a flyer (photo + caption)")
-            lines.append("/changeflyer <name> — Update flyer image")
+            lines.append("\n📂 <b>Flyers (Text & Photo)</b>")
+            lines.append("/flyer <name> — Retrieve a flyer (text or photo)")
+            lines.append("/listflyers — List all flyers in this group")
+            lines.append("")
+            lines.append("Add text flyer: /addflyer <name> <text>")
+            lines.append("Add photo flyer: send photo with caption '/addflyer <name> <caption>'")
+            lines.append("Update flyer: /changeflyer <name> <text> (or send photo with new caption)")
             lines.append("/deleteflyer <name> — Delete a flyer")
-            lines.append("/scheduleflyer <name> <HH:MM> <chat> — Schedule flyer")
-            lines.append("/scheduletext <HH:MM> <chat> <text> — Schedule text")
-            lines.append("/listscheduled — View scheduled posts")
-            lines.append("/cancelflyer <index> — Cancel a scheduled post")
+            lines.append("")
+            lines.append("Schedule flyer: /scheduleflyer <name> <group> <HH:MM> <day|once>")
+            lines.append("• <b>Group</b>: alias <code>MODELS_CHAT</code>, <code>TEST_GROUP</code>, <code>SUCCUBUS_SANCTUARY</code> or group ID.")
+            lines.append("• <b>Day</b>: <code>mon</code>, <code>tue</code>, <code>wed</code>, <code>thu</code>, <code>fri</code>, <code>sat</code>, <code>sun</code>, <code>once</code>")
+            lines.append("/cancelflyer <name> — Cancel scheduled flyer")
 
         await message.reply_text(
             "\n".join(lines),
+            parse_mode="html",
             disable_web_page_preview=True
         )
