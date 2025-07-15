@@ -1,140 +1,131 @@
 import os
 import logging
-from datetime import datetime, timedelta
-from apscheduler.schedulers.background import BackgroundScheduler
+import asyncio
+from datetime import datetime, time as dt_time, timedelta
 from pymongo import MongoClient
-from pyrogram import filters
+from pyrogram import Client, filters
 from pyrogram.types import Message
 
+# --- Setup logging ---
 logger = logging.getLogger("handlers.flyer_scheduler")
+logger.setLevel(logging.INFO)
 
-# Mongo
-MONGO_URI = os.environ.get("MONGO_URI")
+# --- MongoDB Setup ---
+MONGO_URI = os.environ["MONGO_URI"]
+MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME", "succubot")
 mongo = MongoClient(MONGO_URI)
-db = mongo["succubot"]
+db = mongo[MONGO_DB]
 flyers = db.flyers
 scheduled = db.scheduled_flyers
 
-# Hardcoded group aliases and IDs
+# --- Group Aliases ---
 GROUP_ALIASES = {
     "MODELS_CHAT": -1002884098395,
     "SUCCUBUS_SANCTUARY": -1002823762054,
-    "TEST_GROUP": -1002813378700
+    "TEST_GROUP": -1002813378700,
 }
+def resolve_group(alias_or_id):
+    if isinstance(alias_or_id, int):
+        return alias_or_id
+    if str(alias_or_id).isdigit():
+        return int(alias_or_id)
+    return GROUP_ALIASES.get(alias_or_id.upper())
 
-def resolve_group(chat_str):
-    """Resolve group alias or chat ID to int."""
-    if chat_str.upper() in GROUP_ALIASES:
-        return GROUP_ALIASES[chat_str.upper()]
-    if chat_str.startswith("-100"):
-        return int(chat_str)
-    raise ValueError("Unknown group alias or invalid group ID.")
-
-def register(app, scheduler: BackgroundScheduler):
-
-    async def post_flyer(client, group_id, flyer):
-        try:
-            logger.info(f"Posting flyer '{flyer['name']}' to {group_id} ({type(group_id)})")
-            if flyer.get("file_id"):
-                await client.send_photo(group_id, flyer["file_id"], caption=flyer.get("caption", ""))
-            else:
-                await client.send_message(group_id, flyer.get("caption", flyer.get("text", "")))
-            logger.info(f"Posted flyer '{flyer['name']}' to {group_id}")
-        except Exception as e:
-            logger.error(f"Failed scheduled flyer post: {e}")
-
-    # /flyer <name>
-    @app.on_message(filters.command("flyer") & (filters.group | filters.private))
-    async def flyer_handler(client, message: Message):
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
-            return await message.reply("Usage: /flyer <name>")
-        name = args[1].strip().lower()
-        flyer = flyers.find_one({"name": name})
-        if not flyer:
-            return await message.reply(f"❌ Flyer '{name}' not found.")
-        await post_flyer(client, message.chat.id, flyer)
-
-    # /addflyer <name> <caption> with photo
-    @app.on_message(filters.command("addflyer") & filters.group & filters.photo)
-    async def addflyer_handler(client, message: Message):
-        args = message.caption.split(maxsplit=2)
-        if len(args) < 3:
-            return await message.reply("Usage: /addflyer <name> <caption>")
-        _, name, caption = args
-        name = name.lower()
-        file_id = message.photo.file_id
-        flyers.replace_one({"name": name}, {"name": name, "file_id": file_id, "caption": caption}, upsert=True)
-        await message.reply(f"✅ Flyer '{name}' added/updated (photo).")
-
-    # /addflyer <name> <text> (text-only flyer)
-    @app.on_message(filters.command("addflyer") & (filters.group | filters.private) & ~filters.photo)
-    async def addflyer_text_handler(client, message: Message):
-        args = message.text.split(maxsplit=2)
-        if len(args) < 3:
-            return await message.reply("Usage: /addflyer <name> <text>")
-        _, name, text = args
-        name = name.lower()
-        flyers.replace_one({"name": name}, {"name": name, "text": text}, upsert=True)
-        await message.reply(f"✅ Flyer '{name}' added/updated (text-only).")
-
-    # /changeflyer <name> (reply to photo)
-    @app.on_message(filters.command("changeflyer") & filters.reply & filters.group)
-    async def changeflyer_handler(client, message: Message):
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2 or not message.reply_to_message.photo:
-            return await message.reply("Reply to a photo: /changeflyer <name>")
-        name = args[1].strip().lower()
-        file_id = message.reply_to_message.photo.file_id
-        flyer = flyers.find_one({"name": name})
-        if not flyer:
-            return await message.reply(f"Flyer '{name}' not found.")
-        flyer["file_id"] = file_id
-        flyers.replace_one({"name": name}, flyer, upsert=True)
-        await message.reply(f"✅ Flyer '{name}' image updated.")
-
-    # /deleteflyer <name>
-    @app.on_message(filters.command("deleteflyer") & filters.group)
-    async def deleteflyer_handler(client, message: Message):
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
-            return await message.reply("Usage: /deleteflyer <name>")
-        name = args[1].strip().lower()
-        flyers.delete_one({"name": name})
-        await message.reply(f"🗑 Flyer '{name}' deleted.")
-
-    # /listflyers
-    @app.on_message(filters.command("listflyers") & (filters.group | filters.private))
-    async def listflyers_handler(client, message: Message):
-        out = []
-        for flyer in flyers.find():
-            t = "🖼" if flyer.get("file_id") else "📝"
-            out.append(f"{t} <b>{flyer['name']}</b>")
-        if not out:
-            await message.reply("No flyers saved.")
+# --- Helper: Post flyer to group (text or photo) ---
+async def post_flyer(app, flyer, group_id):
+    try:
+        logger.info(f"Posting flyer: {flyer.get('name')} to {group_id}")
+        if flyer.get("file_id"):
+            await app.send_photo(
+                group_id,
+                flyer["file_id"],
+                caption=flyer.get("caption") or flyer.get("text", "")
+            )
         else:
-            await message.reply("\n".join(out))
+            await app.send_message(
+                group_id,
+                flyer.get("text") or flyer.get("caption", "")
+            )
+        logger.info(f"Posted flyer {flyer.get('name')} to {group_id}")
+    except Exception as e:
+        logger.error(f"Failed scheduled flyer post: {e}")
 
-    # /scheduleflyer <name> <HH:MM> <group> [daily]
-    @app.on_message(filters.command("scheduleflyer") & filters.group)
-    async def scheduleflyer_handler(client, message: Message):
+# --- Scheduler Job ---
+def flyer_job(app, flyer_name, group_id):
+    flyer = flyers.find_one({"name": flyer_name})
+    if not flyer:
+        logger.error(f"Flyer '{flyer_name}' not found in DB.")
+        return
+    # Must run async method from sync APScheduler thread
+    asyncio.run(post_flyer(app, flyer, group_id))
+
+# --- Register flyer scheduler commands ---
+def register(app, scheduler):
+    @app.on_message(filters.command("scheduleflyer") & filters.user(6964994611))
+    async def scheduleflyer_handler(client: Client, message: Message):
+        # Usage: /scheduleflyer <flyer_name> <HH:MM> <group_alias>
+        parts = message.text.split(maxsplit=3)
+        if len(parts) < 4:
+            return await message.reply("❌ Usage: /scheduleflyer <flyer_name> <HH:MM> <group>")
+        flyer_name, time_str, group_alias = parts[1], parts[2], parts[3]
+        group_id = resolve_group(group_alias)
+        flyer = flyers.find_one({"name": flyer_name})
+        if not flyer:
+            return await message.reply("❌ Flyer not found.")
         try:
-            args = message.text.split(maxsplit=4)
-            if len(args) < 4:
-                return await message.reply("Usage: /scheduleflyer <name> <HH:MM> <group> [daily|once]")
-            _, name, time_str, group_alias = args[:4]
-            freq = args[4].lower() if len(args) > 4 else "once"
-            flyer = flyers.find_one({"name": name.lower()})
-            if not flyer:
-                return await message.reply(f"Flyer '{name}' not found.")
-            group_id = resolve_group(group_alias)
             hour, minute = map(int, time_str.split(":"))
             now = datetime.now()
-            run_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if run_time < now:
-                run_time += timedelta(days=1)
-            job_id = f"flyer_{name}_{group_id}_{run_time.timestamp()}"
-            # Save job info to db
+            run_dt = datetime.combine(now.date(), dt_time(hour, minute))
+            if run_dt < now:
+                run_dt += timedelta(days=1)
+            # Unique job id
+            job_id = f"flyer_{flyer_name}_{group_id}_{run_dt.timestamp()}"
+            # Schedule job
+            scheduler.add_job(
+                lambda: flyer_job(app, flyer_name, group_id),
+                "date",
+                run_date=run_dt,
+                id=job_id,
+                replace_existing=True
+            )
             scheduled.insert_one({
-                "job_id": job_id, "name": name, "group": group_id,
-                "time": time_str, "freq"_
+                "name": flyer_name,
+                "group": group_id,
+                "time": time_str,
+                "freq": "once",
+                "job_id": job_id,
+                "run_at": run_dt.isoformat(),
+            })
+            await message.reply(f"✅ Scheduled flyer '{flyer_name}' for {group_alias} at {time_str}.")
+        except Exception as e:
+            logger.error(f"Failed to schedule flyer: {e}")
+            await message.reply(f"❌ Error: {e}")
+
+    @app.on_message(filters.command("listscheduled") & filters.user(6964994611))
+    async def list_scheduled(client: Client, message: Message):
+        jobs = list(scheduled.find())
+        if not jobs:
+            return await message.reply("No scheduled flyers.")
+        txt = "Scheduled Flyers:\n" + "\n".join(
+            f"- {j['name']} to {j['group']} at {j['time']} ({j['freq']}) [job_id: {j['job_id']}]" for j in jobs
+        )
+        await message.reply(txt)
+
+    @app.on_message(filters.command("cancelflyer") & filters.user(6964994611))
+    async def cancel_scheduled(client: Client, message: Message):
+        # Usage: /cancelflyer <job_id>
+        parts = message.text.split(maxsplit=1)
+        if len(parts) < 2:
+            return await message.reply("❌ Usage: /cancelflyer <job_id>")
+        job_id = parts[1].strip()
+        try:
+            scheduler.remove_job(job_id)
+            scheduled.delete_one({"job_id": job_id})
+            await message.reply(f"✅ Cancelled scheduled flyer with job_id: {job_id}")
+        except Exception as e:
+            logger.error(f"Error cancelling flyer job {job_id}: {e}")
+            await message.reply(f"❌ Error cancelling flyer: {e}")
+
+# --- To use: in main.py ---
+# from handlers import flyer_scheduler
+# flyer_scheduler.register(app, scheduler)
