@@ -180,9 +180,15 @@ def register(app, scheduler: BackgroundScheduler):
         jobs = list(sched_col.find({}))
         if not jobs:
             return await message.reply("No flyers scheduled.")
-        txt = "Scheduled Flyers:\n" + "\n".join(
-            f"- {j['name']} to {j['group']} at {j['time']} ({j['freq']}) [job_id: {j['job_id']}]" for j in jobs
-        )
+        lines = []
+        for j in jobs:
+            name = j.get('name', '<unnamed>')
+            group = j.get('group', '<unknown>')
+            time = j.get('time', '<no time>')
+            freq = j.get('freq', '<no freq>')
+            job_id = j.get('job_id', '<no job_id>')
+            lines.append(f"- {name} to {group} at {time} ({freq}) [job_id: {job_id}]")
+        txt = "Scheduled Flyers:\n" + "\n".join(lines)
         await message.reply(txt)
 
     @app.on_message(filters.command("cancelflyer") & filters.group)
