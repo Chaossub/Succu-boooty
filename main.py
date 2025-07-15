@@ -57,9 +57,7 @@ try:
     logging.info("Registered fun.")
     flyer.register(app)
     logging.info("Registered flyer.")
-
-    # Get the scheduled queue worker from flyer_scheduler.register
-    scheduled_queue_worker = flyer_scheduler.register(app, scheduler)
+    flyer_scheduler.register(app, scheduler)
     logging.info("Registered flyer_scheduler.")
 except Exception as e:
     logging.error(f"🔥 Exception during handler registration: {e}")
@@ -67,12 +65,10 @@ except Exception as e:
     raise
 
 print("✅ SuccuBot is running...")
+try:
+    app.run()
+except Exception as e:
+    logging.error(f"🔥 Exception during app.run(): {e}")
+    import traceback; traceback.print_exc()
+    raise
 
-import asyncio
-
-if __name__ == "__main__":
-    app.start()
-    # Start the flyer scheduler background worker
-    app.loop.create_task(scheduled_queue_worker())
-    print("✅ SuccuBot is running (async worker started)...")
-    app.idle()
