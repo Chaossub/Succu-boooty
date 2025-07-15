@@ -1,14 +1,14 @@
 import os
 import logging
+import asyncio
 from pyrogram import filters
 from pyrogram.types import Message
 from pymongo import MongoClient
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 
-# ─── Config & DB ──────────────────────────────
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("handlers.flyer_scheduler")
+logger.setLevel(logging.INFO)
 
 MONGO_URI = os.environ["MONGO_URI"]
 MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME", "succubot")
@@ -27,7 +27,6 @@ ALIASES = {
 def admin_filter(_, __, m):
     return m.from_user and m.from_user.id in ADMIN_IDS
 
-# ─── MAIN FLYER SCHEDULER ──────────────────────────────
 def register(app, scheduler: BackgroundScheduler):
     async def flyer_job(group_id, flyer_name):
         flyer = flyers.find_one({"name": flyer_name})
@@ -42,6 +41,17 @@ def register(app, scheduler: BackgroundScheduler):
                 await app.send_message(group_id, flyer.get("caption", ""))
         except Exception as e:
             logger.error(f"Failed scheduled flyer post: {e}")
+
+    def schedule_runner(group_id, flyer_name):
+        """Run the coroutine on the main app event loop (threadsafe, 100% Pyrogram safe)."""
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                flyer_job(group_id, flyer_name), app.loop
+            )
+            fut.result()  # Wait for the coroutine to finish (can be removed if not blocking)
+            logger.info(f"✔️ Posted flyer '{flyer_name}' to group {group_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to run flyer job: {e}")
 
     @app.on_message(filters.command("scheduleflyer") & filters.create(admin_filter))
     async def scheduleflyer_handler(client, message: Message):
@@ -63,21 +73,12 @@ def register(app, scheduler: BackgroundScheduler):
             run_time += timedelta(days=1)
         job_id = f"flyer_{flyer_name}_{group_id}_{int(run_time.timestamp())}"
 
-        # This is the robust scheduler runner
-        def runner():
-            import asyncio
-            try:
-                app.loop.call_soon_threadsafe(asyncio.create_task, flyer_job(group_id, flyer_name))
-                logger.info(f"Scheduled runner for {flyer_name} posted to app event loop.")
-            except Exception as e:
-                logger.error(f"Failed to schedule runner: {e}")
-
         if freq == "once":
-            scheduler.add_job(runner, "date", run_date=run_time, id=job_id)
+            scheduler.add_job(lambda: schedule_runner(group_id, flyer_name), "date", run_date=run_time, id=job_id)
         elif freq == "daily":
-            scheduler.add_job(runner, "cron", hour=hour, minute=minute, id=job_id)
+            scheduler.add_job(lambda: schedule_runner(group_id, flyer_name), "cron", hour=hour, minute=minute, id=job_id)
         elif freq == "weekly":
-            scheduler.add_job(runner, "cron", day_of_week="mon", hour=hour, minute=minute, id=job_id)
+            scheduler.add_job(lambda: schedule_runner(group_id, flyer_name), "cron", day_of_week="mon", hour=hour, minute=minute, id=job_id)
         else:
             return await message.reply("❌ Invalid freq. Use once/daily/weekly")
 
