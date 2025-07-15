@@ -1,23 +1,23 @@
 import os
 import logging
 from pyrogram import filters
-from pyrogram.types import Message, InputMediaPhoto
+from pyrogram.types import Message
 from apscheduler.schedulers.background import BackgroundScheduler
 from pymongo import MongoClient
 from datetime import datetime, timedelta
 import pytz
+import asyncio
 
-# --- Logging ---
 logger = logging.getLogger(__name__)
 
-# --- Mongo Setup ---
+# MongoDB setup
 MONGO_URI = os.environ["MONGO_URI"]
 MONGO_DB = os.environ.get("MONGO_DBNAME") or os.environ.get("MONGO_DB_NAME")
 mongo = MongoClient(MONGO_URI)[MONGO_DB]
 flyers_col = mongo["flyers"]
 sched_col = mongo["flyer_schedules"]
 
-# --- Group Aliases (convert all to int) ---
+# Group alias mapping
 ALIASES = {
     "MODELS_CHAT": int(os.environ["MODELS_CHAT"]),
     "SUCCUBUS_SANCTUARY": int(os.environ["SUCCUBUS_SANCTUARY"]),
@@ -39,7 +39,6 @@ def resolve_chat_id(target):
         return target
     raise ValueError("Invalid group/alias.")
 
-# --- Helpers ---
 def is_admin_or_owner(client, chat_id, user_id):
     if user_id == SUPER_ADMIN_ID:
         return True
@@ -49,7 +48,6 @@ def is_admin_or_owner(client, chat_id, user_id):
     except:
         return False
 
-# --- Main Register Function ---
 def register(app, scheduler: BackgroundScheduler):
     logger.info("📢 flyer.register() called")
 
@@ -122,7 +120,7 @@ def register(app, scheduler: BackgroundScheduler):
             await message.reply("❌ Flyer not found.")
 
     # --- SCHEDULING ---
-    def flyer_job(flyer_name, group, once, when=None):
+    def flyer_job(flyer_name, group, once):
         async def _job():
             group_id = resolve_chat_id(group)
             logger.info(f"Trying to post flyer '{flyer_name}' to {group_id} (type: {type(group_id)})")
@@ -140,6 +138,15 @@ def register(app, scheduler: BackgroundScheduler):
             if once:
                 sched_col.delete_one({"name": flyer_name, "group": group})
         return _job
+
+    def run_async_job(coro_fn):
+        # Run an async function from a scheduler (sync context)
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Schedule in running loop from a thread
+            asyncio.run_coroutine_threadsafe(coro_fn(), loop)
+        else:
+            loop.run_until_complete(coro_fn())
 
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     @admin_only
@@ -160,9 +167,11 @@ def register(app, scheduler: BackgroundScheduler):
             fire_at += timedelta(days=1)
         job_id = f"flyer_{flyer_name}_{group_id}_{fire_at.timestamp()}"
         if freq == "daily":
-            scheduler.add_job(flyer_job(flyer_name, group_alias, once=False), "cron", hour=hour, minute=minute, id=job_id)
+            scheduler.add_job(run_async_job, "cron", hour=hour, minute=minute, id=job_id,
+                              args=[flyer_job(flyer_name, group_alias, once=False)])
         else:
-            scheduler.add_job(flyer_job(flyer_name, group_alias, once=True), "date", run_date=fire_at, id=job_id)
+            scheduler.add_job(run_async_job, "date", run_date=fire_at, id=job_id,
+                              args=[flyer_job(flyer_name, group_alias, once=True)])
         sched_col.insert_one({"name": flyer_name, "group": group_alias, "time": time_str, "freq": freq, "job_id": job_id})
         await message.reply(f"✅ Scheduled flyer '{flyer_name}' to {group_alias} at {time_str} ({freq}).")
 
@@ -172,7 +181,7 @@ def register(app, scheduler: BackgroundScheduler):
         if not jobs:
             return await message.reply("No flyers scheduled.")
         txt = "Scheduled Flyers:\n" + "\n".join(
-            f"- {j['name']} to {j['group']} at {j['time']} ({j['freq']})" for j in jobs
+            f"- {j['name']} to {j['group']} at {j['time']} ({j['freq']}) [job_id: {j['job_id']}]" for j in jobs
         )
         await message.reply(txt)
 
@@ -183,7 +192,9 @@ def register(app, scheduler: BackgroundScheduler):
         if len(args) < 2:
             return await message.reply("❌ Usage: /cancelflyer <job_id>")
         job_id = args[1]
-        scheduler.remove_job(job_id)
+        try:
+            scheduler.remove_job(job_id)
+        except Exception:
+            pass
         sched_col.delete_one({"job_id": job_id})
         await message.reply(f"✅ Cancelled scheduled flyer (job_id: {job_id})")
-
