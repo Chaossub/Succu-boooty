@@ -1,125 +1,67 @@
-import os
+# handlers/flyer_scheduler.py
+
 import logging
-from pyrogram import Client, filters
-from pyrogram.types import Message
-from pymongo import MongoClient
+from pyrogram.errors import PeerIdInvalid, ChatAdminRequired, FloodWait, RPCError
 
-# ---- Logging ----
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("handlers.flyer_scheduler")
 
-# ---- MongoDB ----
-MONGO_URI = os.environ.get("MONGO_URI")
-MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME") or "succubot"
-mongo = MongoClient(MONGO_URI)[MONGO_DB]
-flyers_col = mongo["flyers"]
-
-# ---- Superuser ----
-SUPER_ADMIN_ID = 6964994611
-
-async def is_admin(client: Client, chat_id: int, user_id: int):
-    if user_id == SUPER_ADMIN_ID:
-        return True
+async def ensure_group_touch(app, group_id):
+    """Ensure the bot is 'seen' in the group chat for photo/file_id posting (required for new group schedules)."""
     try:
-        member = await client.get_chat_member(chat_id, user_id)
-        return member.status in ("administrator", "creator")
-    except Exception:
+        m = await app.send_message(group_id, "⏳ [Scheduling check, please ignore]")
+        await m.delete()
+        logger.info(f"Group {group_id} touch succeeded")
+        return True
+    except PeerIdInvalid:
+        logger.error(f"Peer id invalid for group {group_id} (bot probably not added as admin or never sent message)")
+        return False
+    except ChatAdminRequired:
+        logger.error(f"Bot is not admin in group {group_id}")
+        return False
+    except Exception as e:
+        logger.error(f"Unknown error in group touch: {e}")
         return False
 
-def register(app: Client):
-    logger.info("📢 flyer.register() called")
+async def flyer_job(app, flyer: dict, group_id):
+    """
+    Robust scheduled flyer post. Supports text and photo flyers.
+    :param app: Pyrogram Client
+    :param flyer: Flyer dict with possible keys: name, caption, text, file_id
+    :param group_id: Target group ID (int or str alias)
+    """
+    logger.info(f"Scheduled flyer post to {group_id}: {flyer}")
 
-    # Add flyer (photo + caption OR text flyer)
-    @app.on_message(filters.command("addflyer") & filters.group)
-    async def addflyer(client, message: Message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
-            await message.reply("❌ Admins only!")
-            return
+    # Ensure group session is valid
+    ok = await ensure_group_touch(app, group_id)
+    if not ok:
+        logger.error(f"Could not 'touch' group {group_id}. Aborting flyer post.")
+        return
 
-        if len(message.command) < 2:
-            await message.reply("❌ Usage: /addflyer <name> <caption> (send photo for image flyer)")
-            return
-
-        name = message.command[1]
-        caption = " ".join(message.command[2:]) if len(message.command) > 2 else ""
-        if message.photo:
-            # Photo flyer
-            file_id = message.photo.file_id
-            flyers_col.replace_one(
-                {"name": name},
-                {"name": name, "type": "photo", "file_id": file_id, "caption": caption},
-                upsert=True,
+    try:
+        if flyer.get("file_id"):
+            logger.info(f"Posting PHOTO flyer '{flyer.get('name')}' to {group_id}")
+            await app.send_photo(
+                group_id,
+                flyer["file_id"],
+                caption=flyer.get("caption", flyer.get("text", ""))[:1024]  # Telegram limit
             )
-            await message.reply(f"✅ Saved flyer '{name}' (photo).")
+        elif flyer.get("text"):
+            logger.info(f"Posting TEXT flyer '{flyer.get('name')}' to {group_id}")
+            await app.send_message(group_id, flyer["text"])
+        elif flyer.get("caption"):
+            logger.info(f"Posting CAPTION flyer '{flyer.get('name')}' to {group_id}")
+            await app.send_message(group_id, flyer["caption"])
         else:
-            # Text flyer
-            if not caption:
-                await message.reply("❌ You must provide text for a text flyer!")
-                return
-            flyers_col.replace_one(
-                {"name": name},
-                {"name": name, "type": "text", "text": caption},
-                upsert=True,
-            )
-            await message.reply(f"✅ Saved flyer '{name}' (text).")
-
-    # Retrieve flyer by name
-    @app.on_message(filters.command("flyer") & filters.group)
-    async def get_flyer(client, message: Message):
-        if len(message.command) < 2:
-            await message.reply("❌ Usage: /flyer <name>")
+            logger.warning(f"Flyer '{flyer.get('name')}' has no content!")
             return
-        name = message.command[1]
-        flyer = flyers_col.find_one({"name": name})
-        if not flyer:
-            await message.reply("❌ Flyer not found!")
-            return
-        if flyer["type"] == "photo":
-            await client.send_photo(message.chat.id, flyer["file_id"], caption=flyer.get("caption", ""))
-        else:
-            await message.reply(flyer.get("text", flyer.get("caption", "")))
-
-    # List all flyers
-    @app.on_message(filters.command("listflyers") & filters.group)
-    async def list_flyers(client, message: Message):
-        flyers = list(flyers_col.find({}))
-        if not flyers:
-            await message.reply("No flyers saved.")
-            return
-        lines = [f"- <b>{f['name']}</b> ({f['type']})" for f in flyers]
-        await message.reply("<b>Flyers:</b>\n" + "\n".join(lines))
-
-    # Change flyer (replace image, keep name)
-    @app.on_message(filters.command("changeflyer") & filters.group)
-    async def change_flyer(client, message: Message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
-            await message.reply("❌ Admins only!")
-            return
-
-        if len(message.command) < 2 or not message.reply_to_message or not message.reply_to_message.photo:
-            await message.reply("❌ Usage: Reply with /changeflyer <name> to a new photo")
-            return
-
-        name = message.command[1]
-        flyer = flyers_col.find_one({"name": name})
-        if not flyer:
-            await message.reply("❌ Flyer not found!")
-            return
-        file_id = message.reply_to_message.photo.file_id
-        flyers_col.update_one(
-            {"name": name},
-            {"$set": {"file_id": file_id, "type": "photo"}}
-        )
-        await message.reply(f"✅ Flyer '{name}' updated (new photo set).")
-
-    # Delete flyer
-    @app.on_message(filters.command("deleteflyer") & filters.group)
-    async def delete_flyer(client, message: Message):
-        if not await is_admin(client, message.chat.id, message.from_user.id):
-            await message.reply("❌ Admins only!")
-            return
-        if len(message.command) < 2:
-            await message.reply("❌ Usage: /deleteflyer <name>")
-            return
-        name = message.command[1]
-        flyers_col.delete_one({"name": name})
-        await message.reply(f"✅ Flyer '{name}' deleted.")
+        logger.info(f"Flyer '{flyer.get('name')}' posted successfully.")
+    except FloodWait as e:
+        logger.error(f"FloodWait: Must wait {e.value} seconds for flyer to {group_id}")
+    except PeerIdInvalid:
+        logger.error(f"Peer id invalid posting flyer to {group_id}")
+    except ChatAdminRequired:
+        logger.error(f"Bot is not admin in group {group_id}")
+    except RPCError as e:
+        logger.error(f"Telegram RPCError: {e}")
+    except Exception as e:
+        logger.exception(f"Failed scheduled flyer post: {e}")
