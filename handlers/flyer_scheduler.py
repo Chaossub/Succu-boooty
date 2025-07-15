@@ -12,7 +12,7 @@ db = mongo[MONGO_DB]
 flyers = db.flyers
 scheduled = db.scheduled_flyers
 
-ADMIN_IDS = [6964994611]  # Add other admin IDs if needed
+ADMIN_IDS = [6964994611]
 
 ALIASES = {
     "MODELS_CHAT": int(os.environ["MODELS_CHAT"]),
@@ -23,8 +23,10 @@ ALIASES = {
 def admin_filter(_, __, m):
     return m.from_user and m.from_user.id in ADMIN_IDS
 
+# --- NEW: This global queue will be checked by an async worker in Pyrogram loop
+SCHEDULED_QUEUE = []
+
 def register(app, scheduler):
-    # Core posting function
     async def flyer_job(group_id, flyer_name):
         flyer = flyers.find_one({"name": flyer_name})
         if not flyer:
@@ -39,14 +41,8 @@ def register(app, scheduler):
         except Exception as e:
             logging.error(f"Failed scheduled flyer post: {e}")
 
-    # This runner is thread-safe!
-    def runner(group_id, flyer_name):
-        try:
-            asyncio.run_coroutine_threadsafe(
-                flyer_job(group_id, flyer_name), app.loop
-            )
-        except Exception as e:
-            logging.error(f"Runner error: {e}")
+    def threadsafe_enqueue(group_id, flyer_name):
+        SCHEDULED_QUEUE.append((group_id, flyer_name))
 
     @app.on_message(filters.command("scheduleflyer") & filters.create(admin_filter))
     async def scheduleflyer_handler(client, message):
@@ -69,17 +65,17 @@ def register(app, scheduler):
         job_id = f"flyer_{flyer_name}_{group_id}_{int(run_time.timestamp())}"
         if freq == "once":
             scheduler.add_job(
-                lambda: runner(group_id, flyer_name),
+                lambda: threadsafe_enqueue(group_id, flyer_name),
                 "date", run_date=run_time, id=job_id
             )
         elif freq == "daily":
             scheduler.add_job(
-                lambda: runner(group_id, flyer_name),
+                lambda: threadsafe_enqueue(group_id, flyer_name),
                 "cron", hour=hour, minute=minute, id=job_id
             )
         elif freq == "weekly":
             scheduler.add_job(
-                lambda: runner(group_id, flyer_name),
+                lambda: threadsafe_enqueue(group_id, flyer_name),
                 "cron", day_of_week="mon", hour=hour, minute=minute, id=job_id
             )
         else:
@@ -115,3 +111,15 @@ def register(app, scheduler):
         except Exception as e:
             await message.reply(f"❌ Could not cancel: {e}")
 
+    # NEW: Periodically check and run scheduled jobs in Pyrogram event loop
+    async def scheduled_queue_worker():
+        while True:
+            if SCHEDULED_QUEUE:
+                group_id, flyer_name = SCHEDULED_QUEUE.pop(0)
+                await flyer_job(group_id, flyer_name)
+            await asyncio.sleep(3)  # Check every 3 seconds
+
+    # Register this background worker after app starts
+    @app.on_start
+    async def start_worker(_: "Client"):
+        app.loop.create_task(scheduled_queue_worker())
