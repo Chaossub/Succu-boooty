@@ -5,9 +5,8 @@ from dotenv import load_dotenv
 print("MAIN.PY BOOTSTRAP BEGIN")
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("root")
 load_dotenv()
-log.info("Loaded environment.")
+print("Loaded environment.")
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from pyrogram import Client
@@ -19,7 +18,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 scheduler = BackgroundScheduler(timezone=os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
 scheduler.start()
-log.info("Scheduler started.")
+print("Scheduler started.")
 
 app = Client(
     "SuccuBot",
@@ -29,7 +28,7 @@ app = Client(
     parse_mode=ParseMode.HTML,
 )
 
-log.info("Registering handlers...")
+print("Registering handlers...")
 try:
     from handlers import (
         welcome,
@@ -39,34 +38,34 @@ try:
         summon,
         xp,
         fun,
-        flyer,
-        flyer_scheduler,  # NEW: robust scheduler module!
+        flyer_scheduler,  # <-- Register THIS, not flyer.py
     )
+    print("Imported all handler modules.")
     welcome.register(app)
-    log.info("Registered welcome.")
+    print("Registered welcome.")
     help_cmd.register(app)
-    log.info("Registered help_cmd.")
+    print("Registered help_cmd.")
     moderation.register(app)
-    log.info("Registered moderation.")
+    print("Registered moderation.")
     federation.register(app)
-    log.info("Registered federation.")
+    print("Registered federation.")
     summon.register(app)
-    log.info("Registered summon.")
+    print("Registered summon.")
     xp.register(app)
-    log.info("Registered xp.")
+    print("Registered xp.")
     fun.register(app)
-    log.info("Registered fun.")
-    flyer.register(app)
-    log.info("Registered flyer.")
-    flyer_scheduler.register(app, scheduler)  # NEW: scheduler handler takes scheduler!
-    log.info("Registered flyer_scheduler.")
+    print("Registered fun.")
+    flyer_scheduler.register(app, scheduler)  # <-- Make sure flyer_scheduler.py has this!
+    print("Registered flyer_scheduler.")
 except Exception as e:
-    log.error(f"🔥 Exception during handler registration: {e}", exc_info=True)
+    print(f"🔥 Exception during handler registration: {e}")
+    import traceback; traceback.print_exc()
     raise
 
-log.info("✅ SuccuBot is running...")
+print("✅ SuccuBot is running...")
 try:
     app.run()
 except Exception as e:
-    log.error(f"🔥 Exception during app.run(): {e}", exc_info=True)
+    print(f"🔥 Exception during app.run(): {e}")
+    import traceback; traceback.print_exc()
     raise
