@@ -38,7 +38,7 @@ try:
         summon,
         xp,
         fun,
-        flyer_scheduler,  # <-- Register THIS, not flyer.py
+        flyer_scheduler,  # <-- NEW
     )
     print("Imported all handler modules.")
     welcome.register(app)
@@ -55,7 +55,7 @@ try:
     print("Registered xp.")
     fun.register(app)
     print("Registered fun.")
-    flyer_scheduler.register(app, scheduler)  # <-- Make sure flyer_scheduler.py has this!
+    flyer_scheduler.register(app, scheduler)  # <-- NEW
     print("Registered flyer_scheduler.")
 except Exception as e:
     print(f"🔥 Exception during handler registration: {e}")
