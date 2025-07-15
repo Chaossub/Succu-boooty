@@ -7,17 +7,13 @@ logging.basicConfig(level=logging.INFO)
 load_dotenv()
 print("Loaded environment.")
 
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-
-scheduler = BackgroundScheduler(timezone=os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
-scheduler.start()
-logging.info("Scheduler started.")
 
 app = Client(
     "SuccuBot",
@@ -27,8 +23,9 @@ app = Client(
     parse_mode=ParseMode.HTML,
 )
 
-print("Registering handlers...")
-try:
+scheduler = AsyncIOScheduler(timezone=os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
+
+def register_all_handlers():
     from handlers import (
         welcome,
         help_cmd,
@@ -42,33 +39,4 @@ try:
     )
     logging.info("Imported all handler modules.")
     welcome.register(app)
-    logging.info("Registered welcome.")
-    help_cmd.register(app)
-    logging.info("Registered help_cmd.")
-    moderation.register(app)
-    logging.info("Registered moderation.")
-    federation.register(app)
-    logging.info("Registered federation.")
-    summon.register(app)
-    logging.info("Registered summon.")
-    xp.register(app)
-    logging.info("Registered xp.")
-    fun.register(app)
-    logging.info("Registered fun.")
-    flyer.register(app)
-    logging.info("Registered flyer.")
-    flyer_scheduler.register(app, scheduler)
-    logging.info("Registered flyer_scheduler.")
-except Exception as e:
-    logging.error(f"🔥 Exception during handler registration: {e}")
-    import traceback; traceback.print_exc()
-    raise
-
-print("✅ SuccuBot is running...")
-try:
-    app.run()
-except Exception as e:
-    logging.error(f"🔥 Exception during app.run(): {e}")
-    import traceback; traceback.print_exc()
-    raise
-
+    help_cmd.re_
