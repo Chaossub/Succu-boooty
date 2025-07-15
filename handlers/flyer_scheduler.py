@@ -1,12 +1,10 @@
-# handlers/flyer_scheduler.py
-
 import os
 import logging
-from datetime import datetime, timedelta
 from pyrogram import filters
 from pymongo import MongoClient
+from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime, timedelta
 
-# Setup DB
 MONGO_URI = os.environ["MONGO_URI"]
 MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME", "succubot")
 mongo = MongoClient(MONGO_URI)
@@ -24,54 +22,49 @@ ALIASES = {
 def admin_filter(_, __, m):
     return m.from_user and m.from_user.id in ADMIN_IDS
 
-async def flyer_job(app, group_id, flyer_name, job_id):
-    flyer = flyers.find_one({"name": flyer_name})
-    if not flyer:
-        logging.error(f"Flyer '{flyer_name}' not found for scheduled job!")
-        scheduled.delete_one({"job_id": job_id})
-        return
-    try:
-        if flyer.get("file_id"):
-            await app.send_photo(group_id, flyer["file_id"], caption=flyer.get("caption", ""))
-        else:
-            await app.send_message(group_id, flyer.get("caption", ""))
-        logging.info(f"Posted scheduled flyer '{flyer_name}' to {group_id}")
-    except Exception as e:
-        logging.error(f"Failed scheduled flyer post: {e}")
-    scheduled.delete_one({"job_id": job_id})
+def register(app, scheduler: BackgroundScheduler):
 
-def register(app, scheduler):
-    # Restore jobs from DB at startup
+    async def flyer_job(app, group_id, flyer_name):
+        flyer = flyers.find_one({"name": flyer_name})
+        if not flyer:
+            logging.error(f"Flyer '{flyer_name}' not found!")
+            return
+        try:
+            if flyer.get("file_id"):
+                await app.send_photo(group_id, flyer["file_id"], caption=flyer.get("caption", ""))
+            else:
+                await app.send_message(group_id, flyer.get("caption", ""))
+        except Exception as e:
+            logging.error(f"Failed scheduled flyer post: {e}")
+
     def restore_jobs():
         for job in scheduled.find({}):
-            flyer_name = job['flyer_name']
-            group_id = job['group_id']
-            time_str = job['time']
-            freq = job['freq']
-            job_id = job['job_id']
+            try:
+                flyer_name = job['flyer_name']
+                group_id = job['group_id']
+                freq = job.get('freq', 'once')
+                job_id = job['job_id']
 
-            if freq == "once":
-                # Parse scheduled datetime
+                # Only attempt to restore if 'run_time' exists (new jobs)
+                if 'run_time' not in job:
+                    logging.warning(f"[restore_jobs] Skipping job {job_id} (missing run_time, probably old/corrupt)")
+                    continue
+
                 run_time = datetime.strptime(job['run_time'], "%Y-%m-%d %H:%M:%S")
-                # Only schedule if time hasn't passed
-                if run_time > datetime.now():
-                    scheduler.add_job(
-                        lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name, job_id)),
-                        "date", run_date=run_time, id=job_id
-                    )
-            elif freq == "daily":
-                hour, minute = map(int, time_str.split(":"))
-                scheduler.add_job(
-                    lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name, job_id)),
-                    "cron", hour=hour, minute=minute, id=job_id
-                )
-            elif freq == "weekly":
-                hour, minute = map(int, time_str.split(":"))
-                scheduler.add_job(
-                    lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name, job_id)),
-                    "cron", day_of_week="mon", hour=hour, minute=minute, id=job_id
-                )
-    restore_jobs()
+                hour, minute = run_time.hour, run_time.minute
+
+                if freq == "once":
+                    scheduler.add_job(lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name)),
+                                      "date", run_date=run_time, id=job_id)
+                elif freq == "daily":
+                    scheduler.add_job(lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name)),
+                                      "cron", hour=hour, minute=minute, id=job_id)
+                elif freq == "weekly":
+                    scheduler.add_job(lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name)),
+                                      "cron", day_of_week="mon", hour=hour, minute=minute, id=job_id)
+                logging.info(f"[restore_jobs] Restored scheduled flyer {flyer_name} ({job_id})")
+            except Exception as e:
+                logging.error(f"[restore_jobs] Error restoring job: {e}")
 
     @app.on_message(filters.command("scheduleflyer") & filters.create(admin_filter))
     async def scheduleflyer_handler(client, message):
@@ -92,33 +85,26 @@ def register(app, scheduler):
         if run_time < now:
             run_time += timedelta(days=1)
         job_id = f"flyer_{flyer_name}_{group_id}_{int(run_time.timestamp())}"
-
         if freq == "once":
-            scheduler.add_job(lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name, job_id)),
+            scheduler.add_job(lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name)),
                               "date", run_date=run_time, id=job_id)
-            run_time_str = run_time.strftime("%Y-%m-%d %H:%M:%S")
         elif freq == "daily":
-            scheduler.add_job(lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name, job_id)),
+            scheduler.add_job(lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name)),
                               "cron", hour=hour, minute=minute, id=job_id)
-            run_time_str = "daily"
         elif freq == "weekly":
-            scheduler.add_job(lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name, job_id)),
+            scheduler.add_job(lambda: app.loop.create_task(flyer_job(app, group_id, flyer_name)),
                               "cron", day_of_week="mon", hour=hour, minute=minute, id=job_id)
-            run_time_str = "weekly"
         else:
             return await message.reply("❌ Invalid freq. Use once/daily/weekly")
-
         scheduled.insert_one({
             "job_id": job_id,
             "flyer_name": flyer_name,
             "group_id": group_id,
             "time": time_str,
-            "run_time": run_time_str,
-            "freq": freq
+            "freq": freq,
+            "run_time": run_time.strftime("%Y-%m-%d %H:%M:%S")
         })
-        await message.reply(
-            f"✅ Scheduled flyer '{flyer_name}' to {group_alias} at {time_str} ({freq}).\nJob ID: <code>{job_id}</code>"
-        )
+        await message.reply(f"✅ Scheduled flyer '{flyer_name}' to {group_alias} at {time_str} ({freq}).\nJob ID: <code>{job_id}</code>")
 
     @app.on_message(filters.command("listscheduled") & filters.create(admin_filter))
     async def list_scheduled(client, message):
@@ -127,7 +113,7 @@ def register(app, scheduler):
             await message.reply("No flyers scheduled.")
         else:
             lines = [
-                f"• <b>{j['flyer_name']}</b> to {j['group_id']} at {j['time']} ({j['freq']}) [job_id: <code>{j['job_id']}</code>]"
+                f"• <b>{j['flyer_name']}</b> to {j['group_id']} at {j.get('time', '?')} ({j.get('freq','?')}) [job_id: <code>{j['job_id']}</code>]"
                 for j in jobs
             ]
             await message.reply("Scheduled Flyers:\n" + "\n".join(lines))
@@ -144,4 +130,8 @@ def register(app, scheduler):
             await message.reply("✅ Scheduled flyer canceled.")
         except Exception as e:
             await message.reply(f"❌ Could not cancel: {e}")
+
+    restore_jobs()
+    logging.info("Restored scheduled flyer jobs.")
+
 
