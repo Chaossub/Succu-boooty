@@ -1,5 +1,3 @@
-# handlers/help_cmd.py
-
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
@@ -9,47 +7,39 @@ async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
     if user_id == SUPER_ADMIN_ID:
         return True
     try:
-        member = await client.get_chat_member(chat_id, user_id)
-        return member.status in ("administrator", "creator")
-    except:
+        m = await client.get_chat_member(chat_id, user_id)
+        return m.status in ("administrator", "creator")
+    except Exception:
         return False
 
 def register(app: Client):
-    @app.on_message(filters.command(["start", "help"]) & (filters.private | filters.group))
+    @app.on_message(filters.command(["start", "help"]))
     async def help_handler(client: Client, message: Message):
         user_id = message.from_user.id
         chat_id = message.chat.id
         admin = await is_admin(client, chat_id, user_id)
-
         lines = ["<b>SuccuBot Commands</b>"]
-
-        # General
         lines.append("\n🛠 <b>General</b>")
         lines.append("/start — Initialize the bot")
         lines.append("/help — Show this help message")
         lines.append("/cancel — Cancel the current operation")
 
-        # Summon
         lines.append("\n🔔 <b>Summon</b>")
-        if admin:
-            lines.append("/trackall — Track all group members (admin only)")
-        lines.append("/summon <code>@username</code> — Summon one user")
+        if admin: lines.append("/trackall — Track all group members (admin only)")
+        lines.append("/summon @username — Summon one user")
         lines.append("/summonall — Summon all tracked users")
-        lines.append("/flirtysummon <code>@username</code> — Flirty summon one user")
+        lines.append("/flirtysummon @username — Flirty summon one user")
         lines.append("/flirtysummonall — Flirty summon all users")
 
-        # Fun
         lines.append("\n🎉 <b>Fun</b>")
-        lines.append("/bite <code>@username</code> — Playful bite & earn XP")
-        lines.append("/spank <code>@username</code> — Playful spank & earn XP")
-        lines.append("/tease <code>@username</code> — Playful tease & earn XP")
+        lines.append("/bite @user — Playful bite & earn XP")
+        lines.append("/spank @user — Playful spank & earn XP")
+        lines.append("/tease @user — Playful tease & earn XP")
 
-        # XP & Leaderboard
         lines.append("\n📈 <b>XP & Leaderboard</b>")
         lines.append("/naughty — Show your XP")
-        lines.append("/leaderboard — Show the XP leaderboard")
+        lines.append("/leaderboard — Show XP leaderboard")
 
-        # Moderation
         if admin:
             lines.append("\n⚒ <b>Moderation</b>")
             lines.append("/warn <user> [reason] — Issue a warning")
@@ -63,10 +53,9 @@ def register(app: Client):
             lines.append("/unban <user> — Unban a user")
             lines.append("/userinfo <user> — View user info")
 
-            # Federation
             lines.append("\n🛡 <b>Federation</b>")
             lines.append("/createfed <name> — Create a federation")
-            lines.append("/deletefed <fed_id> — Delete a federation")
+            lines.append("/deletefed <fed_id> — Delete federation")
             lines.append("/purgefed <fed_id> — Purge fed ban list")
             lines.append("/renamefed <fed_id> <new_name> — Rename federation")
             lines.append("/addfedadmin <fed_id> <user> — Add fed admin")
@@ -79,23 +68,14 @@ def register(app: Client):
             lines.append("/fedcheck <user> — Check federation bans")
             lines.append("/togglefedaction <fed_id> <kick|mute|off> — Toggle enforcement")
 
-            # Flyers
-            lines.append("\n📂 <b>Flyers (Text & Photo)</b>")
-            lines.append("/flyer <name> — Retrieve a flyer (text or photo)")
-            lines.append("/listflyers — List all flyers in this group")
-            lines.append("")
-            lines.append("Add text flyer: /addflyer <name> <text>")
-            lines.append("Add photo flyer: send photo with caption '/addflyer <name> <caption>'")
-            lines.append("Update flyer: /changeflyer <name> <text> (or send photo with new caption)")
+            lines.append("\n📂 <b>Flyers</b>")
+            lines.append("/flyer <name> — Retrieve a flyer")
+            lines.append("/listflyers — List all flyers")
+            lines.append("/addflyer <name> <caption> — Add flyer (photo or text)")
+            lines.append("/changeflyer <name> — Update flyer image (reply to new image)")
             lines.append("/deleteflyer <name> — Delete a flyer")
-            lines.append("")
-            lines.append("Schedule flyer: /scheduleflyer <name> <group> <HH:MM> <day|once>")
-            lines.append("• <b>Group</b>: alias <code>MODELS_CHAT</code>, <code>TEST_GROUP</code>, <code>SUCCUBUS_SANCTUARY</code> or group ID.")
-            lines.append("• <b>Day</b>: <code>mon</code>, <code>tue</code>, <code>wed</code>, <code>thu</code>, <code>fri</code>, <code>sat</code>, <code>sun</code>, <code>once</code>")
-            lines.append("/cancelflyer <name> — Cancel scheduled flyer")
-
-        await message.reply_text(
-            "\n".join(lines),
-            parse_mode="html",
-            disable_web_page_preview=True
-        )
+            lines.append("/scheduleflyer <name> <HH:MM> <group> [daily|once] — Schedule flyer")
+            lines.append("/scheduletext <HH:MM> <group> <text> [daily|once] — Schedule text flyer")
+            lines.append("/listscheduled — View scheduled flyers")
+            lines.append("/cancelflyer <job_id> — Cancel a scheduled post")
+        await message.reply_text("\n".join(lines), disable_web_page_preview=True)
