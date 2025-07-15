@@ -23,8 +23,10 @@ app = Client(
     parse_mode=ParseMode.HTML,
 )
 
+# Initialize scheduler with timezone
 scheduler = AsyncIOScheduler(timezone=os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
 
+# Handler imports and registration
 from handlers import (
     welcome,
     help_cmd,
@@ -37,6 +39,7 @@ from handlers import (
     flyer_scheduler,
 )
 logging.info("Imported all handler modules.")
+
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -48,8 +51,17 @@ flyer.register(app)
 flyer_scheduler.register(app, scheduler)
 logging.info("All handlers registered.")
 
+def scheduler_error_listener(event):
+    if event.exception:
+        logging.error("Scheduler job crashed: %s", event.exception)
+
+scheduler.add_listener(scheduler_error_listener)
+
 scheduler.start()
 logging.info("Scheduler started.")
 
 print("✅ SuccuBot is running...")
-app.run()
+try:
+    app.run()
+except Exception as e:
+    logging.exception("SuccuBot crashed: %s", e)
