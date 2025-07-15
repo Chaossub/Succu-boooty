@@ -1,11 +1,12 @@
 import os
 import logging
 from pyrogram import filters
+from pyrogram.types import Message
 from pymongo import MongoClient
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 
-# Logging setup
+# ─── Config & DB ──────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("handlers.flyer_scheduler")
 
@@ -26,34 +27,27 @@ ALIASES = {
 def admin_filter(_, __, m):
     return m.from_user and m.from_user.id in ADMIN_IDS
 
+# ─── MAIN FLYER SCHEDULER ──────────────────────────────
 def register(app, scheduler: BackgroundScheduler):
     async def flyer_job(group_id, flyer_name):
         flyer = flyers.find_one({"name": flyer_name})
-        logger.info(f"Scheduled job: posting '{flyer_name}' to {group_id}")
         if not flyer:
             logger.error(f"Flyer '{flyer_name}' not found!")
             return
         try:
+            logger.info(f"Posting flyer '{flyer_name}' to {group_id} ({type(group_id)})")
             if flyer.get("file_id"):
                 await app.send_photo(group_id, flyer["file_id"], caption=flyer.get("caption", ""))
             else:
                 await app.send_message(group_id, flyer.get("caption", ""))
-            logger.info(f"Posted flyer '{flyer_name}' to {group_id}")
         except Exception as e:
             logger.error(f"Failed scheduled flyer post: {e}")
 
     @app.on_message(filters.command("scheduleflyer") & filters.create(admin_filter))
-    async def scheduleflyer_handler(client, message):
-        args = None
-        # Allow both photo/doc or plain text scheduling
-        if message.photo or message.document:
-            if not message.caption:
-                return await message.reply("❌ Usage: /scheduleflyer <flyer_name> <group_alias> <HH:MM> [once|daily|weekly]", quote=True)
-            args = message.caption.split()
-        else:
-            args = message.text.split()
+    async def scheduleflyer_handler(client, message: Message):
+        args = message.text.split()
         if len(args) < 4:
-            return await message.reply("❌ Usage: /scheduleflyer <flyer_name> <group_alias> <HH:MM> [once|daily|weekly]", quote=True)
+            return await message.reply("❌ Usage: /scheduleflyer <flyer_name> <group_alias> <HH:MM> [once|daily|weekly]")
         flyer_name, group_alias, time_str = args[1:4]
         freq = args[4] if len(args) > 4 else "once"
         group_id = ALIASES.get(group_alias)
@@ -61,15 +55,23 @@ def register(app, scheduler: BackgroundScheduler):
             return await message.reply("❌ Invalid group/alias.")
         flyer = flyers.find_one({"name": flyer_name})
         if not flyer:
-            return await message.reply("❌ Flyer not found. Make sure you /addflyer first.")
+            return await message.reply("❌ Flyer not found.")
         hour, minute = map(int, time_str.split(":"))
         now = datetime.now()
         run_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if run_time < now:
             run_time += timedelta(days=1)
         job_id = f"flyer_{flyer_name}_{group_id}_{int(run_time.timestamp())}"
+
+        # This is the robust scheduler runner
         def runner():
-            app.loop.create_task(flyer_job(group_id, flyer_name))
+            import asyncio
+            try:
+                app.loop.call_soon_threadsafe(asyncio.create_task, flyer_job(group_id, flyer_name))
+                logger.info(f"Scheduled runner for {flyer_name} posted to app event loop.")
+            except Exception as e:
+                logger.error(f"Failed to schedule runner: {e}")
+
         if freq == "once":
             scheduler.add_job(runner, "date", run_date=run_time, id=job_id)
         elif freq == "daily":
@@ -78,23 +80,31 @@ def register(app, scheduler: BackgroundScheduler):
             scheduler.add_job(runner, "cron", day_of_week="mon", hour=hour, minute=minute, id=job_id)
         else:
             return await message.reply("❌ Invalid freq. Use once/daily/weekly")
-        scheduled.insert_one({"job_id": job_id, "flyer_name": flyer_name, "group_id": group_id, "time": time_str, "freq": freq})
-        await message.reply(f"✅ Scheduled flyer '{flyer_name}' to {group_alias} at {time_str} ({freq}).\nJob ID: <code>{job_id}</code>")
+
+        scheduled.insert_one({
+            "job_id": job_id,
+            "flyer_name": flyer_name,
+            "group_id": group_id,
+            "time": time_str,
+            "freq": freq
+        })
+        await message.reply(
+            f"✅ Scheduled flyer '<b>{flyer_name}</b>' to <code>{group_alias}</code> at <b>{time_str}</b> ({freq}).\nJob ID: <code>{job_id}</code>")
 
     @app.on_message(filters.command("listscheduled") & filters.create(admin_filter))
-    async def list_scheduled(client, message):
+    async def list_scheduled(client, message: Message):
         jobs = list(scheduled.find({}))
         if not jobs:
             await message.reply("No flyers scheduled.")
         else:
             lines = [
-                f"• <b>{j['flyer_name']}</b> to {j['group_id']} at {j['time']} ({j['freq']}) [job_id: <code>{j['job_id']}</code>]"
+                f"• <b>{j['flyer_name']}</b> to <code>{j['group_id']}</code> at {j['time']} ({j['freq']}) [job_id: <code>{j['job_id']}</code>]"
                 for j in jobs
             ]
             await message.reply("Scheduled Flyers:\n" + "\n".join(lines))
 
     @app.on_message(filters.command("cancelflyer") & filters.create(admin_filter))
-    async def cancelflyer(client, message):
+    async def cancelflyer(client, message: Message):
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
             return await message.reply("❌ Usage: /cancelflyer <job_id>")
@@ -105,3 +115,5 @@ def register(app, scheduler: BackgroundScheduler):
             await message.reply("✅ Scheduled flyer canceled.")
         except Exception as e:
             await message.reply(f"❌ Could not cancel: {e}")
+
+# End of file
