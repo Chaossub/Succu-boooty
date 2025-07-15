@@ -38,6 +38,7 @@ def register(app, scheduler: BackgroundScheduler):
 
     @app.on_message(filters.command("scheduleflyer") & filters.create(admin_filter))
     async def scheduleflyer_handler(client, message):
+        print("scheduleflyer handler triggered")
         args = message.text.split()
         if len(args) < 4:
             return await message.reply("❌ Usage: /scheduleflyer <flyer_name> <group_alias> <HH:MM> [once|daily|weekly]")
@@ -71,6 +72,7 @@ def register(app, scheduler: BackgroundScheduler):
 
     @app.on_message(filters.command("listscheduled") & filters.create(admin_filter))
     async def list_scheduled(client, message):
+        print("listscheduled handler triggered")
         jobs = list(scheduled.find({}))
         if not jobs:
             await message.reply("No flyers scheduled.")
@@ -83,6 +85,7 @@ def register(app, scheduler: BackgroundScheduler):
 
     @app.on_message(filters.command("cancelflyer") & filters.create(admin_filter))
     async def cancelflyer(client, message):
+        print("cancelflyer handler triggered")
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
             return await message.reply("❌ Usage: /cancelflyer <job_id>")
