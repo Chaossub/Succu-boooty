@@ -87,4 +87,33 @@ def register(app):
             return await message.reply("❌ Usage: /changeflyer <name> (reply to new photo/doc/text)")
         flyer_name = args[1].strip()
         flyer = flyers.find_one({"name": flyer_name})
-        if
+        if not flyer:
+            return await message.reply("❌ Flyer not found.")
+        file_id = flyer.get("file_id")
+        caption = flyer.get("caption", "")
+        if message.reply_to_message:
+            if message.reply_to_message.photo:
+                file_id = message.reply_to_message.photo.file_id
+            elif message.reply_to_message.document:
+                file_id = message.reply_to_message.document.file_id
+            elif message.reply_to_message.text:
+                caption = message.reply_to_message.text
+        elif message.photo:
+            file_id = message.photo.file_id
+        elif message.document:
+            file_id = message.document.file_id
+        flyers.update_one({"name": flyer_name}, {"$set": {"file_id": file_id, "caption": caption}})
+        await message.reply(f"✅ Flyer '{flyer_name}' updated.")
+
+    # Delete flyer by name
+    @app.on_message(filters.command("deleteflyer") & filters.create(admin_filter))
+    async def deleteflyer(client, message):
+        msg_text = message.text or message.caption
+        args = msg_text.split(maxsplit=1) if msg_text else []
+        if len(args) < 2:
+            return await message.reply("❌ Usage: /deleteflyer <name>")
+        result = flyers.delete_one({"name": args[1].strip()})
+        if result.deleted_count:
+            await message.reply("✅ Flyer deleted.")
+        else:
+            await message.reply("❌ Flyer not found.")
