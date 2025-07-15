@@ -1,6 +1,6 @@
 import os
 import logging
-from pyrogram import filters  # <-- IMPORTANT!
+from pyrogram import filters
 from pymongo import MongoClient
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
@@ -23,7 +23,7 @@ def admin_filter(_, __, m):
     return m.from_user and m.from_user.id in ADMIN_IDS
 
 def register(app, scheduler: BackgroundScheduler):
-    async def flyer_job(app, group_id, flyer_name):
+    async def flyer_job(group_id, flyer_name):
         flyer = flyers.find_one({"name": flyer_name})
         if not flyer:
             logging.error(f"Flyer '{flyer_name}' not found!")
@@ -33,8 +33,13 @@ def register(app, scheduler: BackgroundScheduler):
                 await app.send_photo(group_id, flyer["file_id"], caption=flyer.get("caption", ""))
             else:
                 await app.send_message(group_id, flyer.get("caption", ""))
+            logging.info(f"Posted flyer '{flyer_name}' to {group_id}")
         except Exception as e:
             logging.error(f"Failed scheduled flyer post: {e}")
+
+    def schedule_flyer_job(group_id, flyer_name):
+        # This function will always run on the correct asyncio event loop
+        app.loop.create_task(flyer_job(group_id, flyer_name))
 
     @app.on_message(filters.command("scheduleflyer") & filters.create(admin_filter))
     async def scheduleflyer_handler(client, message):
@@ -55,23 +60,18 @@ def register(app, scheduler: BackgroundScheduler):
         if run_time < now:
             run_time += timedelta(days=1)
         job_id = f"flyer_{flyer_name}_{group_id}_{int(run_time.timestamp())}"
-        async def runner():
-            await flyer_job(app, group_id, flyer_name)
         if freq == "once":
             scheduler.add_job(
-                lambda: app.loop.create_task(runner()),
-                "date", run_date=run_time, id=job_id
-            )
+                lambda: app.loop.call_soon_threadsafe(schedule_flyer_job, group_id, flyer_name),
+                "date", run_date=run_time, id=job_id)
         elif freq == "daily":
             scheduler.add_job(
-                lambda: app.loop.create_task(runner()),
-                "cron", hour=hour, minute=minute, id=job_id
-            )
+                lambda: app.loop.call_soon_threadsafe(schedule_flyer_job, group_id, flyer_name),
+                "cron", hour=hour, minute=minute, id=job_id)
         elif freq == "weekly":
             scheduler.add_job(
-                lambda: app.loop.create_task(runner()),
-                "cron", day_of_week="mon", hour=hour, minute=minute, id=job_id
-            )
+                lambda: app.loop.call_soon_threadsafe(schedule_flyer_job, group_id, flyer_name),
+                "cron", day_of_week="mon", hour=hour, minute=minute, id=job_id)
         else:
             return await message.reply("❌ Invalid freq. Use once/daily/weekly")
         scheduled.insert_one({"job_id": job_id, "flyer_name": flyer_name, "group_id": group_id, "time": time_str, "freq": freq})
