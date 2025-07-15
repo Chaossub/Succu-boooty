@@ -1,93 +1,104 @@
-import os
+import logging
 from pyrogram import filters
 from pyrogram.types import Message
 from pymongo import MongoClient
+import os
 
-MONGO_URI = os.environ["MONGO_URI"]
-MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME", "succubot")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+MONGO_URI = os.getenv("MONGO_URI")
 mongo = MongoClient(MONGO_URI)
-db = mongo[MONGO_DB]
+db = mongo["succubot"]
 flyers = db.flyers
 
-ADMIN_IDS = [6964994611]  # Add other admin user IDs as needed
-
-def admin_filter(_, __, m: Message):
-    return m.from_user and m.from_user.id in ADMIN_IDS
-
 def register(app):
-    @app.on_message(filters.command("addflyer") & filters.create(admin_filter))
-    async def addflyer(client, message):
+    @app.on_message(filters.command("addflyer"))
+    async def addFlyer(client, message: Message):
+        if not message.text:
+            return await message.reply("❌ Usage: <code>/addflyer &lt;name&gt; &lt;caption&gt;</code> with an attached photo.")
         args = message.text.split(maxsplit=2)
-        if len(args) < 3 and not (message.reply_to_message and (message.reply_to_message.photo or message.reply_to_message.document)):
-            return await message.reply("❌ Usage: /addflyer <name> <caption> (attach photo or reply to photo)", quote=True)
-        flyer_name = args[1] if len(args) > 1 else None
-        caption = args[2] if len(args) > 2 else ""
-        file_id = None
-        if message.reply_to_message:
-            if message.reply_to_message.photo:
-                file_id = message.reply_to_message.photo.file_id
-            elif message.reply_to_message.document:
-                file_id = message.reply_to_message.document.file_id
-            elif message.reply_to_message.text and not caption:
-                caption = message.reply_to_message.text
-        if not flyer_name:
-            return await message.reply("❌ Flyer name is required.")
+        if len(args) < 3:
+            return await message.reply("❌ Usage: <code>/addflyer &lt;name&gt; &lt;caption&gt;</code> (with a photo attached).")
+        flyer_name = args[1].lower()
+        caption = args[2]
+
+        if not message.photo:
+            return await message.reply("❌ Please attach a photo for the flyer.")
+
+        file_id = message.photo.file_id
+
         flyers.update_one(
-            {"name": flyer_name},
-            {"$set": {"name": flyer_name, "file_id": file_id, "caption": caption}},
-            upsert=True
+            {"name": flyer_name, "chat_id": message.chat.id},
+            {"$set": {
+                "name": flyer_name,
+                "caption": caption,
+                "file_id": file_id,
+                "chat_id": message.chat.id,
+            }},
+            upsert=True,
         )
-        await message.reply(f"✅ Flyer '{flyer_name}' added.")
+
+        await message.reply(f"✅ Flyer '<b>{flyer_name}</b>' added.")
 
     @app.on_message(filters.command("flyer"))
-    async def getflyer(client, message):
+    async def getFlyer(client, message: Message):
+        if not message.text:
+            return await message.reply("❌ Usage: <code>/flyer &lt;name&gt;</code>")
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply("❌ Usage: /flyer <name>")
-        flyer = flyers.find_one({"name": args[1].strip()})
+            return await message.reply("❌ Usage: <code>/flyer &lt;name&gt;</code>")
+        flyer_name = args[1].lower()
+
+        flyer = flyers.find_one({"name": flyer_name, "chat_id": message.chat.id})
         if not flyer:
-            return await message.reply("❌ Flyer not found.")
-        if flyer.get("file_id"):
-            await message.reply_photo(flyer["file_id"], caption=flyer.get("caption", ""))
-        else:
-            await message.reply(flyer.get("caption", ""))
+            return await message.reply(f"❌ No flyer named '{flyer_name}' found.")
+
+        await message.reply_photo(flyer['file_id'], caption=flyer['caption'])
 
     @app.on_message(filters.command("listflyers"))
-    async def listflyers(client, message):
-        flyer_list = [f"• <b>{f['name']}</b>" for f in flyers.find({})]
-        if flyer_list:
-            await message.reply("📋 <b>Flyers:</b>\n" + "\n".join(flyer_list))
-        else:
-            await message.reply("No flyers added yet.")
+    async def listFlyers(client, message: Message):
+        cursor = flyers.find({"chat_id": message.chat.id})
+        flyer_list = [doc["name"] for doc in cursor]
+        if not flyer_list:
+            return await message.reply("No flyers found.")
+        await message.reply("📋 Flyers: " + ", ".join(f"<b>{name}</b>" for name in flyer_list))
 
-    @app.on_message(filters.command("changeflyer") & filters.create(admin_filter) & filters.reply)
-    async def changeflyer(client, message):
+    @app.on_message(filters.command("deleteflyer"))
+    async def deleteFlyer(client, message: Message):
+        if not message.text:
+            return await message.reply("❌ Usage: <code>/deleteflyer &lt;name&gt;</code>")
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
-            return await message.reply("❌ Usage: /changeflyer <name> (reply to new photo or text)")
-        flyer_name = args[1].strip()
-        flyer = flyers.find_one({"name": flyer_name})
+            return await message.reply("❌ Usage: <code>/deleteflyer &lt;name&gt;</code>")
+        flyer_name = args[1].lower()
+        result = flyers.delete_one({"name": flyer_name, "chat_id": message.chat.id})
+        if result.deleted_count == 0:
+            return await message.reply(f"❌ No flyer named '{flyer_name}' found.")
+        await message.reply(f"✅ Flyer '<b>{flyer_name}</b>' deleted.")
+
+    @app.on_message(filters.command("changeflyer"))
+    async def changeFlyer(client, message: Message):
+        if not message.reply_to_message or not message.reply_to_message.photo:
+            return await message.reply("❌ Reply to a new photo with <code>/changeflyer &lt;name&gt;</code>")
+        if not message.text:
+            return await message.reply("❌ Usage: <code>/changeflyer &lt;name&gt;</code>")
+        args = message.text.split(maxsplit=1)
+        if len(args) < 2:
+            return await message.reply("❌ Usage: <code>/changeflyer &lt;name&gt;</code>")
+        flyer_name = args[1].lower()
+        new_file_id = message.reply_to_message.photo.file_id
+
+        flyer = flyers.find_one({"name": flyer_name, "chat_id": message.chat.id})
         if not flyer:
-            return await message.reply("❌ Flyer not found.")
-        file_id = flyer.get("file_id")
-        caption = flyer.get("caption", "")
-        if message.reply_to_message:
-            if message.reply_to_message.photo:
-                file_id = message.reply_to_message.photo.file_id
-            elif message.reply_to_message.document:
-                file_id = message.reply_to_message.document.file_id
-            elif message.reply_to_message.text:
-                caption = message.reply_to_message.text
-        flyers.update_one({"name": flyer_name}, {"$set": {"file_id": file_id, "caption": caption}})
-        await message.reply(f"✅ Flyer '{flyer_name}' updated.")
+            return await message.reply(f"❌ No flyer named '{flyer_name}' found.")
 
-    @app.on_message(filters.command("deleteflyer") & filters.create(admin_filter))
-    async def deleteflyer(client, message):
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
-            return await message.reply("❌ Usage: /deleteflyer <name>")
-        result = flyers.delete_one({"name": args[1].strip()})
-        if result.deleted_count:
-            await message.reply("✅ Flyer deleted.")
-        else:
-            await message.reply("❌ Flyer not found.")
+        flyers.update_one(
+            {"name": flyer_name, "chat_id": message.chat.id},
+            {"$set": {"file_id": new_file_id}}
+        )
+
+        await message.reply(f"✅ Flyer '<b>{flyer_name}</b>' photo updated.")
+
+# End of flyer.py
+
