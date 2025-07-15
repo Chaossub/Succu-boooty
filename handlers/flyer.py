@@ -141,12 +141,15 @@ def register(app, scheduler: BackgroundScheduler):
 
     def run_async_job(coro_fn):
         # Run an async function from a scheduler (sync context)
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Schedule in running loop from a thread
-            asyncio.run_coroutine_threadsafe(coro_fn(), loop)
-        else:
-            loop.run_until_complete(coro_fn())
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.run_coroutine_threadsafe(coro_fn(), loop)
+            else:
+                loop.run_until_complete(coro_fn())
+        except RuntimeError:
+            # No event loop in this thread
+            asyncio.run(coro_fn())
 
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     @admin_only
