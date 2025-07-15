@@ -4,6 +4,7 @@ from pyrogram import filters
 from pymongo import MongoClient
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
+import asyncio
 
 MONGO_URI = os.environ["MONGO_URI"]
 MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME", "succubot")
@@ -19,13 +20,12 @@ ALIASES = {
     "TEST_GROUP": int(os.environ["TEST_GROUP"]),
 }
 
-SCHEDULED_QUEUE = []  # Holds tuples (group_id, flyer_name)
-
 def admin_filter(_, __, m):
     return m.from_user and m.from_user.id in ADMIN_IDS
 
-def register(app, scheduler: BackgroundScheduler):
-    async def flyer_job(group_id, flyer_name):
+def schedule_flyer_job(app, group_id, flyer_name):
+    """Sync function to post flyer inside event loop"""
+    async def runner():
         flyer = flyers.find_one({"name": flyer_name})
         if not flyer:
             logging.error(f"Flyer '{flyer_name}' not found!")
@@ -35,12 +35,15 @@ def register(app, scheduler: BackgroundScheduler):
                 await app.send_photo(group_id, flyer["file_id"], caption=flyer.get("caption", ""))
             else:
                 await app.send_message(group_id, flyer.get("caption", ""))
+            logging.info(f"✅ Posted flyer '{flyer_name}' to {group_id}")
         except Exception as e:
             logging.error(f"Failed scheduled flyer post: {e}")
+    asyncio.create_task(runner())
 
+def register(app, scheduler: BackgroundScheduler):
     @app.on_message(filters.command("scheduleflyer") & filters.create(admin_filter))
     async def scheduleflyer_handler(client, message):
-        args = message.text.split()
+        args = (message.text or message.caption).split()
         if len(args) < 4:
             return await message.reply("❌ Usage: /scheduleflyer <flyer_name> <group_alias> <HH:MM> [once|daily|weekly]")
         flyer_name, group_alias, time_str = args[1:4]
@@ -57,14 +60,14 @@ def register(app, scheduler: BackgroundScheduler):
         if run_time < now:
             run_time += timedelta(days=1)
         job_id = f"flyer_{flyer_name}_{group_id}_{int(run_time.timestamp())}"
-        def runner():
-            SCHEDULED_QUEUE.append((group_id, flyer_name))
+
+        # Only THIS pattern is safe and will work with APScheduler + async!
         if freq == "once":
-            scheduler.add_job(runner, "date", run_date=run_time, id=job_id)
+            scheduler.add_job(schedule_flyer_job, "date", run_date=run_time, args=[app, group_id, flyer_name], id=job_id)
         elif freq == "daily":
-            scheduler.add_job(runner, "cron", hour=hour, minute=minute, id=job_id)
+            scheduler.add_job(schedule_flyer_job, "cron", hour=hour, minute=minute, args=[app, group_id, flyer_name], id=job_id)
         elif freq == "weekly":
-            scheduler.add_job(runner, "cron", day_of_week="mon", hour=hour, minute=minute, id=job_id)
+            scheduler.add_job(schedule_flyer_job, "cron", day_of_week="mon", hour=hour, minute=minute, args=[app, group_id, flyer_name], id=job_id)
         else:
             return await message.reply("❌ Invalid freq. Use once/daily/weekly")
         scheduled.insert_one({"job_id": job_id, "flyer_name": flyer_name, "group_id": group_id, "time": time_str, "freq": freq})
@@ -84,7 +87,7 @@ def register(app, scheduler: BackgroundScheduler):
 
     @app.on_message(filters.command("cancelflyer") & filters.create(admin_filter))
     async def cancelflyer(client, message):
-        args = message.text.split(maxsplit=1)
+        args = (message.text or message.caption).split(maxsplit=1)
         if len(args) < 2:
             return await message.reply("❌ Usage: /cancelflyer <job_id>")
         job_id = args[1].strip()
@@ -94,15 +97,4 @@ def register(app, scheduler: BackgroundScheduler):
             await message.reply("✅ Scheduled flyer canceled.")
         except Exception as e:
             await message.reply(f"❌ Could not cancel: {e}")
-
-    # --- THE BACKGROUND QUEUE WORKER ---
-    import asyncio
-    async def scheduled_queue_worker():
-        while True:
-            if SCHEDULED_QUEUE:
-                group_id, flyer_name = SCHEDULED_QUEUE.pop(0)
-                await flyer_job(group_id, flyer_name)
-            await asyncio.sleep(3)
-
-    return scheduled_queue_worker
 
