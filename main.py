@@ -39,4 +39,22 @@ def register_all_handlers():
     )
     logging.info("Imported all handler modules.")
     welcome.register(app)
-    help_cmd.re_
+    help_cmd.register(app)
+    moderation.register(app)
+    federation.register(app)
+    summon.register(app)
+    xp.register(app)
+    fun.register(app)
+    flyer.register(app)
+    flyer_scheduler.register(app, scheduler)
+    logging.info("All handlers registered.")
+
+@app.on_start()
+async def on_start(client):
+    register_all_handlers()
+    scheduler.start()
+    logging.info("Scheduler started.")
+
+print("Registering handlers...")
+print("✅ SuccuBot is running...")
+app.run()
