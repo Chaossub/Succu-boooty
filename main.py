@@ -3,7 +3,6 @@ import logging
 from dotenv import load_dotenv
 
 print("MAIN.PY BOOTSTRAP BEGIN")
-
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 print("Loaded environment.")
@@ -18,7 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 scheduler = BackgroundScheduler(timezone=os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
 scheduler.start()
-print("Scheduler started.")
+logging.info("Scheduler started.")
 
 app = Client(
     "SuccuBot",
@@ -38,27 +37,30 @@ try:
         summon,
         xp,
         fun,
-        flyer_scheduler,  # <-- NEW
+        flyer,
+        flyer_scheduler,
     )
-    print("Imported all handler modules.")
+    logging.info("Imported all handler modules.")
     welcome.register(app)
-    print("Registered welcome.")
+    logging.info("Registered welcome.")
     help_cmd.register(app)
-    print("Registered help_cmd.")
+    logging.info("Registered help_cmd.")
     moderation.register(app)
-    print("Registered moderation.")
+    logging.info("Registered moderation.")
     federation.register(app)
-    print("Registered federation.")
+    logging.info("Registered federation.")
     summon.register(app)
-    print("Registered summon.")
+    logging.info("Registered summon.")
     xp.register(app)
-    print("Registered xp.")
+    logging.info("Registered xp.")
     fun.register(app)
-    print("Registered fun.")
-    flyer_scheduler.register(app, scheduler)  # <-- NEW
-    print("Registered flyer_scheduler.")
+    logging.info("Registered fun.")
+    flyer.register(app)
+    logging.info("Registered flyer.")
+    flyer_scheduler.register(app, scheduler)
+    logging.info("Registered flyer_scheduler.")
 except Exception as e:
-    print(f"🔥 Exception during handler registration: {e}")
+    logging.error(f"🔥 Exception during handler registration: {e}")
     import traceback; traceback.print_exc()
     raise
 
@@ -66,6 +68,6 @@ print("✅ SuccuBot is running...")
 try:
     app.run()
 except Exception as e:
-    print(f"🔥 Exception during app.run(): {e}")
+    logging.error(f"🔥 Exception during app.run(): {e}")
     import traceback; traceback.print_exc()
     raise
