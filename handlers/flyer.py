@@ -1,108 +1,141 @@
 import os
-import logging
-from pyrogram import Client, filters
+from pyrogram import filters
 from pyrogram.types import Message
+from pyrogram.errors import RPCError
+from pyrogram.enums import ChatMemberStatus
 from pymongo import MongoClient
-from dotenv import load_dotenv
 
-load_dotenv()
-
+# Setup your DB connection
 MONGO_URI = os.environ.get("MONGO_URI")
-MONGO_DB = os.environ.get("MONGO_DB_NAME") or "succubot"
-OWNER_ID = 6964994611  # your Telegram user ID
+MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME") or "succubot"
+mongo = MongoClient(MONGO_URI)[MONGO_DB]
+flyers_col = mongo.flyers
 
-client = MongoClient(MONGO_URI)
-flyers_col = client[MONGO_DB]["flyers"]
+OWNER_ID = int(os.environ.get("OWNER_ID", "6964994611"))  # Set your Telegram ID
 
-# --- Admin check decorator ---
-async def is_admin(client, chat_id, user_id):
-    try:
-        member = await client.get_chat_member(chat_id, user_id)
-        return member.status in ("administrator", "creator")
-    except Exception:
-        return False
+async def is_admin(client, message: Message) -> bool:
+    if message.from_user and message.from_user.id == OWNER_ID:
+        return True
+    chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
+    return chat_member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER)
 
-def admin_only(func):
-    async def wrapper(client, message: Message):
-        # Always let the owner use admin commands
-        if message.from_user and message.from_user.id == OWNER_ID:
-            return await func(client, message)
-        # Only check admin for group chats
-        if hasattr(message.chat, "type") and message.chat.type in ("group", "supergroup"):
-            if not await is_admin(client, message.chat.id, message.from_user.id):
-                return await message.reply("❌ You must be an admin to use this command.")
-        else:
-            # Private chat: allow
-            return await func(client, message)
-        return await func(client, message)
-    return wrapper
-
-# --- Add flyer ---
-@admin_only
+# Add flyer (photo+caption or text only)
 async def addflyer_handler(client, message: Message):
-    args = message.text.split(maxsplit=2)
-    if len(args) < 2:
-        return await message.reply("❌ Usage: /addflyer <name> <caption> (attach a photo for image flyer, or leave empty for text-only)")
-    flyer_name = args[1].strip().lower()
-    flyer_caption = args[2].strip() if len(args) > 2 else ""
-    photo_id = None
+    if not await is_admin(client, message):
+        await message.reply("❌ You must be an admin to use this command.")
+        return
 
-    # Allow photo from attached or replied image
+    # If photo is attached
     if message.photo:
-        photo_id = message.photo.file_id
-    elif message.reply_to_message and message.reply_to_message.photo:
-        photo_id = message.reply_to_message.photo.file_id
+        args = message.caption.split(maxsplit=2) if message.caption else []
+    else:
+        args = message.text.split(maxsplit=2) if message.text else []
 
+    if len(args) < 3 or not args[1].strip():
+        return await message.reply("❌ Usage: /addflyer <name> <caption> (with an attached photo, or text only)")
+
+    flyer_name, flyer_caption = args[1], args[2]
+
+    flyer_data = {
+        "chat_id": message.chat.id,
+        "name": flyer_name.lower(),
+        "caption": flyer_caption,
+        "file_id": message.photo.file_id if message.photo else None,
+        "type": "photo" if message.photo else "text",
+    }
     flyers_col.update_one(
-        {"chat_id": message.chat.id, "name": flyer_name},
-        {"$set": {
-            "chat_id": message.chat.id,
-            "name": flyer_name,
-            "caption": flyer_caption,
-            "photo_id": photo_id,
-        }},
+        {"chat_id": message.chat.id, "name": flyer_name.lower()},
+        {"$set": flyer_data},
         upsert=True
     )
-    await message.reply(f"✅ Flyer '{flyer_name}' added.")
+    await message.reply(f"✅ Flyer <b>{flyer_name}</b> saved!")
 
-# --- Get flyer ---
+# Get flyer by name
 async def getflyer_handler(client, message: Message):
-    args = message.text.split(maxsplit=1)
+    args = message.text.split(maxsplit=1) if message.text else []
     if len(args) < 2:
         return await message.reply("❌ Usage: /flyer <name>")
-    flyer_name = args[1].strip().lower()
-    flyer = flyers_col.find_one({"chat_id": message.chat.id, "name": flyer_name})
+
+    flyer = flyers_col.find_one({"chat_id": message.chat.id, "name": args[1].lower()})
     if not flyer:
         return await message.reply("❌ Flyer not found.")
-    if flyer.get("photo_id"):
-        await message.reply_photo(flyer["photo_id"], caption=flyer.get("caption", ""))
-    else:
-        await message.reply(flyer.get("caption", "No text set."))
 
-# --- Delete flyer ---
-@admin_only
+    if flyer.get("type") == "photo" and flyer.get("file_id"):
+        await message.reply_photo(flyer["file_id"], caption=flyer.get("caption", ""))
+    else:
+        await message.reply(flyer.get("caption", ""))
+
+# Delete flyer by name
 async def deleteflyer_handler(client, message: Message):
-    args = message.text.split(maxsplit=1)
+    if not await is_admin(client, message):
+        return await message.reply("❌ You must be an admin to use this command.")
+
+    args = message.text.split(maxsplit=1) if message.text else []
     if len(args) < 2:
         return await message.reply("❌ Usage: /deleteflyer <name>")
-    flyer_name = args[1].strip().lower()
-    result = flyers_col.delete_one({"chat_id": message.chat.id, "name": flyer_name})
+
+    result = flyers_col.delete_one({"chat_id": message.chat.id, "name": args[1].lower()})
     if result.deleted_count:
-        await message.reply(f"✅ Flyer '{flyer_name}' deleted.")
+        await message.reply(f"🗑️ Flyer <b>{args[1]}</b> deleted.")
     else:
         await message.reply("❌ Flyer not found.")
 
-# --- List flyers ---
+# List flyers in the group
 async def listflyers_handler(client, message: Message):
-    flyers = flyers_col.find({"chat_id": message.chat.id})
-    names = [f"• <b>{f['name']}</b>" for f in flyers]
-    if not names:
-        return await message.reply("No flyers set yet.")
-    await message.reply("<b>Flyers:</b>\n" + "\n".join(names))
+    flyers = list(flyers_col.find({"chat_id": message.chat.id}))
+    if not flyers:
+        await message.reply("No flyers found in this group.")
+        return
+    flyer_names = [f"<b>{f['name']}</b>" for f in flyers]
+    await message.reply("📋 Flyers in this group:\n" + "\n".join(flyer_names))
 
-# --- Register handlers ---
+# Change flyer (when replying to an image or text)
+async def changeflyer_handler(client, message: Message):
+    if not await is_admin(client, message):
+        return await message.reply("❌ You must be an admin to use this command.")
+    args = message.text.split(maxsplit=1) if message.text else []
+    if len(args) < 2:
+        return await message.reply("❌ Usage: /changeflyer <name> (attach new photo/text or reply to an image/text)")
+
+    flyer_name = args[1].lower()
+    # If replying to photo/text, update it
+    if message.reply_to_message:
+        reply = message.reply_to_message
+        flyer_data = {
+            "chat_id": message.chat.id,
+            "name": flyer_name,
+            "caption": reply.caption or reply.text or "",
+            "file_id": reply.photo.file_id if reply.photo else None,
+            "type": "photo" if reply.photo else "text",
+        }
+    elif message.photo:
+        flyer_data = {
+            "chat_id": message.chat.id,
+            "name": flyer_name,
+            "caption": message.caption or "",
+            "file_id": message.photo.file_id,
+            "type": "photo",
+        }
+    else:
+        flyer_data = {
+            "chat_id": message.chat.id,
+            "name": flyer_name,
+            "caption": " ".join(args[2:]) if len(args) > 2 else "",
+            "file_id": None,
+            "type": "text",
+        }
+    flyers_col.update_one(
+        {"chat_id": message.chat.id, "name": flyer_name},
+        {"$set": flyer_data},
+        upsert=True
+    )
+    await message.reply(f"✅ Flyer <b>{flyer_name}</b> updated!")
+
+from pyrogram.handlers import MessageHandler
+
 def register(app):
-    app.add_handler(filters.command("addflyer")(addflyer_handler))
-    app.add_handler(filters.command("flyer")(getflyer_handler))
-    app.add_handler(filters.command("deleteflyer")(deleteflyer_handler))
-    app.add_handler(filters.command("listflyers")(listflyers_handler))
+    app.add_handler(MessageHandler(addflyer_handler, filters.command("addflyer")))
+    app.add_handler(MessageHandler(getflyer_handler, filters.command("flyer")))
+    app.add_handler(MessageHandler(deleteflyer_handler, filters.command("deleteflyer")))
+    app.add_handler(MessageHandler(listflyers_handler, filters.command("listflyers")))
+    app.add_handler(MessageHandler(changeflyer_handler, filters.command("changeflyer")))
