@@ -1,136 +1,129 @@
 import os
-from datetime import datetime
-from pymongo import MongoClient
+import re
 from pyrogram import filters
 from pyrogram.types import Message
+from pymongo import MongoClient
+from utils.admin_check import is_admin  # Make sure you have this utility!
 
-# Mongo setup
-MONGO_URI = os.environ.get("MONGO_URI")
-mongo = MongoClient(MONGO_URI)
-flyers_col = mongo["succubot"]["flyers"]
+MONGO_URI = os.environ["MONGO_URI"]
+mongo_client = MongoClient(MONGO_URI)
+db = mongo_client["flyer_db"]
+flyers = db.flyers
 
-OWNER_ID = int(os.environ.get("OWNER_ID", "6964994611"))  # Set your Telegram user ID here
-
-async def is_admin(client, message: Message) -> bool:
-    """Admins or group owner only."""
-    if message.from_user.id == OWNER_ID:
-        return True
-    chat_member = await client.get_chat_member(message.chat.id, message.from_user.id)
-    return chat_member.status in ("administrator", "creator")
+async def admin_guard(client, message: Message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    if not await is_admin(client, chat_id, user_id):
+        await message.reply("❌ You must be an admin to use this command.")
+        return False
+    return True
 
 async def addflyer_handler(client, message: Message):
-    # Only admins
-    if not await is_admin(client, message):
-        return await message.reply("❌ You must be an admin to use this command.")
-    args = message.text.split(maxsplit=2)
-    if len(args) < 3:
-        return await message.reply("❌ Usage: /addflyer <name> <caption> (as text, or reply to photo with this command)")
-    flyer_name = args[1].strip().lower()
-    caption = args[2].strip()
-    flyer_data = {
-        "group_id": message.chat.id,
-        "name": flyer_name,
-        "caption": caption,
-        "created_by": message.from_user.id,
-        "created_at": datetime.utcnow()
-    }
-    # Attach photo if replying to one
-    if message.reply_to_message and message.reply_to_message.photo:
-        flyer_data["file_id"] = message.reply_to_message.photo.file_id
-    elif message.reply_to_message and message.reply_to_message.text:
-        flyer_data["caption"] = message.reply_to_message.text
+    if not await admin_guard(client, message):
+        return
 
-    flyers_col.update_one(
-        {"group_id": message.chat.id, "name": flyer_name},
+    if not message.command or len(message.command) < 2:
+        return await message.reply("❌ Usage: <code>/addflyer &lt;name&gt; &lt;caption&gt;</code> (optionally attach a photo)")
+
+    name = message.command[1].lower()
+    caption = " ".join(message.command[2:]) if len(message.command) > 2 else ""
+    chat_id = message.chat.id
+
+    flyer_data = {
+        "chat_id": chat_id,
+        "name": name,
+        "caption": caption.strip(),
+        "type": "text",
+    }
+
+    # If photo attached
+    if message.photo:
+        flyer_data["type"] = "photo"
+        flyer_data["file_id"] = message.photo.file_id
+
+    flyers.update_one(
+        {"chat_id": chat_id, "name": name},
         {"$set": flyer_data},
         upsert=True
     )
-    await message.reply("✅ Flyer saved!")
+    await message.reply(f"✅ Flyer <b>{name}</b> saved!")
 
 async def flyer_handler(client, message: Message):
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await message.reply("❌ Usage: /flyer <name>")
-    flyer_name = args[1].strip().lower()
-    flyer = flyers_col.find_one({"group_id": message.chat.id, "name": flyer_name})
+    if not message.command or len(message.command) < 2:
+        return await message.reply("❌ Usage: <code>/flyer &lt;name&gt;</code>")
+
+    name = message.command[1].lower()
+    chat_id = message.chat.id
+    flyer = flyers.find_one({"chat_id": chat_id, "name": name})
+
     if not flyer:
         return await message.reply("❌ Flyer not found.")
-    if flyer.get("file_id"):
+    if flyer.get("type") == "photo":
         await message.reply_photo(flyer["file_id"], caption=flyer.get("caption", ""))
     else:
         await message.reply(flyer.get("caption", ""))
 
 async def listflyers_handler(client, message: Message):
-    flyers = list(flyers_col.find({"group_id": message.chat.id}))
-    if not flyers:
-        return await message.reply("No flyers saved yet.")
-    names = "\n".join([f"• <b>{f['name']}</b>" for f in flyers])
-    await message.reply(f"📋 Flyers:\n{names}", parse_mode="html")
+    chat_id = message.chat.id
+    flyer_list = [f["name"] for f in flyers.find({"chat_id": chat_id})]
+    if not flyer_list:
+        await message.reply("No flyers saved in this group.")
+    else:
+        await message.reply("Flyers in this group:\n" + "\n".join(f"• <code>{name}</code>" for name in flyer_list))
 
 async def deleteflyer_handler(client, message: Message):
-    if not await is_admin(client, message):
-        return await message.reply("❌ You must be an admin to use this command.")
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await message.reply("❌ Usage: /deleteflyer <name>")
-    flyer_name = args[1].strip().lower()
-    res = flyers_col.delete_one({"group_id": message.chat.id, "name": flyer_name})
-    if res.deleted_count:
-        await message.reply("✅ Flyer deleted.")
+    if not await admin_guard(client, message):
+        return
+
+    if not message.command or len(message.command) < 2:
+        return await message.reply("❌ Usage: <code>/deleteflyer &lt;name&gt;</code>")
+
+    name = message.command[1].lower()
+    chat_id = message.chat.id
+    result = flyers.delete_one({"chat_id": chat_id, "name": name})
+    if result.deleted_count:
+        await message.reply(f"✅ Flyer <b>{name}</b> deleted.")
     else:
         await message.reply("❌ Flyer not found.")
 
 async def changeflyer_handler(client, message: Message):
-    if not await is_admin(client, message):
-        return await message.reply("❌ You must be an admin to use this command.")
-    args = message.text.split(maxsplit=1)
-    if len(args) < 2:
-        return await message.reply("❌ Usage: /changeflyer <name> (reply to photo/text)")
-    flyer_name = args[1].strip().lower()
-    flyer = flyers_col.find_one({"group_id": message.chat.id, "name": flyer_name})
+    if not await admin_guard(client, message):
+        return
+
+    if not message.command or len(message.command) < 2:
+        return await message.reply("❌ Usage: <code>/changeflyer &lt;name&gt;</code> (with new text/photo attached)")
+
+    name = message.command[1].lower()
+    chat_id = message.chat.id
+    flyer = flyers.find_one({"chat_id": chat_id, "name": name})
     if not flyer:
         return await message.reply("❌ Flyer not found.")
-    new_data = {}
-    if message.reply_to_message and message.reply_to_message.photo:
-        new_data["file_id"] = message.reply_to_message.photo.file_id
-        new_data["caption"] = flyer.get("caption", "")
-    elif message.reply_to_message and message.reply_to_message.text:
-        new_data["caption"] = message.reply_to_message.text
-        new_data.pop("file_id", None)
-    else:
-        return await message.reply("Reply to an image or a text message.")
-    flyers_col.update_one(
-        {"group_id": message.chat.id, "name": flyer_name},
-        {"$set": new_data}
-    )
-    await message.reply("✅ Flyer updated!")
 
-async def scheduleflyer_handler(client, message: Message):
-    if not await is_admin(client, message):
-        return await message.reply("❌ You must be an admin to use this command.")
-    args = message.text.split(maxsplit=6)
-    if len(args) < 6:
-        return await message.reply(
-            "❌ Usage: /scheduleflyer <flyer_name> <YYYY-MM-DD> <HH:MM> <once|repeat> <target_group>"
-        )
-    flyer_name, date_str, time_str, repeat_mode, target_group = args[1:6]
-    try:
-        run_time = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-    except ValueError:
-        return await message.reply("❌ Invalid date/time. Use: YYYY-MM-DD HH:MM")
-    if repeat_mode not in ("once", "repeat"):
-        return await message.reply("❌ Repeat mode must be 'once' or 'repeat'.")
-    # You must implement actual scheduling logic here!
-    # This is a placeholder:
-    # schedule_flyer_post(flyer_name, run_time, repeat_mode, target_group)
-    await message.reply(
-        f"✅ Scheduled flyer '{flyer_name}' for {run_time} ({repeat_mode}) in {target_group}."
+    # Accept photo or just text
+    update_data = {}
+    if message.photo:
+        update_data = {
+            "type": "photo",
+            "file_id": message.photo.file_id,
+            "caption": message.caption or flyer.get("caption", ""),
+        }
+    elif message.text and message.text.strip() != f"/changeflyer {name}":
+        update_data = {
+            "type": "text",
+            "caption": message.text.replace(f"/changeflyer {name}", "", 1).strip(),
+        }
+    else:
+        return await message.reply("❌ Reply with new text or photo to update flyer.")
+
+    flyers.update_one(
+        {"chat_id": chat_id, "name": name},
+        {"$set": update_data}
     )
+    await message.reply(f"✅ Flyer <b>{name}</b> updated!")
 
 def register(app):
-    app.add_handler(filters.command("addflyer")(addflyer_handler))
-    app.add_handler(filters.command("flyer")(flyer_handler))
-    app.add_handler(filters.command("listflyers")(listflyers_handler))
-    app.add_handler(filters.command("deleteflyer")(deleteflyer_handler))
-    app.add_handler(filters.command("changeflyer")(changeflyer_handler))
-    app.add_handler(filters.command("scheduleflyer")(scheduleflyer_handler))
+    app.on_message(filters.command("addflyer"))(addflyer_handler)
+    app.on_message(filters.command("flyer"))(flyer_handler)
+    app.on_message(filters.command("listflyers"))(listflyers_handler)
+    app.on_message(filters.command("deleteflyer"))(deleteflyer_handler)
+    app.on_message(filters.command("changeflyer"))(changeflyer_handler)
