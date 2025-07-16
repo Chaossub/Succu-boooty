@@ -1,7 +1,7 @@
 import os
 import logging
 from pyrogram import Client, filters
-from pyrogram.types import Message, ChatType
+from pyrogram.types import Message
 from pymongo import MongoClient
 from dotenv import load_dotenv
 
@@ -9,7 +9,7 @@ load_dotenv()
 
 MONGO_URI = os.environ.get("MONGO_URI")
 MONGO_DB = os.environ.get("MONGO_DB_NAME") or "succubot"
-OWNER_ID = 6964994611  # your user ID, always allowed
+OWNER_ID = 6964994611  # your Telegram user ID
 
 client = MongoClient(MONGO_URI)
 flyers_col = client[MONGO_DB]["flyers"]
@@ -24,20 +24,22 @@ async def is_admin(client, chat_id, user_id):
 
 def admin_only(func):
     async def wrapper(client, message: Message):
-        if not message.from_user:
-            return await message.reply("❌ I couldn't verify your identity! Please try again.")
-        if message.from_user.id == OWNER_ID:
+        # Always let the owner use admin commands
+        if message.from_user and message.from_user.id == OWNER_ID:
             return await func(client, message)
-        if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
+        # Only check admin for group chats
+        if hasattr(message.chat, "type") and message.chat.type in ("group", "supergroup"):
             if not await is_admin(client, message.chat.id, message.from_user.id):
                 return await message.reply("❌ You must be an admin to use this command.")
+        else:
+            # Private chat: allow
+            return await func(client, message)
         return await func(client, message)
     return wrapper
 
 # --- Add flyer ---
 @admin_only
 async def addflyer_handler(client, message: Message):
-    # Parse command: /addflyer name caption
     args = message.text.split(maxsplit=2)
     if len(args) < 2:
         return await message.reply("❌ Usage: /addflyer <name> <caption> (attach a photo for image flyer, or leave empty for text-only)")
