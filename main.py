@@ -1,56 +1,35 @@
 import os
-import logging
-from dotenv import load_dotenv
-
-print("MAIN.PY BOOTSTRAP BEGIN")
-logging.basicConfig(level=logging.INFO)
-load_dotenv()
-print("Loaded environment.")
-
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import Client
 from pyrogram.enums import ParseMode
+from dotenv import load_dotenv
 
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# Load env vars from .env if present
+load_dotenv()
 
+API_ID = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+
+# Initialize Pyrogram Client
 app = Client(
     "SuccuBot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML,
+    parse_mode=ParseMode.HTML
 )
 
-scheduler = AsyncIOScheduler(timezone=os.getenv("SCHEDULER_TZ", "America/Los_Angeles"))
+# Import all handler modules so their @app.on_message hooks register
+import handlers.flyer
+import handlers.moderation
+import handlers.federation
+import handlers.fun
+import handlers.xp
+import handlers.summon
+import handlers.welcome
+import handlers.help_cmd
 
-from handlers import (
-    welcome,
-    help_cmd,
-    moderation,
-    federation,
-    summon,
-    xp,
-    fun,
-    flyer,
-    flyer_scheduler,
-)
-logging.info("Imported all handler modules.")
-
-welcome.register(app)
-help_cmd.register(app)
-moderation.register(app)
-federation.register(app)
-summon.register(app)
-xp.register(app)
-fun.register(app)
-flyer.register(app)
-flyer_scheduler.register(app, scheduler)
-logging.info("All handlers registered.")
-
-scheduler.start()
-logging.info("Scheduler started.")
-
-print("✅ SuccuBot is running...")
-app.run()
+if __name__ == "__main__":
+    print("MAIN.PY BOOTSTRAP BEGIN")
+    print("Loaded environment.")
+    app.run()
