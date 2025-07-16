@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 import pytz
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.memory import MemoryJobStore
 from pyrogram import filters
 from pyrogram.types import Message
 from pymongo import MongoClient
@@ -21,94 +22,92 @@ ADMINS = [OWNER_ID]
 def is_admin(user_id):
     return user_id in ADMINS
 
-# ---- APSCHEDULER (in-memory ONLY, not Mongo!) ----
-scheduler = AsyncIOScheduler(timezone=pytz.timezone(SCHED_TZ))
+# ---- APSCHEDULER ----
+# Use MemoryJobStore for compatibility with async jobs
+jobstores = {"default": MemoryJobStore()}
+scheduler = AsyncIOScheduler(jobstores=jobstores, timezone=pytz.timezone(SCHED_TZ))
 scheduler.start()
 
-def resolve_group(group_str):
-    if group_str.lstrip("-").isdigit():
-        return int(group_str)
-    val = os.getenv(group_str)
-    if val and val.lstrip("-").isdigit():
-        return int(val)
-    val = os.getenv(group_str.upper() + "_ID")
-    if val and val.lstrip("-").isdigit():
-        return int(val)
-    raise ValueError(f"Group alias '{group_str}' not found in environment variables.")
-
-async def post_flyer_job(client, group_id, flyer_name, chat_id):
-    flyer = flyers.find_one({"chat_id": chat_id, "name": flyer_name})
-    if not flyer:
-        logging.error(f"Flyer '{flyer_name}' not found in chat {chat_id}")
-        return
-    try:
-        if flyer.get("photo_id"):
-            await client.send_photo(group_id, flyer["photo_id"], caption=flyer.get("caption", ""))
-        else:
-            await client.send_message(group_id, flyer.get("caption", ""))
-    except Exception as e:
-        logging.error(f"Flyer schedule failed: {e}")
+def post_flyer_job(client, group_id, flyer_data):
+    async def inner():
+        try:
+            if flyer_data.get("photo_id"):
+                await client.send_photo(group_id, flyer_data["photo_id"], caption=flyer_data.get("caption", ""))
+            else:
+                await client.send_message(group_id, flyer_data.get("caption", ""))
+        except Exception as e:
+            logging.error(f"Flyer schedule failed: {e}")
+    return inner
 
 def register(app):
+
+    # --- Schedule a Flyer ---
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def scheduleflyer_handler(client, message: Message):
+        if not is_admin(message.from_user.id):
+            return await message.reply("❌ Only group admins/owner can schedule flyers.")
+
         args = message.text.split(maxsplit=5)
-        if len(args) < 6:
+        if len(args) < 5:
             return await message.reply(
-                "❌ Usage: /scheduleflyer <flyer_name> <YYYY-MM-DD> <HH:MM> <once|daily> <group_alias_or_id>\n"
-                "Example: /scheduleflyer tipping 2025-07-18 18:00 daily MODELS_CHAT"
+                "Usage: /scheduleflyer <flyer_name> <HH:MM> <once|daily> <group_id>\n"
+                "Example: /scheduleflyer tipping 18:00 daily -1001234567890"
             )
+
         flyer_name = args[1].strip().lower()
-        date_str = args[2]
-        time_str = args[3]
-        repeat = args[4].lower()
-        group_str = args[5]
+        time_str = args[2]
+        repeat = args[3].lower()
+        group_str = args[4]
+
+        # Support shortcuts for group IDs if you use env vars (optional)
+        group_id = None
+        if group_str.lstrip("-").isdigit():
+            group_id = int(group_str)
+        else:
+            # Try to get from env by alias (e.g., MODELS_CHAT)
+            group_id = int(os.getenv(group_str) or 0)
+        if not group_id:
+            return await message.reply("Invalid group_id or group shortcut!")
 
         flyer = flyers.find_one({"chat_id": message.chat.id, "name": flyer_name})
         if not flyer:
             return await message.reply("❌ Flyer not found in this group.")
 
-        try:
-            group_id = resolve_group(group_str)
-        except Exception as e:
-            return await message.reply(str(e))
-
-        try:
-            run_date = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
-            run_date = pytz.timezone(SCHED_TZ).localize(run_date)
-        except Exception as e:
-            return await message.reply("❌ Invalid date/time format. Use YYYY-MM-DD and HH:MM (24h).")
-
+        # Calculate first post time (today or tomorrow if time passed)
         now = datetime.now(pytz.timezone(SCHED_TZ))
-        if run_date < now and repeat == "once":
-            return await message.reply("❌ That date/time is in the past!")
+        hour, minute = map(int, time_str.split(":"))
+        run_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if run_time < now:
+            run_time += timedelta(days=1)
 
-        job_id = f"flyer_{flyer_name}_{group_id}_{run_date.strftime('%Y%m%d%H%M')}_{repeat}"
+        job_id = f"flyer_{flyer_name}_{group_id}_{run_time.strftime('%Y%m%d%H%M%S')}"
+        flyer_data = flyer.copy()
 
-        # SCHEDULE THE JOB using a lambda to call the coroutine properly!
+        # Schedule async closure (only in-memory, not Mongo store)
         if repeat == "daily":
             scheduler.add_job(
-                lambda: post_flyer_job(client, group_id, flyer_name, message.chat.id),
+                post_flyer_job(client, group_id, flyer_data),
                 "cron",
-                hour=run_date.hour,
-                minute=run_date.minute,
+                hour=hour,
+                minute=minute,
                 id=job_id,
                 replace_existing=True,
             )
         else:  # once
             scheduler.add_job(
-                lambda: post_flyer_job(client, group_id, flyer_name, message.chat.id),
+                post_flyer_job(client, group_id, flyer_data),
                 "date",
-                run_date=run_date,
+                run_date=run_time,
                 id=job_id,
                 replace_existing=True,
             )
 
         await message.reply(
-            f"✅ Scheduled flyer '{flyer_name}' to post in <code>{group_str}</code> at <b>{date_str} {time_str}</b> ({'daily' if repeat == 'daily' else 'once'}).\nJob ID: <code>{job_id}</code>",
-            parse_mode="html"
+            f"✅ Scheduled flyer '<b>{flyer_name}</b>' to post in <code>{group_id}</code> at <b>{time_str}</b> ({'daily' if repeat == 'daily' else 'once'}).<br>Job ID: <code>{job_id}</code>",
+            parse_mode="HTML"
         )
 
+    # --- List Scheduled Flyers ---
     @app.on_message(filters.command("listscheduled") & filters.group)
     async def listscheduled_handler(client, message: Message):
         jobs = scheduler.get_jobs()
@@ -116,9 +115,12 @@ def register(app):
             return await message.reply("No scheduled flyers.")
         lines = ["📅 Scheduled Flyers:"]
         for job in jobs:
-            lines.append(f"• {job.id} — Next run: {job.next_run_time}")
-        await message.reply("\n".join(lines))
+            trigger = job.trigger
+            when = getattr(trigger, "run_date", None) or getattr(trigger, "fields", None)
+            lines.append(f"• {job.id} — {when}")
+        await message.reply("\n".join(lines), parse_mode="HTML")
 
+    # --- Cancel Scheduled Flyer ---
     @app.on_message(filters.command("cancelflyer") & filters.group)
     async def cancelflyer_handler(client, message: Message):
         args = message.text.split(maxsplit=1)
@@ -129,4 +131,6 @@ def register(app):
         if not job:
             return await message.reply("No job found with that ID.")
         scheduler.remove_job(job_id)
-        await message.reply(f"❌ Scheduled flyer <code>{job_id}</code> canceled.", parse_mode="html")
+        await message.reply(f"❌ Scheduled flyer <code>{job_id}</code> canceled.", parse_mode="HTML")
+
+# Remember to call handlers.flyer_scheduler.register(app) in your main.py
