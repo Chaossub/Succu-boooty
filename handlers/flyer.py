@@ -1,5 +1,4 @@
 import os
-import logging
 from pymongo import MongoClient
 from pyrogram import filters
 from pyrogram.types import Message
@@ -11,21 +10,16 @@ mongo_client = MongoClient(MONGO_URI)
 db = mongo_client[MONGO_DB]
 flyers = db.flyers
 
-def is_admin(user_id, chat):
-    # Always allow the group creator (owner)
-    if user_id == chat.creator.id if hasattr(chat, "creator") else False:
-        return True
-    # Check for admin status in the chat
-    member = chat.get_member(user_id)
+async def is_admin(client, chat_id, user_id):
+    member = await client.get_chat_member(chat_id, user_id)
     return member.status in ("administrator", "creator")
 
 def admin_only(func):
-    async def wrapper(client, message: Message, *args, **kwargs):
+    async def wrapper(client, message: Message):
         if message.chat.type in [ChatType.GROUP, ChatType.SUPERGROUP]:
-            member = await client.get_chat_member(message.chat.id, message.from_user.id)
-            if member.status not in ("administrator", "creator"):
+            if not await is_admin(client, message.chat.id, message.from_user.id):
                 return await message.reply("❌ You must be an admin to use this command.")
-        return await func(client, message, *args, **kwargs)
+        return await func(client, message)
     return wrapper
 
 @admin_only
@@ -41,7 +35,6 @@ async def addflyer_handler(client, message: Message):
     if message.photo:
         photo_id = message.photo.file_id
 
-    # Save flyer (overwrite if exists)
     flyers.update_one(
         {"chat_id": chat_id, "name": name},
         {"$set": {"caption": caption, "photo_id": photo_id}},
@@ -115,8 +108,9 @@ async def listflyers_handler(client, message: Message):
     await message.reply("📋 <b>Flyers in this chat:</b>\n" + "\n".join(names))
 
 def register(app, scheduler=None):
-    app.add_handler(filters.command("addflyer")(addflyer_handler))
-    app.add_handler(filters.command("changeflyer")(changeflyer_handler))
-    app.add_handler(filters.command("deleteflyer")(deleteflyer_handler))
-    app.add_handler(filters.command("flyer")(flyer_handler))
-    app.add_handler(filters.command("listflyers")(listflyers_handler))
+    # Pyrogram v2: use .on_message, not add_handler!
+    app.on_message(filters.command("addflyer"))(addflyer_handler)
+    app.on_message(filters.command("changeflyer"))(changeflyer_handler)
+    app.on_message(filters.command("deleteflyer"))(deleteflyer_handler)
+    app.on_message(filters.command("flyer"))(flyer_handler)
+    app.on_message(filters.command("listflyers"))(listflyers_handler)
