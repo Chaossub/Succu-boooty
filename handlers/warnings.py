@@ -17,23 +17,27 @@ warnings_collection = db["warnings"]
 OWNER_ID = 6964994611
 
 def is_admin(chat_member, user_id):
-    if user_id == OWNER_ID:
-        return True
-    return chat_member and chat_member.status in ("administrator", "creator")
+    return user_id == OWNER_ID or (chat_member and chat_member.status in ("administrator", "creator"))
+
+async def get_target_user(client, message: Message):
+    # Prefer reply, fallback to /warn @username or /warn user_id
+    if message.reply_to_message:
+        return message.reply_to_message.from_user
+    parts = message.text.split(maxsplit=1)
+    if len(parts) == 2:
+        ref = parts[1].strip()
+        try:
+            if ref.startswith("@"):
+                return await client.get_users(ref)
+            elif ref.isdigit():
+                return await client.get_users(int(ref))
+        except Exception as e:
+            await message.reply(f"Could not find user: <code>{e}</code>")
+            return None
+    await message.reply("Reply to a user or use /warn @username or user_id")
+    return None
 
 def register(app):
-
-    async def get_target_user(message: Message):
-        if not message.reply_to_message:
-            await message.reply("You must reply to the user for this command.")
-            logging.info("Command failed: no reply_to_message")
-            return None
-        user = message.reply_to_message.from_user
-        if not user or not user.id:
-            await message.reply("Could not find the user to target.")
-            logging.info("Command failed: reply_to_message has no valid user")
-            return None
-        return user
 
     @app.on_message(filters.command("warn") & filters.group)
     async def warn_user(client, message: Message):
@@ -42,17 +46,15 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can issue warnings.")
             return
-
-        user = await get_target_user(message)
+        user = await get_target_user(client, message)
         if not user:
             return
-
         warnings_collection.update_one(
-            {"user_id": user.id},
+            {"chat_id": message.chat.id, "user_id": user.id},
             {"$inc": {"count": 1}},
             upsert=True
         )
-        doc = warnings_collection.find_one({"user_id": user.id})
+        doc = warnings_collection.find_one({"chat_id": message.chat.id, "user_id": user.id})
         count = doc.get("count", 1)
         await message.reply(f"{user.mention} has been warned. Total warnings: {count}")
 
@@ -63,8 +65,7 @@ def register(app):
             user = message.reply_to_message.from_user
         else:
             user = message.from_user
-
-        doc = warnings_collection.find_one({"user_id": user.id})
+        doc = warnings_collection.find_one({"chat_id": message.chat.id, "user_id": user.id})
         count = doc.get("count", 0) if doc else 0
         await message.reply(f"{user.mention} has {count} warning(s).")
 
@@ -75,10 +76,9 @@ def register(app):
         if not is_admin(chat_member, message.from_user.id):
             await message.reply("Only admins can reset warnings.")
             return
-
-        user = await get_target_user(message)
+        user = await get_target_user(client, message)
         if not user:
             return
-
-        warnings_collection.delete_one({"user_id": user.id})
+        warnings_collection.delete_one({"chat_id": message.chat.id, "user_id": user.id})
         await message.reply(f"{user.mention}'s warnings have been reset.")
+
