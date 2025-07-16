@@ -1,14 +1,11 @@
 import os
 import json
 import random
-
 from pyrogram import filters
 from pyrogram.types import Message
 
-# ─── Config ────────────────────────────────────────────────────────────
 SUMMON_PATH = "data/summon.json"
 SUPER_ADMIN_ID = 6964994611
-# ────────────────────────────────────────────────────────────────────────
 
 def load_summon():
     if not os.path.exists(SUMMON_PATH):
@@ -36,11 +33,11 @@ async def is_admin(client, chat_id: int, user_id: int) -> bool:
     try:
         member = await client.get_chat_member(chat_id, user_id)
         return member.status in ("administrator", "creator")
-    except:
+    except Exception as e:
+        # print(f"is_admin error: {e}")
         return False
 
 def register(app):
-
     @app.on_message(filters.command("trackall") & filters.group)
     async def track_all(client, message: Message):
         if not await is_admin(client, message.chat.id, message.from_user.id):
@@ -57,11 +54,10 @@ def register(app):
 
     @app.on_message(filters.command("summon") & filters.group)
     async def summon_one(client, message: Message):
-        # 1) If replying to someone, target that user
+        target = None
         if message.reply_to_message:
             target = message.reply_to_message.from_user
         else:
-            # 2) Otherwise expect “/summon @username”
             parts = message.text.split(maxsplit=1)
             if len(parts) < 2 or not parts[1].startswith("@"):
                 return await message.reply_text(
@@ -72,16 +68,12 @@ def register(app):
             username = parts[1].lstrip("@")
             try:
                 target = await client.get_users(username)
-            except:
-                return await message.reply_text("❌ Could not find that username.")
-
-        # 3) Verify they’re in the chat
+            except Exception as e:
+                return await message.reply_text(f"❌ Could not find that username.\n<code>{e}</code>")
         try:
             await client.get_chat_member(message.chat.id, target.id)
-        except:
-            return await message.reply_text("❌ That user is not in this group.")
-
-        # 4) Track & mention
+        except Exception as e:
+            return await message.reply_text(f"❌ That user is not in this group.\n<code>{e}</code>")
         add_user_to_tracking(message.chat.id, target.id)
         await message.reply_text(f"{target.mention}, you are being summoned!")
 
@@ -89,8 +81,6 @@ def register(app):
     async def summon_all(client, message: Message):
         key = str(message.chat.id)
         data = load_summon().get(key, [])
-
-        # Auto‐track if empty
         if not data:
             count = 0
             async for m in client.get_chat_members(message.chat.id):
@@ -101,16 +91,13 @@ def register(app):
             if count == 0:
                 return await message.reply_text("❌ Couldn't track any members.")
             await message.reply_text(f"✅ Auto-tracked {count} members!")
-
-        # Summon everyone
         mentions = []
         for uid in data:
             try:
                 user = await client.get_users(int(uid))
                 mentions.append(user.mention)
-            except:
+            except Exception as e:
                 continue
-
         if not mentions:
             return await message.reply_text("❌ No valid users to summon.")
         await message.reply_text(
@@ -126,25 +113,22 @@ def register(app):
             "🔥 Someone wants your attention!",
             "👠 It’s getting steamy in here!"
         ]
-        # Single-target (reply or @username)
-        if message.reply_to_message or (len(message.text.split()) > 1 and message.text.split()[1].startswith("@")):
-            # Reuse summon logic with flirty prefix
-            if message.reply_to_message:
-                target = message.reply_to_message.from_user
-            else:
-                username = message.text.split(maxsplit=1)[1].lstrip("@")
-                try:
-                    target = await client.get_users(username)
-                except:
-                    return await message.reply_text("❌ Could not find that username.")
+        target = None
+        if message.reply_to_message:
+            target = message.reply_to_message.from_user
+        elif len(message.text.split()) > 1 and message.text.split()[1].startswith("@"):
+            username = message.text.split(maxsplit=1)[1].lstrip("@")
+            try:
+                target = await client.get_users(username)
+            except Exception as e:
+                return await message.reply_text(f"❌ Could not find that username.\n<code>{e}</code>")
+        if target:
             try:
                 await client.get_chat_member(message.chat.id, target.id)
-            except:
-                return await message.reply_text("❌ That user is not in this group.")
+            except Exception as e:
+                return await message.reply_text(f"❌ That user is not in this group.\n<code>{e}</code>")
             add_user_to_tracking(message.chat.id, target.id)
-            await message.reply_text(f"{target.mention}, {random.choice(flirty_lines)}")
-            return
-
+            return await message.reply_text(f"{target.mention}, {random.choice(flirty_lines)}")
         # Fallback: summon all
         key = str(message.chat.id)
         data = load_summon().get(key, [])
@@ -155,7 +139,7 @@ def register(app):
             try:
                 user = await client.get_users(int(uid))
                 mentions.append(user.mention)
-            except:
+            except Exception:
                 continue
         await message.reply_text(
             random.choice(flirty_lines) + "\n" + " ".join(mentions),
@@ -179,18 +163,18 @@ def register(app):
             try:
                 user = await client.get_users(int(uid))
                 mentions.append(user.mention)
-            except:
+            except Exception:
                 continue
         await message.reply_text(
             random.choice(flirty_all_lines) + "\n" + " ".join(mentions),
             disable_web_page_preview=True
         )
 
-    @app.on_message(filters.command("cancel") & filters.group)
+    @app.on_message(filters.command("cancel"))
     async def cancel_setup(client, message: Message):
-        await message.reply_text("🚫 Federation setup canceled.")
+        await message.reply_text("🚫 Canceled.")
 
-    @app.on_message(filters.command("help") & filters.group)
+    @app.on_message(filters.command("help_summon"))
     async def help_cmd(client, message: Message):
         cmds = [
             "/trackall — track everyone",
@@ -201,6 +185,6 @@ def register(app):
             "/cancel — cancel setup"
         ]
         await message.reply_text(
-            "📜 Available commands:\n" + "\n".join(cmds),
+            "📜 Available summon commands:\n" + "\n".join(cmds),
             disable_web_page_preview=True
         )
