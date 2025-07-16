@@ -37,7 +37,7 @@ def register(app):
         if not is_admin(message.from_user.id):
             return await message.reply("❌ Only group admins/owner can schedule flyers.")
         args = message.text.split(maxsplit=4)
-        if len(args) < 4:
+        if len(args) < 5:
             return await message.reply(
                 "Usage: /scheduleflyer <flyer_name> <HH:MM> <once|daily> <group_id>\n"
                 "Example: /scheduleflyer tipping 18:00 daily -1001234567890"
@@ -70,6 +70,7 @@ def register(app):
 
         job_id = f"flyer_{flyer_name}_{group_id}_{run_time.strftime('%Y%m%d%H%M%S')}"
 
+        # Add the job
         if repeat == "daily":
             scheduler.add_job(
                 post_flyer,
@@ -80,7 +81,7 @@ def register(app):
                 replace_existing=True,
                 kwargs={},
             )
-        else:  # once
+        elif repeat == "once":
             scheduler.add_job(
                 post_flyer,
                 "date",
@@ -89,9 +90,12 @@ def register(app):
                 replace_existing=True,
                 kwargs={},
             )
+        else:
+            return await message.reply("Repeat must be 'once' or 'daily'.")
 
         await message.reply(
-            f"✅ Scheduled flyer '{flyer_name}' to post in {group_id} at {time_str} ({'daily' if repeat == 'daily' else 'once'}).\nJob ID: <code>{job_id}</code>"
+            f"✅ Scheduled flyer '<b>{flyer_name}</b>' to post in <code>{group_id}</code> at <b>{time_str}</b> (<b>{repeat}</b>).\n"
+            f"Job ID: <code>{job_id}</code>"
         )
 
     # --- List Scheduled Flyers ---
@@ -100,12 +104,23 @@ def register(app):
         jobs = scheduler.get_jobs()
         if not jobs:
             return await message.reply("No scheduled flyers.")
-        lines = ["📅 Scheduled Flyers:"]
+        lines = ["📅 <b>Scheduled Flyers:</b>"]
         for job in jobs:
             trigger = job.trigger
-            when = getattr(trigger, "run_date", None) or getattr(trigger, "fields", None)
-            lines.append(f"• {job.id} — {when}")
-        await message.reply("\n".join(lines))
+            if hasattr(trigger, "run_date"):  # "date" trigger
+                when = trigger.run_date.strftime("%Y-%m-%d %H:%M")
+            elif hasattr(trigger, "fields"):  # "cron" trigger
+                # for daily jobs
+                try:
+                    hour = trigger.fields[2]
+                    minute = trigger.fields[1]
+                    when = f"daily at {hour}h{minute}m"
+                except Exception:
+                    when = "daily"
+            else:
+                when = "?"
+            lines.append(f"• <code>{job.id}</code> — {when}")
+        await message.reply("\n".join(lines), parse_mode="html")
 
     # --- Cancel Scheduled Flyer ---
     @app.on_message(filters.command("cancelflyer") & filters.group)
@@ -118,7 +133,6 @@ def register(app):
         if not job:
             return await message.reply("No job found with that ID.")
         scheduler.remove_job(job_id)
-        await message.reply(f"❌ Scheduled flyer <code>{job_id}</code> canceled.")
+        await message.reply(f"❌ Scheduled flyer <code>{job_id}</code> canceled.", parse_mode="html")
 
-# Remember to call scheduled_flyer.register(app) in your main.py
-
+# Remember to call flyer_scheduler.register(app) in your main.py
