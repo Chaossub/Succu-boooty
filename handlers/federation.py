@@ -4,6 +4,11 @@ from pyrogram import filters
 from pyrogram.types import Message
 from pymongo import MongoClient
 
+"""
+Federation Handler for SuccuBot — Miss Rose-style federations, MongoDB-powered.
+Register with `register(app)`.
+"""
+
 logging.basicConfig(level=logging.INFO)
 
 MONGO_URI = os.getenv("MONGO_URI")
@@ -11,7 +16,7 @@ if not MONGO_URI:
     raise ValueError("MONGO_URI environment variable not set")
 
 mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["succubot"]  # lowercase db name
+db = mongo_client["succubot"]
 feds = db["federations"]
 groups = db["groups"]
 
@@ -30,7 +35,6 @@ def is_fed_admin(user_id, fed_id):
     return False
 
 def register(app):
-
     @app.on_message(filters.command("createfed") & filters.group)
     async def create_fed(client, message: Message):
         logging.info(f"/createfed by {message.from_user.id} in {message.chat.id}")
@@ -59,7 +63,6 @@ def register(app):
 
     @app.on_message(filters.command("fedlist") & filters.group)
     async def fed_list(client, message: Message):
-        logging.info(f"/fedlist by {message.from_user.id} in {message.chat.id}")
         fed_list = list(feds.find({}))
         if not fed_list:
             await message.reply("No federations found.")
@@ -301,4 +304,3 @@ def register(app):
                 except Exception:
                     text += f"- <code>{admin_id}</code>\n"
         await message.reply(text)
-
