@@ -1,5 +1,6 @@
-from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram import filters
+from pyrogram.types import Message, User, Chat, CallbackQuery
+from pyrogram import Client
 
 SUPER_ADMIN_ID = 6964994611
 
@@ -37,7 +38,7 @@ def register(app: Client):
         lines.append("/tease @user — Playful tease & earn XP")
 
         lines.append("\n📈 <b>XP & Leaderboard</b>")
-        lines.append("/naughty — Show your XP")
+        lines.append("/naughtystats — Show your XP")
         lines.append("/leaderboard — Show XP leaderboard")
 
         if admin:
@@ -60,13 +61,13 @@ def register(app: Client):
             lines.append("/renamefed <fed_id> <new_name> — Rename federation")
             lines.append("/addfedadmin <fed_id> <user> — Add fed admin")
             lines.append("/removefedadmin <fed_id> <user> — Remove fed admin")
-            lines.append("/listfeds — List federations")
+            lines.append("/fedlist — List federations")
             lines.append("/listfedgroups <fed_id> — List groups in federation")
-            lines.append("/listfedadmins <fed_id> — List federation admins")
-            lines.append("/fedban <fed_id> <user> — Federation ban")
-            lines.append("/fedunban <fed_id> <user> — Federation unban")
+            lines.append("/fedadmins <fed_id> — List federation admins")
+            lines.append("/fedban <user> — Federation ban")
+            lines.append("/fedunban <user> — Federation unban")
             lines.append("/fedcheck <user> — Check federation bans")
-            lines.append("/togglefedaction <fed_id> <kick|mute|off> — Toggle enforcement")
+            lines.append("/togglefedaction <kick|mute|off> — Toggle enforcement")
 
             lines.append("\n📂 <b>Flyers</b>")
             lines.append("/flyer <name> — Retrieve a flyer")
@@ -78,4 +79,6 @@ def register(app: Client):
             lines.append("/scheduletext <HH:MM> <group> <text> [daily|once] — Schedule text flyer")
             lines.append("/listscheduled — View scheduled flyers")
             lines.append("/cancelflyer <job_id> — Cancel a scheduled post")
-        await message.reply_text("\n".join(lines), disable_web_page_preview=True)
+
+        await message.reply("\n".join(lines), disable_web_page_preview=True)
+
