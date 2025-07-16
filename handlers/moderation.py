@@ -3,21 +3,17 @@ import random
 from pyrogram import filters
 from pyrogram.types import Message, ChatPermissions
 
-# ─── Monkey-patch to avoid the NoneType.to_bytes bug in Pyrogram 2.0.106 ───
+# Monkey-patch workaround for Pyrogram 2.0.106 "to_bytes" bug:
 from pyrogram.raw.types.chat_banned_rights import ChatBannedRights
-
 _orig_cbr_write = ChatBannedRights.write
 def _patched_cbr_write(self, *args, **kwargs):
-    # If until_date is falsy or None, force it to the 32-bit max timestamp
     if not getattr(self, "until_date", None):
         self.until_date = 2147483647
     return _orig_cbr_write(self, *args, **kwargs)
-
 ChatBannedRights.write = _patched_cbr_write
-# ────────────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='[%(asctime)s] %(levelname)s:%(name)s: %(message)s'
 )
 
@@ -32,6 +28,7 @@ FLIRTY_WARN_MESSAGES = [
 ]
 
 def is_admin(chat_member, user_id):
+    """Check if user is an admin or the hardwired owner."""
     return user_id == OWNER_ID or (chat_member and chat_member.status in ("administrator", "creator"))
 
 async def get_user(client, chat_id, identifier):
@@ -67,7 +64,6 @@ def register(app):
 
     @app.on_message(filters.command("warn") & filters.group)
     async def warn_user(client, message: Message):
-        logging.debug("‹WARN› from %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
             return await message.reply("❌ Only admins can warn.")
@@ -78,7 +74,6 @@ def register(app):
 
     @app.on_message(filters.command("flirtywarn") & filters.group)
     async def flirty_warn(client, message: Message):
-        logging.debug("‹FLIRTYWARN› from %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
             return await message.reply("❌ Only admins can flirty-warn.")
@@ -90,7 +85,6 @@ def register(app):
 
     @app.on_message(filters.command("mute") & filters.group)
     async def mute_user(client, message: Message):
-        logging.info("‹MUTE› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
             return await message.reply("❌ Only admins can mute.")
@@ -99,27 +93,17 @@ def register(app):
             return
         if user.is_bot or user.id == OWNER_ID or user.id == message.from_user.id:
             return await message.reply("❌ Cannot mute that user.")
-        perms = ChatPermissions(
-            can_send_messages=False,
-            can_send_media_messages=False,
-            can_send_other_messages=False,
-            can_add_web_page_previews=False,
-            can_change_info=False,
-            can_invite_users=False,
-            can_pin_messages=False,
-        )
-        logging.debug("Restricting %s indefinitely", user.id)
+        perms = ChatPermissions()
         await client.restrict_chat_member(
             chat_id=message.chat.id,
             user_id=user.id,
             permissions=perms,
-            until_date=None  # patched above to become 2147483647
+            until_date=None
         )
         await message.reply(f"{user.mention} has been muted indefinitely.")
 
     @app.on_message(filters.command("unmute") & filters.group)
     async def unmute_user(client, message: Message):
-        logging.info("‹UNMUTE› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
             return await message.reply("❌ Only admins can unmute.")
@@ -135,7 +119,6 @@ def register(app):
             can_invite_users=True,
             can_pin_messages=True,
         )
-        logging.debug("Lifting restrictions for %s", user.id)
         await client.restrict_chat_member(
             chat_id=message.chat.id,
             user_id=user.id,
@@ -146,7 +129,6 @@ def register(app):
 
     @app.on_message(filters.command("kick") & filters.group)
     async def kick_user(client, message: Message):
-        logging.info("‹KICK› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
             return await message.reply("❌ Only admins can kick.")
@@ -159,7 +141,6 @@ def register(app):
 
     @app.on_message(filters.command("ban") & filters.group)
     async def ban_user(client, message: Message):
-        logging.info("‹BAN› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
             return await message.reply("❌ Only admins can ban.")
@@ -171,20 +152,17 @@ def register(app):
 
     @app.on_message(filters.command("unban") & filters.group)
     async def unban_user(client, message: Message):
-        logging.info("‹UNBAN› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
             return await message.reply("❌ Only admins can unban.")
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2 or not parts[1].isdigit():
-            return await message.reply("Usage: /unban <user_id>")
-        user_id = int(parts[1])
-        await client.unban_chat_member(message.chat.id, user_id)
-        await message.reply(f"User <code>{user_id}</code> has been unbanned.")
+        user = await resolve_target(client, message)
+        if not user:
+            return
+        await client.unban_chat_member(message.chat.id, user.id)
+        await message.reply(f"{user.mention} has been unbanned from the group.")
 
     @app.on_message(filters.command("userinfo") & filters.group)
     async def userinfo(client, message: Message):
-        logging.info("‹USERINFO› %s in %s", message.from_user.id, message.chat.id)
         cm = await client.get_chat_member(message.chat.id, message.from_user.id)
         if not is_admin(cm, message.from_user.id):
             return await message.reply("❌ Only admins can use /userinfo.")
@@ -199,3 +177,4 @@ def register(app):
             f"Status: {info.status}\n"
         )
         await message.reply(text)
+
