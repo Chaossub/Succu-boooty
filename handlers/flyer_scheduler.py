@@ -15,16 +15,14 @@ mongo = MongoClient(MONGO_URI)
 db = mongo["flyer_db"]
 flyers = db.flyers
 
-SCHED_TZ = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")  # LA time!
+SCHED_TZ = os.getenv("SCHEDULER_TZ", "America/Los_Angeles")
 OWNER_ID = 6964994611
 ADMINS = [OWNER_ID]
 
 # --- ENV GROUP SHORTCUTS ---
-GROUP_SHORTCUTS = {
-    k: int(v) for k, v in os.environ.items() if k.endswith("_CHAT")
-}
+GROUP_SHORTCUTS = {k: int(v) for k, v in os.environ.items() if k.endswith("_CHAT")}
 
-# --- GLOBAL BOT CLIENT (set on register) ---
+# --- GLOBAL BOT CLIENT ---
 BOT_CLIENT = None
 
 def is_admin(user_id):
@@ -56,7 +54,6 @@ scheduler = AsyncIOScheduler(jobstores=jobstore, timezone=pytz.timezone(SCHED_TZ
 scheduler.start()
 
 def resolve_group_id(group_str):
-    """Allow passing int or shortcut like MODELS_CHAT."""
     try:
         return int(group_str)
     except ValueError:
@@ -64,12 +61,12 @@ def resolve_group_id(group_str):
 
 def register(app):
     global BOT_CLIENT
-    BOT_CLIENT = app  # Set global reference for jobs
+    BOT_CLIENT = app
 
     # --- Schedule a Flyer ---
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def scheduleflyer_handler(client, message: Message):
-        # Example usage: /scheduleflyer tipping 2025-07-16 15:10 once MODELS_CHAT
+        # /scheduleflyer tipping 2025-07-16 15:30 once MODELS_CHAT
         if not is_admin(message.from_user.id):
             return await message.reply("❌ Only group admins/owner can schedule flyers.")
 
@@ -92,17 +89,14 @@ def register(app):
         if not flyer:
             return await message.reply("❌ Flyer not found in this group.")
 
-        # Parse date & time with timezone
         try:
             sched_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
             sched_dt = pytz.timezone(SCHED_TZ).localize(sched_dt)
         except Exception:
             return await message.reply("❌ Invalid date/time format. Use YYYY-MM-DD HH:MM (24h)")
 
-        # Prepare job id (unique for flyer/group/date)
         job_id = f"flyer_{flyer_name}_{group_id}_{sched_dt.strftime('%Y%m%d%H%M')}"
 
-        # Schedule
         if repeat == "daily":
             scheduler.add_job(
                 post_flyer_job,
@@ -125,7 +119,7 @@ def register(app):
 
         await message.reply(
             f"✅ Scheduled flyer '{flyer_name}' to post in <code>{group_str}</code> at {sched_dt.strftime('%Y-%m-%d %H:%M')} ({'daily' if repeat == 'daily' else 'once'}).\nJob ID: <code>{job_id}</code>",
-            parse_mode="html"
+            parse_mode="HTML"
         )
 
     # --- List Scheduled Flyers ---
@@ -152,5 +146,4 @@ def register(app):
         if not job:
             return await message.reply("No job found with that ID.")
         scheduler.remove_job(job_id)
-        await message.reply(f"❌ Scheduled flyer <code>{job_id}</code> canceled.", parse_mode="html")
-
+        await message.reply(f"❌ Scheduled flyer <code>{job_id}</code> canceled.", parse_mode="HTML")
