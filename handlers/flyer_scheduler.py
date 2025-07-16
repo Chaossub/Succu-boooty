@@ -5,12 +5,16 @@ import pytz
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.mongodb import MongoDBJobStore
-from pyrogram import filters
-from pyrogram.types import Message
+from pyrogram import Client
 from pymongo import MongoClient
+from pyrogram.errors import RPCError
 
 # ---- CONFIG ----
 MONGO_URI = os.getenv("MONGO_URI")
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 mongo = MongoClient(MONGO_URI)
 db = mongo["flyer_db"]
 flyers = db.flyers
@@ -28,32 +32,46 @@ jobstore = {
 scheduler = AsyncIOScheduler(jobstores=jobstore, timezone=pytz.timezone(SCHED_TZ))
 scheduler.start()
 
-# --- Top-level for APScheduler serialization ---
-async def post_flyer(client, group_id, flyer_name, source_chat_id):
-    MONGO_URI = os.getenv("MONGO_URI")
-    mongo = MongoClient(MONGO_URI)
+# --- APSCHEDULER-SAFE: top-level, no client arg ---
+def post_flyer_job(group_id, flyer_name, source_chat_id):
+    """Standalone scheduled flyer post (runs in background via scheduler)."""
+    # Create a new client for each job
+    api_id = int(os.environ["API_ID"])
+    api_hash = os.environ["API_HASH"]
+    bot_token = os.environ["BOT_TOKEN"]
+    flyer_db_uri = os.environ["MONGO_URI"]
+
+    mongo = MongoClient(flyer_db_uri)
     db = mongo["flyer_db"]
     flyers = db.flyers
+
     flyer = flyers.find_one({"chat_id": source_chat_id, "name": flyer_name})
     if not flyer:
         logging.error(f"Flyer '{flyer_name}' not found for scheduled post.")
         return
-    try:
-        if flyer.get("photo_id"):
-            await client.send_photo(group_id, flyer["photo_id"], caption=flyer.get("caption", ""))
-        else:
-            await client.send_message(group_id, flyer.get("caption", ""))
-    except Exception as e:
-        logging.error(f"Flyer schedule failed: {e}")
+
+    # Start a new pyrogram client just for this job
+    app = Client("scheduler_bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token, parse_mode="html")
+    async def runner():
+        async with app:
+            try:
+                if flyer.get("photo_id"):
+                    await app.send_photo(group_id, flyer["photo_id"], caption=flyer.get("caption", ""))
+                else:
+                    await app.send_message(group_id, flyer.get("caption", ""))
+                logging.info(f"Sent scheduled flyer '{flyer_name}' to {group_id}")
+            except RPCError as e:
+                logging.error(f"Failed to send flyer: {e}")
+    import asyncio
+    asyncio.run(runner())
 
 def register(app):
-
     @app.on_message(filters.command("scheduleflyer") & filters.group)
-    async def scheduleflyer_handler(client, message: Message):
+    async def scheduleflyer_handler(client, message):
         if not is_admin(message.from_user.id):
             return await message.reply("❌ Only group admins/owner can schedule flyers.")
 
-        # Fixed: <name> <YYYY-MM-DD> <HH:MM> <once|daily> <alias|id>
+        # <name> <YYYY-MM-DD> <HH:MM> <once|daily> <alias|id>
         args = message.text.split(maxsplit=5)
         if len(args) < 6:
             return await message.reply(
@@ -95,22 +113,22 @@ def register(app):
 
         if repeat == "daily":
             scheduler.add_job(
-                post_flyer,
+                post_flyer_job,
                 "cron",
                 hour=hour,
                 minute=minute,
                 id=job_id,
                 replace_existing=True,
-                args=[client, group_id, flyer_name, message.chat.id]
+                args=[group_id, flyer_name, message.chat.id]
             )
         else:  # once
             scheduler.add_job(
-                post_flyer,
+                post_flyer_job,
                 "date",
                 run_date=run_time,
                 id=job_id,
                 replace_existing=True,
-                args=[client, group_id, flyer_name, message.chat.id]
+                args=[group_id, flyer_name, message.chat.id]
             )
 
         await message.reply(
@@ -118,7 +136,7 @@ def register(app):
         )
 
     @app.on_message(filters.command("listscheduled") & filters.group)
-    async def listscheduled_handler(client, message: Message):
+    async def listscheduled_handler(client, message):
         jobs = scheduler.get_jobs()
         if not jobs:
             return await message.reply("No scheduled flyers.")
@@ -130,7 +148,7 @@ def register(app):
         await message.reply("\n".join(lines))
 
     @app.on_message(filters.command("cancelflyer") & filters.group)
-    async def cancelflyer_handler(client, message: Message):
+    async def cancelflyer_handler(client, message):
         args = message.text.split(maxsplit=1)
         if len(args) < 2:
             return await message.reply("Usage: /cancelflyer <job_id>")
