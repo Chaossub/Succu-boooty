@@ -5,6 +5,7 @@ import pytz
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.mongodb import MongoDBJobStore
+from apscheduler.jobstores.base import JobLookupError
 from pyrogram import filters
 from pymongo import MongoClient
 
@@ -87,7 +88,10 @@ def register(app):
         job_id = f"flyer_{flyer_name}_{group_id}_{sched_dt.strftime('%Y%m%d%H%M')}"
 
         # Remove any duplicate jobs with this id
-        scheduler.remove_job(job_id, jobstore=None, silence=True)
+        try:
+            scheduler.remove_job(job_id)
+        except JobLookupError:
+            pass
 
         # APScheduler only allows top-level callables, so use our global async def post_flyer_job!
         if repeat == "daily":
@@ -139,5 +143,3 @@ def register(app):
             return await message.reply("No job found with that ID.")
         scheduler.remove_job(job_id)
         await message.reply(f"❌ Scheduled flyer <code>{job_id}</code> canceled.")
-
-# Don't forget to call handlers.flyer_scheduler.register(app) in main.py!
