@@ -22,6 +22,20 @@ ADMINS = [OWNER_ID]
 def is_admin(user_id):
     return user_id in ADMINS
 
+def resolve_group_id(group_arg: str):
+    # Support alias names as well as numeric IDs
+    try:
+        return int(group_arg)
+    except ValueError:
+        # Try env alias (e.g., MODELS_CHAT -> os.environ["MODELS_CHAT"])
+        alias = os.environ.get(group_arg)
+        if not alias:
+            raise ValueError(f"Group alias '{group_arg}' not found in environment variables.")
+        try:
+            return int(alias)
+        except Exception:
+            raise ValueError(f"Group alias '{group_arg}' is set, but not a valid integer Telegram group ID.")
+
 # ---- APSCHEDULER ----
 jobstore = {
     "default": MongoDBJobStore(client=mongo, database="flyer_db", collection="apscheduler_jobs")
@@ -39,17 +53,23 @@ def register(app):
         args = message.text.split(maxsplit=4)
         if len(args) < 5:
             return await message.reply(
-                "Usage: /scheduleflyer <flyer_name> <HH:MM> <once|daily> <group_id>\n"
-                "Example: /scheduleflyer tipping 18:00 daily -1001234567890"
+                "Usage: /scheduleflyer <flyer_name> <HH:MM> <once|daily> <group_id or GROUP_ALIAS>\n"
+                "Example: /scheduleflyer tipping 18:00 daily MODELS_CHAT"
             )
         flyer_name = args[1].strip().lower()
         time_str = args[2]
         repeat = args[3].lower()
-        group_id = int(args[4])
+        group_arg = args[4]
 
         flyer = flyers.find_one({"chat_id": message.chat.id, "name": flyer_name})
         if not flyer:
             return await message.reply("❌ Flyer not found in this group.")
+
+        # Support alias/shortcut for group ID
+        try:
+            group_id = resolve_group_id(group_arg)
+        except ValueError as e:
+            return await message.reply(str(e))
 
         # Calculate first post time (today or tomorrow if time passed)
         now = datetime.now(pytz.timezone(SCHED_TZ))
@@ -70,7 +90,6 @@ def register(app):
 
         job_id = f"flyer_{flyer_name}_{group_id}_{run_time.strftime('%Y%m%d%H%M%S')}"
 
-        # Add the job
         if repeat == "daily":
             scheduler.add_job(
                 post_flyer,
@@ -95,7 +114,8 @@ def register(app):
 
         await message.reply(
             f"✅ Scheduled flyer '<b>{flyer_name}</b>' to post in <code>{group_id}</code> at <b>{time_str}</b> (<b>{repeat}</b>).\n"
-            f"Job ID: <code>{job_id}</code>"
+            f"Job ID: <code>{job_id}</code>",
+            parse_mode="html"
         )
 
     # --- List Scheduled Flyers ---
@@ -110,7 +130,6 @@ def register(app):
             if hasattr(trigger, "run_date"):  # "date" trigger
                 when = trigger.run_date.strftime("%Y-%m-%d %H:%M")
             elif hasattr(trigger, "fields"):  # "cron" trigger
-                # for daily jobs
                 try:
                     hour = trigger.fields[2]
                     minute = trigger.fields[1]
@@ -134,5 +153,3 @@ def register(app):
             return await message.reply("No job found with that ID.")
         scheduler.remove_job(job_id)
         await message.reply(f"❌ Scheduled flyer <code>{job_id}</code> canceled.", parse_mode="html")
-
-# Remember to call flyer_scheduler.register(app) in your main.py
