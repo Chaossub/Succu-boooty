@@ -3,13 +3,12 @@ from pyrogram import filters
 from pyrogram.types import Message
 
 def register(app):
-
     @app.on_message(filters.command("bite") & filters.group)
     async def bite(client, message: Message):
         from handlers.xp import add_xp
         user = message.from_user
         gain = random.randint(1, 5)
-        add_xp(message.chat.id, user.id, gain)
+        await add_xp(message.chat.id, user.id, gain)
         await message.reply(f"{user.mention} bites back! +{gain} XP")
 
     @app.on_message(filters.command("spank") & filters.group)
@@ -17,7 +16,7 @@ def register(app):
         from handlers.xp import add_xp
         user = message.from_user
         gain = random.randint(1, 5)
-        add_xp(message.chat.id, user.id, gain)
+        await add_xp(message.chat.id, user.id, gain)
         await message.reply(f"{user.mention} gets spanked! +{gain} XP")
 
     @app.on_message(filters.command("tease") & filters.group)
@@ -25,13 +24,13 @@ def register(app):
         from handlers.xp import add_xp
         user = message.from_user
         gain = random.randint(1, 5)
-        add_xp(message.chat.id, user.id, gain)
+        await add_xp(message.chat.id, user.id, gain)
         await message.reply(f"{user.mention} teased! +{gain} XP")
 
     @app.on_message(filters.command("naughtystats") & filters.group)
     async def naughtystats(client, message: Message):
         from handlers.xp import get_leaderboard
-        board = get_leaderboard(message.chat.id)
+        board = await get_leaderboard(message.chat.id)
         if not board:
             return await message.reply("No stats recorded yet.")
         lines = ["📊 Naughty XP Stats:"]
