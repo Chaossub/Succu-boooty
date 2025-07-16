@@ -7,15 +7,12 @@ from pyrogram.types import Message, User
 
 logger = logging.getLogger(__name__)
 
-# 1) Load Mongo URI
 MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
 if not MONGO_URI:
     raise RuntimeError("Please set MONGO_URI or MONGODB_URI in your environment")
 
-# 2) Pick your DB name
 DB_NAME = os.getenv("MONGO_DB", "succubot")
 
-# 3) Connect to Mongo
 mongo = MongoClient(MONGO_URI)
 db = mongo[DB_NAME]
 xp_collection = db["xp"]
@@ -47,11 +44,11 @@ def register(app):
 
     @app.on_message(filters.command(["bite", "spank", "tease"]) & filters.group)
     async def xp_command(client, message: Message):
-        cmd = message.text.split()[0][1:].lower()
+        cmd = message.command[0].lstrip("/").lower()
         user = message.from_user
         gain = random.randint(1, 5)
         add_xp(message.chat.id, user.id, gain)
-        await message.reply_text(f"{user.mention} got +{gain} XP for **{cmd}**!")
+        await message.reply_text(f"{user.mention} got +{gain} XP for <b>{cmd}</b>!", parse_mode="html")
 
     @app.on_message(filters.command("naughtystats") & filters.group)
     async def naughtystats(client, message: Message):
@@ -63,7 +60,6 @@ def register(app):
             uid = doc["user_id"]
             xp = doc["xp"]
             try:
-                # use the mention property to get an HTML link with their name
                 user: User = await client.get_users(uid)
                 mention = user.mention
             except Exception as e:
