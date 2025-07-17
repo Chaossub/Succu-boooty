@@ -10,8 +10,14 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 scheduler.start()
 
+app_instance = None  # Will be set by main.py on startup
+
+def set_app_instance(app):
+    global app_instance
+    app_instance = app
+
+# Helper: Get group id from environment variable or shortcut
 def resolve_group_id(group_str):
-    # Supports both -100... and ENV ALIAS
     if group_str.startswith("-100"):
         return int(group_str)
     group_id = os.environ.get(group_str)
@@ -24,19 +30,23 @@ def resolve_group_id(group_str):
     logger.error(f"Group alias '{group_str}' not found in environment variables.")
     return None
 
-async def post_flyer_job(client, group_id, flyer_name, request_chat_id):
+# The scheduled job
+async def post_flyer_job(group_id, flyer_name, request_chat_id):
     logger.info(f"Running post_flyer_job: group_id={group_id}, flyer_name={flyer_name}")
+    if app_instance is None:
+        logger.error("app_instance is None in post_flyer_job! Cannot send flyer.")
+        return
     flyer = get_flyer_by_name(group_id, flyer_name)
     if not flyer:
         logger.error(f"Flyer '{flyer_name}' not found for group {group_id}")
-        await client.send_message(
+        await app_instance.send_message(
             chat_id=request_chat_id,
             text=f"❌ Flyer '{flyer_name}' not found for group {group_id}."
         )
         return
     file_id, caption = flyer
     try:
-        await client.send_photo(
+        await app_instance.send_photo(
             chat_id=group_id,
             photo=file_id,
             caption=caption or ""
@@ -44,12 +54,14 @@ async def post_flyer_job(client, group_id, flyer_name, request_chat_id):
         logger.info(f"Posted flyer '{flyer_name}' to group {group_id}")
     except Exception as e:
         logger.error(f"Failed to post flyer: {e}")
-        await client.send_message(
+        await app_instance.send_message(
             chat_id=request_chat_id,
             text=f"❌ Failed to post flyer: {e}"
         )
 
 def register(app):
+    set_app_instance(app)
+
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def scheduleflyer_handler(client, message):
         logger.info(f"Got /scheduleflyer from {message.from_user.id} in {message.chat.id}: {message.text}")
@@ -60,6 +72,7 @@ def register(app):
                 return await message.reply("❌ Usage: <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>")
 
             flyer_name, date_str, time_str, repeat, group_str = args[1:6]
+
             group_id = resolve_group_id(group_str)
             if not group_id:
                 return await message.reply(f"❌ Invalid group_id or group shortcut: {group_str}")
@@ -84,12 +97,11 @@ def register(app):
             except Exception as e:
                 logger.info(f"No existing job to remove for job_id={job_id}: {e}")
 
-            # Only ONCE scheduling for now (expand as needed)
             scheduler.add_job(
                 post_flyer_job,
                 "date",
                 run_date=dt,
-                args=[client, group_id, flyer_name, message.chat.id],
+                args=[group_id, flyer_name, message.chat.id],
                 id=job_id,
                 replace_existing=True,
                 misfire_grace_time=300
