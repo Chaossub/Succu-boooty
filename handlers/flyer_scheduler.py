@@ -1,15 +1,16 @@
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pyrogram import Client, filters
-from handlers.flyer import get_flyer_by_name  # Assumes this returns (file_id, caption) or None
+from pyrogram import filters
+from handlers.flyer import get_flyer_by_name
 import pytz
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 scheduler.start()
 
+# Helper: Get group id from environment variable or shortcut
 def resolve_group_id(group_str):
     if group_str.startswith("-100"):
         return int(group_str)
@@ -23,70 +24,81 @@ def resolve_group_id(group_str):
     logger.error(f"Group alias '{group_str}' not found in environment variables.")
     return None
 
-async def post_flyer_job(group_id, flyer_name, request_chat_id):
+# The scheduled job now receives the running bot instance!
+async def post_flyer_job(client, group_id, flyer_name, request_chat_id):
     logger.info(f"Running post_flyer_job: group_id={group_id}, flyer_name={flyer_name}")
-    from pyrogram import idle
-    app = Client("SuccuBot")  # <-- Use your bot's name here!
-    async with app:
-        flyer = get_flyer_by_name(group_id, flyer_name)
-        if not flyer:
-            logger.error(f"Flyer '{flyer_name}' not found for group {group_id}")
-            await app.send_message(
-                chat_id=request_chat_id,
-                text=f"❌ Flyer '{flyer_name}' not found for group {group_id}."
-            )
-            return
-        file_id, caption = flyer
-        try:
-            await app.send_photo(
-                chat_id=group_id,
-                photo=file_id,
-                caption=caption or ""
-            )
-            logger.info(f"Posted flyer '{flyer_name}' to group {group_id}")
-        except Exception as e:
-            logger.error(f"Failed to post flyer: {e}")
-            await app.send_message(
-                chat_id=request_chat_id,
-                text=f"❌ Failed to post flyer: {e}"
-            )
+    flyer = get_flyer_by_name(group_id, flyer_name)
+    if not flyer:
+        logger.error(f"Flyer '{flyer_name}' not found for group {group_id}")
+        await client.send_message(
+            chat_id=request_chat_id,
+            text=f"❌ Flyer '{flyer_name}' not found for group {group_id}."
+        )
+        return
+    file_id, caption = flyer
+    try:
+        await client.send_photo(
+            chat_id=group_id,
+            photo=file_id,
+            caption=caption or ""
+        )
+        logger.info(f"Posted flyer '{flyer_name}' to group {group_id}")
+    except Exception as e:
+        logger.error(f"Failed to post flyer: {e}")
+        await client.send_message(
+            chat_id=request_chat_id,
+            text=f"❌ Failed to post flyer: {e}"
+        )
 
 def register(app):
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def scheduleflyer_handler(client, message):
         logger.info(f"Got /scheduleflyer from {message.from_user.id} in {message.chat.id}: {message.text}")
+
+        # ADMIN CHECK: Only allow you to use this
+        if message.from_user.id != 6964994611:
+            return await message.reply("❌ Only my owner can schedule flyers.")
+
         try:
             args = message.text.split()
             if len(args) < 5:
                 return await message.reply("❌ Usage: <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>")
+
             flyer_name, date_str, time_str, repeat, group_str = args[1:6]
             group_id = resolve_group_id(group_str)
             if not group_id:
                 return await message.reply(f"❌ Invalid group_id or group shortcut: {group_str}")
+
             tz_str = os.environ.get("SCHEDULER_TZ", "America/Los_Angeles")
             try:
                 tz = pytz.timezone(tz_str)
             except Exception:
                 tz = pytz.timezone("America/Los_Angeles")
+
             try:
                 dt = tz.localize(datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M"))
             except Exception as e:
                 return await message.reply(f"❌ Invalid date/time format: {e}")
+
             job_id = f"flyer_{flyer_name}_{group_id}_{dt.strftime('%Y%m%d%H%M%S')}"
             logger.info(f"Scheduling flyer: {flyer_name} to {group_id} at {dt} | job_id={job_id}")
+
+            # Remove existing job with same id, if any
             try:
                 scheduler.remove_job(job_id)
             except Exception as e:
                 logger.info(f"No existing job to remove for job_id={job_id}: {e}")
+
             scheduler.add_job(
                 post_flyer_job,
                 "date",
                 run_date=dt,
-                args=[group_id, flyer_name, message.chat.id],
+                args=[client, group_id, flyer_name, message.chat.id],
                 id=job_id,
                 replace_existing=True,
                 misfire_grace_time=300
             )
+
             await message.reply(
                 f"✅ Scheduled flyer '{flyer_name}' to post in {group_str} at {dt} ({repeat}).\nJob ID: {job_id}"
             )
