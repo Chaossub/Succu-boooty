@@ -1,16 +1,17 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import filters
-from handlers.flyer import get_flyer_by_name
 import pytz
+
+from handlers.flyer import get_flyer_by_name
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 scheduler.start()
 
-# Helper: Get group id from environment variable or shortcut
+# Helper: Get group id from env var or shortcut
 def resolve_group_id(group_str):
     if group_str.startswith("-100"):
         return int(group_str)
@@ -24,45 +25,38 @@ def resolve_group_id(group_str):
     logger.error(f"Group alias '{group_str}' not found in environment variables.")
     return None
 
-# The scheduled job now receives the running bot instance!
-async def post_flyer_job(client, group_id, flyer_name, request_chat_id):
+# The scheduled job (note: must receive `app` as param from main.py)
+async def post_flyer_job(app, group_id, flyer_name, request_chat_id):
     logger.info(f"Running post_flyer_job: group_id={group_id}, flyer_name={flyer_name}")
     flyer = get_flyer_by_name(group_id, flyer_name)
     if not flyer:
-        logger.error(f"Flyer '{flyer_name}' not found for group {group_id}")
-        await client.send_message(
-            chat_id=request_chat_id,
-            text=f"❌ Flyer '{flyer_name}' not found for group {group_id}."
-        )
+        await app.send_message(chat_id=request_chat_id, text=f"❌ Flyer '{flyer_name}' not found for group {group_id}.")
         return
-    file_id, caption = flyer
+    flyer_file_path, caption = flyer
     try:
-        await client.send_photo(
+        await app.send_photo(
             chat_id=group_id,
-            photo=file_id,
+            photo=flyer_file_path,
             caption=caption or ""
         )
         logger.info(f"Posted flyer '{flyer_name}' to group {group_id}")
     except Exception as e:
         logger.error(f"Failed to post flyer: {e}")
-        await client.send_message(
-            chat_id=request_chat_id,
-            text=f"❌ Failed to post flyer: {e}"
-        )
+        await app.send_message(chat_id=request_chat_id, text=f"❌ Failed to post flyer: {e}")
 
 def register(app):
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def scheduleflyer_handler(client, message):
-        logger.info(f"Got /scheduleflyer from {message.from_user.id} in {message.chat.id}: {message.text}")
-
-        # ADMIN CHECK: Only allow you to use this
-        if message.from_user.id != 6964994611:
-            return await message.reply("❌ Only my owner can schedule flyers.")
+        user_id = message.from_user.id
+        # Only allow admins or hardwired owner
+        if not await is_admin_or_owner(client, message.chat.id, user_id):
+            return await message.reply("❌ Only admins can schedule flyers.")
+        logger.info(f"Got /scheduleflyer from {user_id} in {message.chat.id}: {message.text}")
 
         try:
             args = message.text.split()
             if len(args) < 5:
-                return await message.reply("❌ Usage: <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>")
+                return await message.reply("❌ Usage: /scheduleflyer <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>")
 
             flyer_name, date_str, time_str, repeat, group_str = args[1:6]
             group_id = resolve_group_id(group_str)
@@ -89,6 +83,7 @@ def register(app):
             except Exception as e:
                 logger.info(f"No existing job to remove for job_id={job_id}: {e}")
 
+            # Only ONCE scheduling for now (expand as needed)
             scheduler.add_job(
                 post_flyer_job,
                 "date",
@@ -107,3 +102,9 @@ def register(app):
             await message.reply(
                 f"❌ Error: {e}"
             )
+
+async def is_admin_or_owner(client, chat_id, user_id):
+    if user_id == 6964994611:
+        return True
+    member = await client.get_chat_member(chat_id, user_id)
+    return member.status in ("administrator", "creator")
