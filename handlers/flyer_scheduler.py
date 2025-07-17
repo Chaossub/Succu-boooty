@@ -3,19 +3,14 @@ import logging
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import Client, filters
-from handlers.flyer import get_flyer_by_name  # Should return (file_id, caption) or None
+from handlers.flyer import get_flyer_by_name
 import pytz
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 scheduler.start()
 
-# --- Config ---
-OWNER_ID = 6964994611  # Hardcoded admin
-ADMINS = [OWNER_ID]
-
-def is_admin(user_id):
-    return user_id in ADMINS
+ADMIN_IDS = {6964994611}  # Add your Telegram user ID(s) here
 
 # Helper: Get group id from environment variable or shortcut
 def resolve_group_id(group_str):
@@ -32,56 +27,59 @@ def resolve_group_id(group_str):
     return None
 
 # The scheduled job
-async def post_flyer_job(app, group_id, flyer_name, request_chat_id):
+async def post_flyer_job(group_id, flyer_name, request_chat_id):
     logger.info(f"Running post_flyer_job: group_id={group_id}, flyer_name={flyer_name}")
+    # Use the current global Client instance (set via main.py or pass as argument if refactored)
+    from pyrogram import idle
+    app = Client.get_current()
     flyer = get_flyer_by_name(group_id, flyer_name)
     if not flyer:
         logger.error(f"Flyer '{flyer_name}' not found for group {group_id}")
-        try:
-            await app.send_message(
-                chat_id=request_chat_id,
-                text=f"❌ Flyer '{flyer_name}' not found for group {group_id}."
-            )
-        except Exception as e:
-            logger.error(f"Failed to send flyer-not-found message: {e}")
+        await app.send_message(
+            chat_id=request_chat_id,
+            text=f"❌ Flyer '{flyer_name}' not found for group <code>{group_id}</code>.",
+            parse_mode="html"
+        )
         return
     file_id, caption = flyer
     try:
+        # Ensure dialog is loaded
+        await app.get_chat(group_id)
         await app.send_photo(
             chat_id=group_id,
             photo=file_id,
-            caption=caption or ""
+            caption=caption or "",
+            parse_mode="html"
         )
         logger.info(f"Posted flyer '{flyer_name}' to group {group_id}")
     except Exception as e:
         logger.error(f"Failed to post flyer: {e}")
-        try:
-            await app.send_message(
-                chat_id=request_chat_id,
-                text=f"❌ Failed to post flyer: {e}"
-            )
-        except Exception as ee:
-            logger.error(f"Failed to send error message: {ee}")
+        await app.send_message(
+            chat_id=request_chat_id,
+            text=f"❌ Failed to post flyer: <code>{e}</code>",
+            parse_mode="html"
+        )
 
-# Register handler
 def register(app):
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def scheduleflyer_handler(client, message):
         logger.info(f"Got /scheduleflyer from {message.from_user.id} in {message.chat.id}: {message.text}")
 
-        if not is_admin(message.from_user.id):
-            return await message.reply("❌ Only the owner can schedule flyers.")
+        # Admin-only restriction
+        if message.from_user.id not in ADMIN_IDS:
+            await message.reply("❌ Only admins can use this command.", parse_mode="html")
+            logger.warning(f"Unauthorized /scheduleflyer attempt by {message.from_user.id}")
+            return
 
         try:
             args = message.text.split()
-            if len(args) < 6:
-                return await message.reply("❌ Usage: /scheduleflyer <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>")
+            if len(args) < 5:
+                return await message.reply("❌ Usage: <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>", parse_mode="html")
 
             flyer_name, date_str, time_str, repeat, group_str = args[1:6]
-
             group_id = resolve_group_id(group_str)
             if not group_id:
-                return await message.reply(f"❌ Invalid group_id or group shortcut: {group_str}")
+                return await message.reply(f"❌ Invalid group_id or group shortcut: <code>{group_str}</code>", parse_mode="html")
 
             tz_str = os.environ.get("SCHEDULER_TZ", "America/Los_Angeles")
             try:
@@ -92,7 +90,7 @@ def register(app):
             try:
                 dt = tz.localize(datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M"))
             except Exception as e:
-                return await message.reply(f"❌ Invalid date/time format: {e}")
+                return await message.reply(f"❌ Invalid date/time format: <code>{e}</code>", parse_mode="html")
 
             job_id = f"flyer_{flyer_name}_{group_id}_{dt.strftime('%Y%m%d%H%M%S')}"
             logger.info(f"Scheduling flyer: {flyer_name} to {group_id} at {dt} | job_id={job_id}")
@@ -108,48 +106,19 @@ def register(app):
                 post_flyer_job,
                 "date",
                 run_date=dt,
-                args=[app, group_id, flyer_name, message.chat.id],
+                args=[group_id, flyer_name, message.chat.id],
                 id=job_id,
                 replace_existing=True,
                 misfire_grace_time=300
             )
 
             await message.reply(
-                f"✅ Scheduled flyer '{flyer_name}' to post in {group_str} at {dt} ({repeat}).\nJob ID: {job_id}"
+                f"✅ Scheduled flyer '<b>{flyer_name}</b>' to post in <code>{group_str}</code> at <b>{dt}</b> ({repeat}).\nJob ID: <code>{job_id}</code>",
+                parse_mode="html"
             )
         except Exception as e:
             logger.error(f"Error scheduling flyer:\n{e}", exc_info=True)
             await message.reply(
-                f"❌ Error: {e}"
+                f"❌ Error: <code>{e}</code>",
+                parse_mode="html"
             )
-
-    # Optional: /listscheduled command
-    @app.on_message(filters.command("listscheduled") & filters.group)
-    async def listscheduled_handler(client, message):
-        if not is_admin(message.from_user.id):
-            return await message.reply("❌ Only the owner can view scheduled flyers.")
-        jobs = scheduler.get_jobs()
-        if not jobs:
-            return await message.reply("No scheduled flyers.")
-        lines = ["📅 Scheduled Flyers:"]
-        for job in jobs:
-            run_time = getattr(job.trigger, "run_date", None) or getattr(job.trigger, "fields", None)
-            lines.append(f"• {job.id} — {run_time}")
-        await message.reply("\n".join(lines))
-
-    # Optional: /cancelflyer <job_id> command
-    @app.on_message(filters.command("cancelflyer") & filters.group)
-    async def cancelflyer_handler(client, message):
-        if not is_admin(message.from_user.id):
-            return await message.reply("❌ Only the owner can cancel scheduled flyers.")
-        args = message.text.split(maxsplit=1)
-        if len(args) < 2:
-            return await message.reply("Usage: /cancelflyer <job_id>")
-        job_id = args[1].strip()
-        try:
-            scheduler.remove_job(job_id)
-            await message.reply(f"❌ Scheduled flyer {job_id} canceled.")
-        except Exception as e:
-            await message.reply(f"No job found with that ID. {e}")
-
-# End of file
