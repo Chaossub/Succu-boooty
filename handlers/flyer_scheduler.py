@@ -1,17 +1,17 @@
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pyrogram import Client, filters
-from handlers.flyer import get_flyer_by_name  # Assumes this returns (file_id, caption) or None
+from pyrogram import filters
+from handlers.flyer import get_flyer_by_name
 import pytz
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 scheduler.start()
 
-# Helper: Get group id from environment variable or shortcut
 def resolve_group_id(group_str):
+    # Supports both -100... and ENV ALIAS
     if group_str.startswith("-100"):
         return int(group_str)
     group_id = os.environ.get(group_str)
@@ -24,21 +24,19 @@ def resolve_group_id(group_str):
     logger.error(f"Group alias '{group_str}' not found in environment variables.")
     return None
 
-# The scheduled job
-async def post_flyer_job(group_id, flyer_name, request_chat_id):
+async def post_flyer_job(client, group_id, flyer_name, request_chat_id):
     logger.info(f"Running post_flyer_job: group_id={group_id}, flyer_name={flyer_name}")
-    app = Client.get_current()
     flyer = get_flyer_by_name(group_id, flyer_name)
     if not flyer:
         logger.error(f"Flyer '{flyer_name}' not found for group {group_id}")
-        await app.send_message(
+        await client.send_message(
             chat_id=request_chat_id,
             text=f"❌ Flyer '{flyer_name}' not found for group {group_id}."
         )
         return
     file_id, caption = flyer
     try:
-        await app.send_photo(
+        await client.send_photo(
             chat_id=group_id,
             photo=file_id,
             caption=caption or ""
@@ -46,12 +44,11 @@ async def post_flyer_job(group_id, flyer_name, request_chat_id):
         logger.info(f"Posted flyer '{flyer_name}' to group {group_id}")
     except Exception as e:
         logger.error(f"Failed to post flyer: {e}")
-        await app.send_message(
+        await client.send_message(
             chat_id=request_chat_id,
             text=f"❌ Failed to post flyer: {e}"
         )
 
-# /scheduleflyer tipping 2025-07-16 15:56 once MODELS_CHAT
 def register(app):
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def scheduleflyer_handler(client, message):
@@ -63,7 +60,6 @@ def register(app):
                 return await message.reply("❌ Usage: <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>")
 
             flyer_name, date_str, time_str, repeat, group_str = args[1:6]
-
             group_id = resolve_group_id(group_str)
             if not group_id:
                 return await message.reply(f"❌ Invalid group_id or group shortcut: {group_str}")
@@ -93,7 +89,7 @@ def register(app):
                 post_flyer_job,
                 "date",
                 run_date=dt,
-                args=[group_id, flyer_name, message.chat.id],
+                args=[client, group_id, flyer_name, message.chat.id],
                 id=job_id,
                 replace_existing=True,
                 misfire_grace_time=300
