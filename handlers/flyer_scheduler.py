@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 scheduler.start()
 
+# Helper: Get group id from environment variable or shortcut
 def resolve_group_id(group_str):
     if group_str.startswith("-100"):
         return int(group_str)
@@ -26,14 +27,13 @@ def resolve_group_id(group_str):
 # The scheduled job
 async def post_flyer_job(group_id, flyer_name, request_chat_id):
     logger.info(f"Running post_flyer_job: group_id={group_id}, flyer_name={flyer_name}")
-    app = Client.get_running()  # Use get_running in Pyrogram 2.x!
+    app = Client.get_current()
     flyer = get_flyer_by_name(group_id, flyer_name)
     if not flyer:
         logger.error(f"Flyer '{flyer_name}' not found for group {group_id}")
         await app.send_message(
             chat_id=request_chat_id,
-            text=f"❌ Flyer '{flyer_name}' not found for group <code>{group_id}</code>.",
-            parse_mode="HTML"
+            text=f"❌ Flyer '{flyer_name}' not found for group {group_id}."
         )
         return
     file_id, caption = flyer
@@ -41,18 +41,17 @@ async def post_flyer_job(group_id, flyer_name, request_chat_id):
         await app.send_photo(
             chat_id=group_id,
             photo=file_id,
-            caption=caption or "",
-            parse_mode="HTML"
+            caption=caption or ""
         )
         logger.info(f"Posted flyer '{flyer_name}' to group {group_id}")
     except Exception as e:
         logger.error(f"Failed to post flyer: {e}")
         await app.send_message(
             chat_id=request_chat_id,
-            text=f"❌ Failed to post flyer: <code>{e}</code>",
-            parse_mode="HTML"
+            text=f"❌ Failed to post flyer: {e}"
         )
 
+# /scheduleflyer tipping 2025-07-16 15:56 once MODELS_CHAT
 def register(app):
     @app.on_message(filters.command("scheduleflyer") & filters.group)
     async def scheduleflyer_handler(client, message):
@@ -61,13 +60,13 @@ def register(app):
         try:
             args = message.text.split()
             if len(args) < 5:
-                return await message.reply("❌ Usage: <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>", parse_mode="HTML")
+                return await message.reply("❌ Usage: <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>")
 
             flyer_name, date_str, time_str, repeat, group_str = args[1:6]
 
             group_id = resolve_group_id(group_str)
             if not group_id:
-                return await message.reply(f"❌ Invalid group_id or group shortcut: <code>{group_str}</code>", parse_mode="HTML")
+                return await message.reply(f"❌ Invalid group_id or group shortcut: {group_str}")
 
             tz_str = os.environ.get("SCHEDULER_TZ", "America/Los_Angeles")
             try:
@@ -78,7 +77,7 @@ def register(app):
             try:
                 dt = tz.localize(datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M"))
             except Exception as e:
-                return await message.reply(f"❌ Invalid date/time format: <code>{e}</code>", parse_mode="HTML")
+                return await message.reply(f"❌ Invalid date/time format: {e}")
 
             job_id = f"flyer_{flyer_name}_{group_id}_{dt.strftime('%Y%m%d%H%M%S')}"
             logger.info(f"Scheduling flyer: {flyer_name} to {group_id} at {dt} | job_id={job_id}")
@@ -89,6 +88,7 @@ def register(app):
             except Exception as e:
                 logger.info(f"No existing job to remove for job_id={job_id}: {e}")
 
+            # Only ONCE scheduling for now (expand as needed)
             scheduler.add_job(
                 post_flyer_job,
                 "date",
@@ -100,12 +100,10 @@ def register(app):
             )
 
             await message.reply(
-                f"✅ Scheduled flyer '<b>{flyer_name}</b>' to post in <code>{group_str}</code> at <b>{dt}</b> ({repeat}).\nJob ID: <code>{job_id}</code>",
-                parse_mode="HTML"
+                f"✅ Scheduled flyer '{flyer_name}' to post in {group_str} at {dt} ({repeat}).\nJob ID: {job_id}"
             )
         except Exception as e:
             logger.error(f"Error scheduling flyer:\n{e}", exc_info=True)
             await message.reply(
-                f"❌ Error: <code>{e}</code>",
-                parse_mode="HTML"
+                f"❌ Error: {e}"
             )
