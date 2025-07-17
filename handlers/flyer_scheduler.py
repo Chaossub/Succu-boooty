@@ -1,18 +1,15 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import Client, filters
-from handlers.flyer import get_flyer_by_name
+from handlers.flyer import get_flyer_by_name  # Assumes this returns (file_id, caption) or None
 import pytz
 
 logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 scheduler.start()
 
-ADMIN_IDS = {6964994611}  # Add your Telegram user ID(s) here
-
-# Helper: Get group id from environment variable or shortcut
 def resolve_group_id(group_str):
     if group_str.startswith("-100"):
         return int(group_str)
@@ -29,27 +26,23 @@ def resolve_group_id(group_str):
 # The scheduled job
 async def post_flyer_job(group_id, flyer_name, request_chat_id):
     logger.info(f"Running post_flyer_job: group_id={group_id}, flyer_name={flyer_name}")
-    # Use the current global Client instance (set via main.py or pass as argument if refactored)
-    from pyrogram import idle
-    app = Client.get_current()
+    app = Client.get_running()  # Use get_running in Pyrogram 2.x!
     flyer = get_flyer_by_name(group_id, flyer_name)
     if not flyer:
         logger.error(f"Flyer '{flyer_name}' not found for group {group_id}")
         await app.send_message(
             chat_id=request_chat_id,
             text=f"❌ Flyer '{flyer_name}' not found for group <code>{group_id}</code>.",
-            parse_mode="html"
+            parse_mode="HTML"
         )
         return
     file_id, caption = flyer
     try:
-        # Ensure dialog is loaded
-        await app.get_chat(group_id)
         await app.send_photo(
             chat_id=group_id,
             photo=file_id,
             caption=caption or "",
-            parse_mode="html"
+            parse_mode="HTML"
         )
         logger.info(f"Posted flyer '{flyer_name}' to group {group_id}")
     except Exception as e:
@@ -57,7 +50,7 @@ async def post_flyer_job(group_id, flyer_name, request_chat_id):
         await app.send_message(
             chat_id=request_chat_id,
             text=f"❌ Failed to post flyer: <code>{e}</code>",
-            parse_mode="html"
+            parse_mode="HTML"
         )
 
 def register(app):
@@ -65,21 +58,16 @@ def register(app):
     async def scheduleflyer_handler(client, message):
         logger.info(f"Got /scheduleflyer from {message.from_user.id} in {message.chat.id}: {message.text}")
 
-        # Admin-only restriction
-        if message.from_user.id not in ADMIN_IDS:
-            await message.reply("❌ Only admins can use this command.", parse_mode="html")
-            logger.warning(f"Unauthorized /scheduleflyer attempt by {message.from_user.id}")
-            return
-
         try:
             args = message.text.split()
             if len(args) < 5:
-                return await message.reply("❌ Usage: <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>", parse_mode="html")
+                return await message.reply("❌ Usage: <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>", parse_mode="HTML")
 
             flyer_name, date_str, time_str, repeat, group_str = args[1:6]
+
             group_id = resolve_group_id(group_str)
             if not group_id:
-                return await message.reply(f"❌ Invalid group_id or group shortcut: <code>{group_str}</code>", parse_mode="html")
+                return await message.reply(f"❌ Invalid group_id or group shortcut: <code>{group_str}</code>", parse_mode="HTML")
 
             tz_str = os.environ.get("SCHEDULER_TZ", "America/Los_Angeles")
             try:
@@ -90,7 +78,7 @@ def register(app):
             try:
                 dt = tz.localize(datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M"))
             except Exception as e:
-                return await message.reply(f"❌ Invalid date/time format: <code>{e}</code>", parse_mode="html")
+                return await message.reply(f"❌ Invalid date/time format: <code>{e}</code>", parse_mode="HTML")
 
             job_id = f"flyer_{flyer_name}_{group_id}_{dt.strftime('%Y%m%d%H%M%S')}"
             logger.info(f"Scheduling flyer: {flyer_name} to {group_id} at {dt} | job_id={job_id}")
@@ -101,7 +89,6 @@ def register(app):
             except Exception as e:
                 logger.info(f"No existing job to remove for job_id={job_id}: {e}")
 
-            # Only ONCE scheduling for now (expand as needed)
             scheduler.add_job(
                 post_flyer_job,
                 "date",
@@ -114,11 +101,11 @@ def register(app):
 
             await message.reply(
                 f"✅ Scheduled flyer '<b>{flyer_name}</b>' to post in <code>{group_str}</code> at <b>{dt}</b> ({repeat}).\nJob ID: <code>{job_id}</code>",
-                parse_mode="html"
+                parse_mode="HTML"
             )
         except Exception as e:
             logger.error(f"Error scheduling flyer:\n{e}", exc_info=True)
             await message.reply(
                 f"❌ Error: <code>{e}</code>",
-                parse_mode="html"
+                parse_mode="HTML"
             )
