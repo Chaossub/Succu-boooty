@@ -1,4 +1,5 @@
 import os
+import asyncio
 from pyrogram import Client
 from pyrogram.enums import ParseMode
 from dotenv import load_dotenv
@@ -41,8 +42,12 @@ summon.register(app)
 xp.register(app)
 fun.register(app)
 flyer.register(app)
-flyer_scheduler.register(app)
 warnings.register(app)
+
+# --- THIS IS THE NEW PART FOR FLYER SCHEDULER EVENT LOOP FIX ---
+flyer_scheduler.set_main_loop(asyncio.get_event_loop())
+flyer_scheduler.register(app)
+# --------------------------------------------------------------
 
 print("✅ SuccuBot is running...")
 
