@@ -18,7 +18,7 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# Import handlers (NO flyer.register(app))
+# Import all handlers
 from handlers import (
     welcome,
     help_cmd,
@@ -27,12 +27,12 @@ from handlers import (
     summon,
     xp,
     fun,
-    flyer,            # <--- only import, NO .register()!
+    flyer,            # uses register(app)!
     flyer_scheduler,
     warnings
 )
 
-# Register all others
+# Register handlers (all should have register(app))
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -41,7 +41,9 @@ summon.register(app)
 xp.register(app)
 fun.register(app)
 warnings.register(app)
+flyer.register(app)                 # <-- This is critical for /flyer commands!
 
+# Register the scheduler (if needed)
 flyer_scheduler.set_main_loop(asyncio.get_event_loop())
 flyer_scheduler.register(app)
 
