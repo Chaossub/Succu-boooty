@@ -18,7 +18,7 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# Import handlers
+# Import all handlers (no .register call for flyer.py!)
 from handlers import (
     welcome,
     help_cmd,
@@ -27,12 +27,11 @@ from handlers import (
     summon,
     xp,
     fun,
-    flyer,            # <-- No register() needed!
+    flyer,             # <-- no .register!
     flyer_scheduler,
     warnings
 )
 
-# Register everything EXCEPT flyer.py (uses decorator registration)
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -42,7 +41,6 @@ xp.register(app)
 fun.register(app)
 warnings.register(app)
 
-# THIS IS THE ONLY SCHEDULER THAT NEEDS REGISTER:
 flyer_scheduler.set_main_loop(asyncio.get_event_loop())
 flyer_scheduler.register(app)
 
