@@ -1,122 +1,104 @@
-import os
 import logging
-from pyrogram import filters
+from pyrogram import Client, filters
 from pymongo import MongoClient
+import os
 
-MONGO_URI = os.environ["MONGO_URI"]
-MONGO_DB = os.environ.get("MONGO_DB", "succubot").lower()  # <--- always lowercase
+# --- MongoDB setup ---
+MONGO_URI = os.environ.get("MONGO_URI")
+MONGO_DBNAME = os.environ.get("MONGO_DB_NAME", "succubot")
 mongo_client = MongoClient(MONGO_URI)
-db = mongo_client[MONGO_DB]
-flyers = db.flyers
+flyers = mongo_client[MONGO_DBNAME]["flyers"]
 
-ADMIN_IDS = {6964994611}  # <-- your Telegram ID, can add more
+OWNER_ID = 6964994611  # YOUR user id
 
-logger = logging.getLogger(__name__)
-
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
+async def is_admin_or_owner(client, message):
+    if message.from_user.id == OWNER_ID:
+        return True
+    member = await client.get_chat_member(message.chat.id, message.from_user.id)
+    return member.status in ("administrator", "creator")
 
 def get_flyer_by_name(group_id, flyer_name):
-    flyer = flyers.find_one({"group_id": group_id, "name": flyer_name})
-    if flyer:
-        return flyer.get("file_id"), flyer.get("caption")
-    return None
+    doc = flyers.find_one({"group_id": group_id, "name": flyer_name})
+    if not doc:
+        return None
+    return doc.get("file_id"), doc.get("caption")
 
 def register(app):
+
     @app.on_message(filters.command("addflyer") & filters.group)
     async def addflyer_handler(client, message):
-        if not is_admin(message.from_user.id):
-            await message.reply("❌ Only admins can add flyers.")
-            return
-
+        if not await is_admin_or_owner(client, message):
+            return await message.reply("❌ Only admins can add flyers.")
         if not message.reply_to_message or not message.reply_to_message.photo:
-            await message.reply("❌ Reply to a photo to add a flyer.")
-            return
-
-        try:
-            args = message.text.split(maxsplit=2)
-            flyer_name = args[1]
-            caption = args[2] if len(args) > 2 else ""
-        except Exception:
-            await message.reply("❌ Usage: /addflyer <name> <caption> (reply to photo)")
-            return
-
+            return await message.reply("❌ Reply to a photo to add as a flyer.\nUsage: /addflyer <name> <caption>")
+        args = message.text.split(maxsplit=2)
+        if len(args) < 2:
+            return await message.reply("❌ Usage: /addflyer <name> <caption>")
+        flyer_name = args[1]
+        caption = args[2] if len(args) > 2 else ""
         file_id = message.reply_to_message.photo.file_id
+        group_id = message.chat.id
         flyers.update_one(
-            {"group_id": message.chat.id, "name": flyer_name},
+            {"group_id": group_id, "name": flyer_name},
             {"$set": {"file_id": file_id, "caption": caption}},
             upsert=True
         )
-        logger.info(f"Flyer '{flyer_name}' added/updated by {message.from_user.id} in {message.chat.id}")
-        await message.reply(f"✅ Flyer '{flyer_name}' saved/updated.")
-
-    @app.on_message(filters.command("changeflyer") & filters.group)
-    async def changeflyer_handler(client, message):
-        if not is_admin(message.from_user.id):
-            await message.reply("❌ Only admins can change flyers.")
-            return
-
-        if not message.reply_to_message or not message.reply_to_message.photo:
-            await message.reply("❌ Reply to a new photo to update the flyer.")
-            return
-
-        try:
-            flyer_name = message.text.split(maxsplit=1)[1]
-        except Exception:
-            await message.reply("❌ Usage: /changeflyer <name> (reply to new photo)")
-            return
-
-        file_id = message.reply_to_message.photo.file_id
-        flyers.update_one(
-            {"group_id": message.chat.id, "name": flyer_name},
-            {"$set": {"file_id": file_id}},
-            upsert=True
-        )
-        logger.info(f"Flyer '{flyer_name}' updated by {message.from_user.id} in {message.chat.id}")
-        await message.reply(f"✅ Flyer '{flyer_name}' image updated.")
-
-    @app.on_message(filters.command("flyer") & filters.group)
-    async def flyer_handler(client, message):
-        try:
-            flyer_name = message.text.split(maxsplit=1)[1]
-        except Exception:
-            await message.reply("❌ Usage: /flyer <name>")
-            return
-
-        flyer = flyers.find_one({"group_id": message.chat.id, "name": flyer_name})
-        if flyer:
-            await message.reply_photo(
-                photo=flyer["file_id"],
-                caption=flyer.get("caption", "")
-            )
-        else:
-            await message.reply("❌ Flyer not found.")
+        logging.info(f"Flyer '{flyer_name}' added/updated by {message.from_user.id} in {group_id}")
+        await message.reply(f"✅ Flyer '{flyer_name}' added/updated!")
 
     @app.on_message(filters.command("deleteflyer") & filters.group)
     async def deleteflyer_handler(client, message):
-        if not is_admin(message.from_user.id):
-            await message.reply("❌ Only admins can delete flyers.")
-            return
-
-        try:
-            flyer_name = message.text.split(maxsplit=1)[1]
-        except Exception:
-            await message.reply("❌ Usage: /deleteflyer <name>")
-            return
-
-        result = flyers.delete_one({"group_id": message.chat.id, "name": flyer_name})
-        if result.deleted_count:
-            logger.info(f"Flyer '{flyer_name}' deleted by {message.from_user.id} in {message.chat.id}")
+        if not await is_admin_or_owner(client, message):
+            return await message.reply("❌ Only admins can delete flyers.")
+        args = message.text.split()
+        if len(args) != 2:
+            return await message.reply("❌ Usage: /deleteflyer <name>")
+        flyer_name = args[1]
+        group_id = message.chat.id
+        res = flyers.delete_one({"group_id": group_id, "name": flyer_name})
+        if res.deleted_count:
             await message.reply(f"✅ Flyer '{flyer_name}' deleted.")
         else:
-            await message.reply("❌ Flyer not found.")
+            await message.reply(f"❌ Flyer '{flyer_name}' not found.")
+
+    @app.on_message(filters.command("changeflyer") & filters.group)
+    async def changeflyer_handler(client, message):
+        if not await is_admin_or_owner(client, message):
+            return await message.reply("❌ Only admins can change flyers.")
+        if not message.reply_to_message or not message.reply_to_message.photo:
+            return await message.reply("❌ Reply to a photo to update flyer.\nUsage: /changeflyer <name> <caption>")
+        args = message.text.split(maxsplit=2)
+        if len(args) < 2:
+            return await message.reply("❌ Usage: /changeflyer <name> <caption>")
+        flyer_name = args[1]
+        caption = args[2] if len(args) > 2 else ""
+        file_id = message.reply_to_message.photo.file_id
+        group_id = message.chat.id
+        flyers.update_one(
+            {"group_id": group_id, "name": flyer_name},
+            {"$set": {"file_id": file_id, "caption": caption}},
+            upsert=True
+        )
+        await message.reply(f"✅ Flyer '{flyer_name}' updated!")
+
+    @app.on_message(filters.command("flyer") & filters.group)
+    async def flyer_handler(client, message):
+        args = message.text.split()
+        if len(args) != 2:
+            return await message.reply("❌ Usage: /flyer <name>")
+        flyer_name = args[1]
+        group_id = message.chat.id
+        flyer = get_flyer_by_name(group_id, flyer_name)
+        if not flyer:
+            return await message.reply(f"❌ Flyer '{flyer_name}' not found.")
+        file_id, caption = flyer
+        await message.reply_photo(file_id, caption=caption or "")
 
     @app.on_message(filters.command("listflyers") & filters.group)
     async def listflyers_handler(client, message):
-        flyer_list = list(flyers.find({"group_id": message.chat.id}))
-        if not flyer_list:
-            await message.reply("No flyers found in this group.")
-        else:
-            names = [f"• {f['name']}" for f in flyer_list]
-            await message.reply("Flyers in this group:\n" + "\n".join(names))
-
+        group_id = message.chat.id
+        docs = list(flyers.find({"group_id": group_id}))
+        if not docs:
+            return await message.reply("No flyers found.")
+        flyer_names = [doc["name"] for doc in docs]
+        await message.reply("📜 Flyers in this group:\n" + "\n".join(flyer_names))
