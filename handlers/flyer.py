@@ -1,5 +1,5 @@
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import Message, ChatMember
 from pymongo import MongoClient
 import os
 
@@ -10,15 +10,22 @@ mongo = MongoClient(MONGO_URI)
 db = mongo[MONGO_DBNAME]
 flyer_collection = db["flyers"]
 
-OWNER_ID = 6964994611  # Change this to your Telegram ID
+OWNER_ID = 6964994611  # Your Telegram ID
 
-def is_admin(user_id):
-    return user_id == OWNER_ID
+# Util: Async check if user is admin in this group
+async def is_admin(client, chat_id, user_id):
+    if user_id == OWNER_ID:
+        return True
+    try:
+        member = await client.get_chat_member(chat_id, user_id)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
 
 # /addflyer <name> <caption> (optionally with photo)
-@Client.on_message(filters.command("addflyer") & filters.private)
+@Client.on_message(filters.command("addflyer"))
 async def addflyer_handler(client, message: Message):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(client, message.chat.id, message.from_user.id):
         await message.reply("Only admins can add flyers.")
         return
     args = message.text.split(maxsplit=2)
@@ -69,9 +76,9 @@ async def listflyers_handler(client, message: Message):
     await message.reply(msg)
 
 # /deleteflyer <name>
-@Client.on_message(filters.command("deleteflyer") & filters.private)
+@Client.on_message(filters.command("deleteflyer"))
 async def deleteflyer_handler(client, message: Message):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(client, message.chat.id, message.from_user.id):
         await message.reply("Only admins can delete flyers.")
         return
     args = message.text.split(maxsplit=1)
@@ -83,9 +90,9 @@ async def deleteflyer_handler(client, message: Message):
     await message.reply(f"🗑️ Flyer '{name}' deleted.")
 
 # /textflyer <name>
-@Client.on_message(filters.command("textflyer") & filters.private)
+@Client.on_message(filters.command("textflyer"))
 async def textflyer_handler(client, message: Message):
-    if not is_admin(message.from_user.id):
+    if not await is_admin(client, message.chat.id, message.from_user.id):
         await message.reply("Only admins can convert flyers to text-only.")
         return
     args = message.text.split(maxsplit=1)
@@ -102,4 +109,5 @@ async def textflyer_handler(client, message: Message):
         {"$set": {"photo_id": None, "type": "text"}}
     )
     await message.reply(f"✅ Flyer '{name}' is now text-only. Use /flyer {name} to check.")
+
 
