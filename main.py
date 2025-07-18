@@ -1,4 +1,4 @@
-import os
+
 import asyncio
 from pyrogram import Client
 from pyrogram.enums import ParseMode
