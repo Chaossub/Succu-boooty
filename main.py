@@ -18,7 +18,7 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# Import all handlers (no .register call for flyer.py!)
+# Import handlers (NO flyer.register(app))
 from handlers import (
     welcome,
     help_cmd,
@@ -27,11 +27,12 @@ from handlers import (
     summon,
     xp,
     fun,
-    flyer,             # <-- no .register!
+    flyer,            # <--- only import, NO .register()!
     flyer_scheduler,
     warnings
 )
 
+# Register all others
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
