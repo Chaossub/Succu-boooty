@@ -1,5 +1,3 @@
-# main.py
-
 import os
 import asyncio
 from pyrogram import Client
@@ -20,7 +18,7 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# Import ALL handler modules (ensure each has a register(app) function!)
+# Import handlers
 from handlers import (
     welcome,
     help_cmd,
@@ -29,12 +27,12 @@ from handlers import (
     summon,
     xp,
     fun,
-    flyer,            # <--- now uses register(app)!
+    flyer,            # <-- No register() needed!
     flyer_scheduler,
     warnings
 )
 
-# Register all handlers using register(app)
+# Register everything EXCEPT flyer.py (uses decorator registration)
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -42,10 +40,9 @@ federation.register(app)
 summon.register(app)
 xp.register(app)
 fun.register(app)
-flyer.register(app)           # <--- add this!
 warnings.register(app)
 
-# Scheduler event loop setup for flyer_scheduler
+# THIS IS THE ONLY SCHEDULER THAT NEEDS REGISTER:
 flyer_scheduler.set_main_loop(asyncio.get_event_loop())
 flyer_scheduler.register(app)
 
