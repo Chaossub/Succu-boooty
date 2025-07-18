@@ -7,10 +7,17 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import pytz
 import sys
+from pymongo import MongoClient
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
 MAIN_LOOP = None  # Will be set by main.py
+
+# Mongo
+mongo_uri = os.getenv("MONGO_URI")
+mongo_db = os.getenv("MONGO_DBNAME")
+flyer_client = MongoClient(mongo_uri)[mongo_db]
+flyer_collection = flyer_client["flyers"]
 
 def log_debug(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -87,9 +94,28 @@ async def scheduleflyer_handler(client, message):
 
 async def post_flyer(client, flyer_name, group):
     log_debug(f"post_flyer CALLED with flyer_name={flyer_name}, group={group}")
+    flyer = flyer_collection.find_one({"name": flyer_name})
+    if not flyer:
+        log_debug(f"[ERROR] Flyer '{flyer_name}' not found in DB.")
+        await client.send_message(group, f"❌ Flyer '{flyer_name}' not found.")
+        return
+
     try:
-        await client.send_message(group, f"📢 Scheduled Flyer: {flyer_name}")
-        log_debug(f"SUCCESS! Flyer '{flyer_name}' posted to group {group}")
+        if flyer.get("file_id"):
+            # It's a photo flyer!
+            await client.send_photo(
+                group,
+                flyer["file_id"],
+                caption=flyer.get("caption", "")
+            )
+            log_debug(f"SUCCESS! Flyer '{flyer_name}' (image) posted to group {group}")
+        else:
+            # Text-only flyer
+            await client.send_message(
+                group,
+                flyer.get("caption", f"📢 Flyer: {flyer_name}")
+            )
+            log_debug(f"SUCCESS! Flyer '{flyer_name}' (text) posted to group {group}")
     except Exception as e:
         log_debug(f"[ERROR] Could not post flyer '{flyer_name}' to group {group}: {e}")
 
