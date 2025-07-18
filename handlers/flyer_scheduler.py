@@ -1,69 +1,101 @@
-import logging
-from pyrogram import Client, filters
-from pymongo import MongoClient
 import os
+import logging
+from datetime import datetime
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from pyrogram import Client, filters
+from handlers.flyer import get_flyer_by_name, is_admin_or_owner
+import pytz
 
-MONGO_URI = os.environ.get("MONGO_URI")
-MONGO_DBNAME = os.environ.get("MONGO_DB_NAME", "succubot")
-mongo_client = MongoClient(MONGO_URI)
-flyers = mongo_client[MONGO_DBNAME]["flyers"]
+logger = logging.getLogger(__name__)
+scheduler = AsyncIOScheduler()
+scheduler.start()
 
-OWNER_ID = 6964994611  # your user id
+def resolve_group_id(group_str):
+    if group_str.startswith("-100"):
+        return int(group_str)
+    group_id = os.environ.get(group_str)
+    if group_id:
+        try:
+            return int(group_id)
+        except Exception as e:
+            logger.error(f"Could not convert env {group_str}={group_id} to int: {e}")
+            return None
+    logger.error(f"Group alias '{group_str}' not found in environment variables.")
+    return None
 
-async def is_admin_or_owner(client, message):
-    if message.from_user.id == OWNER_ID:
-        return True
-    member = await client.get_chat_member(message.chat.id, message.from_user.id)
-    return member.status in ("administrator", "creator")
-
-def get_flyer_by_name(group_id, flyer_name):
-    doc = flyers.find_one({"group_id": group_id, "name": flyer_name})
-    if not doc:
-        return None
-    return doc.get("file_id"), doc.get("caption")
+async def post_flyer_job(group_id, flyer_name, request_chat_id):
+    logger.info(f"Running post_flyer_job: group_id={group_id}, flyer_name={flyer_name}")
+    app = Client("SuccuBot")
+    await app.start()
+    flyer = get_flyer_by_name(group_id, flyer_name)
+    if not flyer:
+        logger.error(f"Flyer '{flyer_name}' not found for group {group_id}")
+        await app.send_message(
+            chat_id=request_chat_id,
+            text=f"❌ Flyer '{flyer_name}' not found for group {group_id}.",
+        )
+        await app.stop()
+        return
+    file_id, caption = flyer
+    try:
+        await app.send_photo(
+            chat_id=group_id,
+            photo=file_id,
+            caption=caption or ""
+        )
+        logger.info(f"Posted flyer '{flyer_name}' to group {group_id}")
+    except Exception as e:
+        logger.error(f"Failed to post flyer: {e}")
+        await app.send_message(
+            chat_id=request_chat_id,
+            text=f"❌ Failed to post flyer: {e}",
+        )
+    await app.stop()
 
 def register(app):
-
-    @app.on_message(filters.command("addflyer") & filters.group)
-    async def addflyer_handler(client, message):
+    @app.on_message(filters.command("scheduleflyer") & filters.group)
+    async def scheduleflyer_handler(client, message):
         if not await is_admin_or_owner(client, message):
-            return await message.reply("❌ Only admins can add flyers.")
-        # Now, we just check if this message HAS a photo
-        if not message.photo:
-            return await message.reply("❌ Send a photo and use this command in the caption!\nUsage: /addflyer <name> <caption>")
-        args = message.caption.split(maxsplit=2)
-        if len(args) < 2:
-            return await message.reply("❌ Usage: /addflyer <name> <caption>")
-        flyer_name = args[1]
-        caption = args[2] if len(args) > 2 else ""
-        file_id = message.photo.file_id
-        group_id = message.chat.id
-        flyers.update_one(
-            {"group_id": group_id, "name": flyer_name},
-            {"$set": {"file_id": file_id, "caption": caption}},
-            upsert=True
-        )
-        logging.info(f"Flyer '{flyer_name}' added/updated by {message.from_user.id} in {group_id}")
-        await message.reply(f"✅ Flyer '{flyer_name}' added/updated!")
+            return await message.reply("❌ Only admins can schedule flyers.")
 
-    @app.on_message(filters.command("changeflyer") & filters.group)
-    async def changeflyer_handler(client, message):
-        if not await is_admin_or_owner(client, message):
-            return await message.reply("❌ Only admins can change flyers.")
-        if not message.photo:
-            return await message.reply("❌ Send a photo and use this command in the caption!\nUsage: /changeflyer <name> <caption>")
-        args = message.caption.split(maxsplit=2)
-        if len(args) < 2:
-            return await message.reply("❌ Usage: /changeflyer <name> <caption>")
-        flyer_name = args[1]
-        caption = args[2] if len(args) > 2 else ""
-        file_id = message.photo.file_id
-        group_id = message.chat.id
-        flyers.update_one(
-            {"group_id": group_id, "name": flyer_name},
-            {"$set": {"file_id": file_id, "caption": caption}},
-            upsert=True
-        )
-        await message.reply(f"✅ Flyer '{flyer_name}' updated!")
-
-    # (deleteflyer, flyer, listflyers remain as in previous post)
+        logger.info(f"Got /scheduleflyer from {message.from_user.id} in {message.chat.id}: {message.text}")
+        try:
+            args = message.text.split()
+            if len(args) < 6:
+                return await message.reply("❌ Usage: /scheduleflyer <flyer> <YYYY-MM-DD> <HH:MM> <once/daily/weekly> <group>")
+            flyer_name, date_str, time_str, repeat, group_str = args[1:6]
+            group_id = resolve_group_id(group_str)
+            if not group_id:
+                return await message.reply(f"❌ Invalid group_id or group shortcut: {group_str}")
+            tz_str = os.environ.get("SCHEDULER_TZ", "America/Los_Angeles")
+            try:
+                tz = pytz.timezone(tz_str)
+            except Exception:
+                tz = pytz.timezone("America/Los_Angeles")
+            try:
+                dt = tz.localize(datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M"))
+            except Exception as e:
+                return await message.reply(f"❌ Invalid date/time format: {e}")
+            job_id = f"flyer_{flyer_name}_{group_id}_{dt.strftime('%Y%m%d%H%M%S')}"
+            logger.info(f"Scheduling flyer: {flyer_name} to {group_id} at {dt} | job_id={job_id}")
+            try:
+                scheduler.remove_job(job_id)
+            except Exception as e:
+                logger.info(f"No existing job to remove for job_id={job_id}: {e}")
+            scheduler.add_job(
+                post_flyer_job,
+                "date",
+                run_date=dt,
+                args=[group_id, flyer_name, message.chat.id],
+                id=job_id,
+                replace_existing=True,
+                misfire_grace_time=300
+            )
+            await message.reply(
+                f"✅ Scheduled flyer '{flyer_name}' to post in {group_str} at {dt} ({repeat}).\nJob ID: {job_id}"
+            )
+        except Exception as e:
+            logger.error(f"Error scheduling flyer:\n{e}", exc_info=True)
+            await message.reply(
+                f"❌ Error: {e}"
+            )
