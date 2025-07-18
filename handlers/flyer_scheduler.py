@@ -1,13 +1,14 @@
 import logging
+import asyncio
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import pytz
-import asyncio
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
+MAIN_LOOP = None  # Will be set at runtime
 
 async def scheduleflyer_handler(client, message):
     args = message.text.split(maxsplit=4)
@@ -43,7 +44,11 @@ async def post_flyer(client, flyer_name, group):
     await client.send_message(group, f"📢 Scheduled Flyer: {flyer_name}")
 
 def run_post_flyer(client, flyer_name, group):
-    asyncio.create_task(post_flyer(client, flyer_name, group))
+    # Use the globally-set MAIN_LOOP to submit the coroutine to the main thread
+    global MAIN_LOOP
+    if MAIN_LOOP is None:
+        MAIN_LOOP = asyncio.get_event_loop()
+    asyncio.run_coroutine_threadsafe(post_flyer(client, flyer_name, group), MAIN_LOOP)
 
 def register(app):
     app.add_handler(
@@ -53,3 +58,8 @@ def register(app):
     if not scheduler.running:
         scheduler.start()
         logger.info("Scheduler started in flyer_scheduler.")
+
+# Set the event loop when the bot starts
+def set_main_loop(loop):
+    global MAIN_LOOP
+    MAIN_LOOP = loop
