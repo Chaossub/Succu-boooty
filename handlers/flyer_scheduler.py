@@ -1,85 +1,68 @@
-import os
 import logging
-from datetime import datetime
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from pyrogram import Client
-from pymongo import MongoClient
-from dotenv import load_dotenv
+from pyrogram import filters
+from pyrogram.handlers import MessageHandler
+from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime, timedelta
+import pytz
 
-load_dotenv()
-
-logging.basicConfig(level=logging.INFO)
+# Set up logging
 logger = logging.getLogger(__name__)
+scheduler = BackgroundScheduler()
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-MONGO_URI = os.environ["MONGO_URI"]
-MONGO_DB = os.environ.get("MONGO_DB_NAME") or os.environ.get("MONGO_DBNAME")
-SCHED_TZ = os.environ.get("SCHEDULER_TZ", "America/Los_Angeles")
-OWNER_ID = int(os.environ.get("OWNER_ID", "6964994611"))  # Fallback to your Telegram ID
-
-client = MongoClient(MONGO_URI)
-db = client[MONGO_DB]
-flyers = db.flyers
-
-GROUP_ALIASES = {
-    k: int(v)
-    for k, v in os.environ.items()
-    if k.endswith("_ID")
-    for v in [v] if v.lstrip('-').isdigit()
-}
-
-app = Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-scheduler = AsyncIOScheduler(timezone=SCHED_TZ)
-
-async def post_flyer_job(group_id, flyer_name):
-    logger.info(f"Running post_flyer_job: group_id={group_id}, flyer_name={flyer_name}")
-    flyer = flyers.find_one({"name": flyer_name})
-    if not flyer:
-        logger.error(f"Flyer '{flyer_name}' not found in DB.")
-        return
-    try:
-        # Don't start/stop app here; it's already running
-        if flyer.get("file_id"):
-            await app.send_photo(group_id, flyer["file_id"], caption=flyer.get("caption", ""))
-        else:
-            await app.send_message(group_id, flyer.get("caption", ""))
-        logger.info(f"Posted flyer '{flyer_name}' to {group_id}")
-    except Exception as e:
-        logger.error(f"Failed to post flyer: {e}")
-
+# Example flyer scheduling function
 async def scheduleflyer_handler(client, message):
-    # Example: /scheduleflyer tipping 2025-07-18 21:30 once MODELS_CHAT
-    if not (message.from_user and (message.from_user.is_admin or message.from_user.id == OWNER_ID)):
-        return await message.reply("❌ Only admins can schedule flyers.")
+    # Extract flyer name, time, and group from the command
+    args = message.text.split(maxsplit=3)
+    if len(args) < 4:
+        await message.reply("❌ Usage: /scheduleflyer <flyer_name> <YYYY-MM-DD HH:MM> <group>")
+        return
+
+    flyer_name = args[1]
+    time_str = args[2]
+    group = args[3]
 
     try:
-        _, flyer_name, dt_str, repeat, group_alias = message.text.split(maxsplit=4)
-        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
-        group_id = GROUP_ALIASES.get(group_alias) or int(group_alias)
+        # Assume time in local timezone (e.g., America/Los_Angeles)
+        local_tz = pytz.timezone("America/Los_Angeles")
+        post_time = local_tz.localize(datetime.strptime(time_str, "%Y-%m-%d %H:%M"))
     except Exception as e:
-        logger.error(f"Parse error: {e}")
-        return await message.reply("❌ Usage: /scheduleflyer <name> <YYYY-MM-DD HH:MM> <once|daily|weekly> <group>")
+        await message.reply(f"❌ Invalid time format: {e}")
+        return
 
-    job_id = f"flyer_{flyer_name}_{group_id}_{dt.strftime('%Y%m%d%H%M%S')}"
-    scheduler.add_job(post_flyer_job, "date", run_date=dt, args=[group_id, flyer_name], id=job_id)
-    await message.reply(
-        f"✅ Scheduled flyer '<b>{flyer_name}</b>' to post in <code>{group_alias}</code> at <b>{dt}</b>.\nJob ID: <code>{job_id}</code>",
-        parse_mode="html"
+    # Schedule the flyer post
+    scheduler.add_job(
+        func=post_flyer,
+        trigger='date',
+        run_date=post_time,
+        args=[client, flyer_name, group]
     )
-    logger.info(f"Scheduling flyer: {flyer_name} to {group_id} at {dt} | job_id={job_id}")
+    await message.reply(f"✅ Scheduled flyer '{flyer_name}' for {time_str} in {group}.")
 
+async def post_flyer(client, flyer_name, group):
+    # Replace this with your flyer posting logic
+    await client.send_message(group, f"📢 Scheduled Flyer: {flyer_name}")
+
+# Register the handler properly with group=0 (integer)
 def register(app):
-    from pyrogram import filters
-    app.add_handler(filters.command("scheduleflyer"), scheduleflyer_handler)
-    logger.info("Registered scheduleflyer handler.")
-
-def start_scheduler():
+    app.add_handler(
+        MessageHandler(scheduleflyer_handler, filters.command("scheduleflyer")),
+        group=0
+    )
+    # Start the scheduler if not already running
     if not scheduler.running:
         scheduler.start()
-        logger.info("Scheduler started.")
+        logger.info("Scheduler started in flyer_scheduler.")
 
+# Optional: register immediately if running standalone
 if __name__ == "__main__":
-    start_scheduler()
+    from pyrogram import Client
+    import os
+
+    api_id = int(os.environ.get("API_ID", 12345))
+    api_hash = os.environ.get("API_HASH", "your_api_hash")
+    bot_token = os.environ.get("BOT_TOKEN", "your_bot_token")
+    app = Client("flyer_scheduler_bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
+
+    register(app)
+    print("Bot running with flyer scheduler handler.")
     app.run()
