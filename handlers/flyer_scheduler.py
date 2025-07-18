@@ -52,7 +52,7 @@ async def scheduleflyer_handler(client, message):
     flyer_name = args[1]
     date_part = args[2]
     time_part = args[3]
-    group = resolve_group_name(args[4])   # <--- THIS IS THE FIX!
+    group = resolve_group_name(args[4])
     time_str = f"{date_part} {time_part}"
 
     try:
@@ -62,6 +62,13 @@ async def scheduleflyer_handler(client, message):
         await message.reply(f"❌ Invalid time format: {e}")
         log_debug(f"[ERROR] Invalid time format: {e}")
         return
+
+    # NEW: Warm up the group peer!
+    try:
+        await client.get_chat(group)
+        log_debug(f"client.get_chat({group}) succeeded before scheduling.")
+    except Exception as e:
+        log_debug(f"[ERROR] client.get_chat({group}) failed: {e}")
 
     log_debug(f"Scheduling flyer '{flyer_name}' to group {group} at {post_time}")
 
