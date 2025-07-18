@@ -19,7 +19,7 @@ app = Client(
     parse_mode=ParseMode.HTML  # Remove this if you get HTML parse errors
 )
 
-# Import and register all handler modules
+# Import all handler modules
 from handlers import (
     welcome,
     help_cmd,
@@ -28,12 +28,12 @@ from handlers import (
     summon,
     xp,
     fun,
-    flyer,              # Import flyer!
+    flyer,              # Import flyer for decorators, no .register()!
     flyer_scheduler,
     warnings
 )
 
-# Register all handlers (INCLUDING flyer!)
+# Register handlers (SKIP flyer.register(app))
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -42,7 +42,7 @@ summon.register(app)
 xp.register(app)
 fun.register(app)
 warnings.register(app)
-flyer.register(app)          # <-- This line is necessary!
+# flyer.register(app)  <--- REMOVE or COMMENT OUT this line!
 
 # Scheduler event loop setup for flyer_scheduler
 flyer_scheduler.set_main_loop(asyncio.get_event_loop())
