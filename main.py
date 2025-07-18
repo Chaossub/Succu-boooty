@@ -30,7 +30,8 @@ from handlers import (
     flyer,            # uses register(app)!
     flyer_scheduler,
     warnings,
-    warmup            # <--- Added here!
+    warmup,
+    hi                # <--- Add this line!
 )
 
 # Register handlers (all should have register(app))
@@ -43,7 +44,8 @@ xp.register(app)
 fun.register(app)
 warnings.register(app)
 flyer.register(app)
-warmup.register(app)      # <--- Added here!
+warmup.register(app)
+hi.register(app)        # <--- Register here!
 
 # Register the scheduler (if needed)
 flyer_scheduler.set_main_loop(asyncio.get_event_loop())
