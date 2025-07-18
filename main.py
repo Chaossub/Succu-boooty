@@ -16,7 +16,7 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML  # Remove this argument if you ever have HTML parse errors
+    parse_mode=ParseMode.HTML  # Remove this if you get HTML parse errors
 )
 
 # Import and register all handler modules
@@ -28,12 +28,12 @@ from handlers import (
     summon,
     xp,
     fun,
-    flyer,              # Just import flyer, DO NOT call flyer.register(app)
+    flyer,              # Import flyer!
     flyer_scheduler,
     warnings
 )
 
-# Register all handlers except flyer (flyer uses decorators, not register())
+# Register all handlers (INCLUDING flyer!)
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -42,11 +42,11 @@ summon.register(app)
 xp.register(app)
 fun.register(app)
 warnings.register(app)
+flyer.register(app)          # <-- This line is necessary!
 
-# --- THIS IS THE NEW PART FOR FLYER SCHEDULER EVENT LOOP FIX ---
+# Scheduler event loop setup for flyer_scheduler
 flyer_scheduler.set_main_loop(asyncio.get_event_loop())
 flyer_scheduler.register(app)
-# --------------------------------------------------------------
 
 print("✅ SuccuBot is running...")
 
