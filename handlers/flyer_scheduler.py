@@ -1,8 +1,9 @@
-import logging
+import logging 
 import asyncio
 import os
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
+from pyrogram.types import Message
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import pytz
@@ -20,6 +21,10 @@ flyer_client = MongoClient(mongo_uri)[mongo_db]
 flyer_collection = flyer_client["flyers"]
 
 MAX_CAPTION_LENGTH = 1024
+OWNER_ID = 6964994611
+
+# NEW: Track jobs for cancellation
+SCHEDULED_FLYER_JOBS = {}  # (flyer_name, group) -> job
 
 def log_debug(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -45,6 +50,9 @@ log_debug("flyer_scheduler.py module loaded!")
 
 async def scheduleflyer_handler(client, message):
     log_debug(f"scheduleflyer_handler CALLED by user {message.from_user.id if message.from_user else 'unknown'}")
+    if message.from_user.id != OWNER_ID:
+        await message.reply("Only the owner can schedule flyers.")
+        return
     args = message.text.split(maxsplit=4)
     log_debug(f"scheduleflyer_handler ARGS: {args}")
     if len(args) < 5:
@@ -78,12 +86,14 @@ async def scheduleflyer_handler(client, message):
     log_debug(f"Scheduling flyer '{flyer_name}' to group {group} at {post_time}")
 
     try:
-        scheduler.add_job(
+        job = scheduler.add_job(
             func=run_post_flyer,
             trigger='date',
             run_date=post_time,
             args=[client, flyer_name, group]
         )
+        # Track job for cancellation
+        SCHEDULED_FLYER_JOBS[(flyer_name, group)] = job
         log_debug(f"Job scheduled for flyer '{flyer_name}' in group {group} at {post_time}")
         await message.reply(f"✅ Scheduled flyer '{flyer_name}' for {time_str} in {group}.")
     except Exception as e:
@@ -112,6 +122,8 @@ async def post_flyer(client, flyer_name, group):
             log_debug(f"SUCCESS! Flyer '{flyer_name}' (text) posted to group {group}")
     except Exception as e:
         log_debug(f"[ERROR] Could not post flyer '{flyer_name}' to group {group}: {e}")
+    # Cleanup the scheduled job after posting
+    SCHEDULED_FLYER_JOBS.pop((flyer_name, group), None)
 
 def run_post_flyer(client, flyer_name, group):
     log_debug(f"run_post_flyer CALLED for flyer_name={flyer_name}, group={group}")
@@ -128,10 +140,71 @@ def run_post_flyer(client, flyer_name, group):
     except Exception as e:
         log_debug(f"[ERROR] Failed to submit post_flyer to MAIN_LOOP: {e}")
 
+# === CANCEL COMMANDS BELOW ===
+
+async def cancelflyer_handler(client, message: Message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply("Only the owner can cancel flyers.")
+        return
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        await message.reply("Usage: /cancelflyer <flyer_name> <group>")
+        return
+    flyer_name = args[1]
+    group = resolve_group_name(args[2])
+    job = SCHEDULED_FLYER_JOBS.get((flyer_name, group))
+    if job:
+        job.remove()
+        del SCHEDULED_FLYER_JOBS[(flyer_name, group)]
+        await message.reply(f"✅ Canceled scheduled flyer '{flyer_name}' for group {group}.")
+        log_debug(f"Canceled scheduled flyer '{flyer_name}' for group {group}.")
+    else:
+        await message.reply("❌ No scheduled flyer found for that flyer/group.")
+        log_debug(f"No scheduled flyer found to cancel for '{flyer_name}' in group {group}.")
+
+async def cancelallflyers_handler(client, message: Message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply("Only the owner can cancel all flyers.")
+        return
+    count = 0
+    for job in list(SCHEDULED_FLYER_JOBS.values()):
+        job.remove()
+        count += 1
+    SCHEDULED_FLYER_JOBS.clear()
+    await message.reply(f"✅ Canceled all {count} scheduled flyers.")
+    log_debug(f"Canceled all {count} scheduled flyers.")
+
+# === LIST SCHEDULED FLYERS COMMAND ===
+
+async def listscheduledflyers_handler(client, message: Message):
+    if message.from_user.id != OWNER_ID:
+        await message.reply("Only the owner can check scheduled flyers.")
+        return
+    if not SCHEDULED_FLYER_JOBS:
+        await message.reply("No flyers are currently scheduled.")
+        return
+    lines = ["Scheduled flyers:"]
+    for (flyer_name, group), job in SCHEDULED_FLYER_JOBS.items():
+        run_time = job.next_run_time
+        lines.append(f"• <b>{flyer_name}</b> → <code>{group}</code> at <i>{run_time.strftime('%Y-%m-%d %H:%M:%S')}</i>")
+    await message.reply('\n'.join(lines))
+
 def register(app):
     log_debug("register() CALLED")
     app.add_handler(
         MessageHandler(scheduleflyer_handler, filters.command("scheduleflyer")),
+        group=0
+    )
+    app.add_handler(
+        MessageHandler(cancelflyer_handler, filters.command("cancelflyer")),
+        group=0
+    )
+    app.add_handler(
+        MessageHandler(cancelallflyers_handler, filters.command("cancelallflyers")),
+        group=0
+    )
+    app.add_handler(
+        MessageHandler(listscheduledflyers_handler, filters.command("listscheduledflyers")),
         group=0
     )
     if not scheduler.running:
