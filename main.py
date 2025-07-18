@@ -54,3 +54,4 @@ flyer_scheduler.register(app)
 print("✅ SuccuBot is running...")
 
 if __name__ == "__main__":
+    app.run()
