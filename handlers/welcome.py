@@ -1,47 +1,65 @@
 import logging
-from pyrogram import Client, filters
-from pyrogram.types import ChatMemberUpdated
+from pyrogram import filters
 
 logger = logging.getLogger(__name__)
 
-OWNER_ID = 6964994611  # Hardwired admin owner
+def is_join(event):
+    # Safely handle NoneTypes
+    try:
+        return (
+            hasattr(event, "new_chat_member")
+            and hasattr(event, "old_chat_member")
+            and event.old_chat_member
+            and event.new_chat_member
+            and event.old_chat_member.status in ("left", "kicked")
+            and event.new_chat_member.status == "member"
+        )
+    except Exception as e:
+        logger.error(f"is_join check failed: {e}")
+        return False
 
-def is_join(event: ChatMemberUpdated) -> bool:
-    # Defensive: Both must not be None and have .status
-    return (
-        event.old_chat_member is not None
-        and event.new_chat_member is not None
-        and hasattr(event.old_chat_member, 'status')
-        and hasattr(event.new_chat_member, 'status')
-        and event.old_chat_member.status in ("left", "kicked")
-        and event.new_chat_member.status in ("member", "administrator")
-    )
+def is_leave(event):
+    # Safely handle NoneTypes
+    try:
+        return (
+            hasattr(event, "new_chat_member")
+            and hasattr(event, "old_chat_member")
+            and event.old_chat_member
+            and event.new_chat_member
+            and event.old_chat_member.status == "member"
+            and event.new_chat_member.status in ("left", "kicked")
+        )
+    except Exception as e:
+        logger.error(f"is_leave check failed: {e}")
+        return False
 
-def is_leave(event: ChatMemberUpdated) -> bool:
-    return (
-        event.old_chat_member is not None
-        and event.new_chat_member is not None
-        and hasattr(event.old_chat_member, 'status')
-        and hasattr(event.new_chat_member, 'status')
-        and event.old_chat_member.status in ("member", "administrator")
-        and event.new_chat_member.status in ("left", "kicked")
-    )
-
-def register(app: Client):
-    @app.on_chat_member_updated()
-    async def welcome_goodbye_handler(client, event: ChatMemberUpdated):
+def register(app):
+    @app.on_chat_member_updated(filters.group)
+    async def welcome_goodbye_handler(client, event):
         try:
-            user = event.new_chat_member.user
-            chat_id = event.chat.id
+            # Guard for invalid events
+            if not hasattr(event, "new_chat_member") or not hasattr(event, "old_chat_member"):
+                return
+            if not event.new_chat_member or not event.old_chat_member:
+                return
 
+            # Welcome message
             if is_join(event):
-                # Custom logic: Only owner gets special greeting
-                if user.id == OWNER_ID:
-                    await client.send_message(chat_id, f"👑 The boss <b>{user.mention()}</b> has entered the chat!", parse_mode="HTML")
-                else:
-                    await client.send_message(chat_id, f"👋 Welcome, <b>{user.mention()}</b>!", parse_mode="HTML")
+                user = getattr(event.new_chat_member, "user", None)
+                if not user:
+                    return
+                await event.chat.send_message(
+                    f"👋 Welcome, {user.mention(style='md')}! Feel free to say hi!"
+                )
+
+            # Goodbye message
             elif is_leave(event):
-                await client.send_message(chat_id, f"😢 <b>{user.mention()}</b> has left us.", parse_mode="HTML")
+                user = getattr(event.old_chat_member, "user", None)
+                if not user:
+                    return
+                await event.chat.send_message(
+                    f"👋 {user.first_name} has left the chat. See you next time!"
+                )
 
         except Exception as e:
             logger.error(f"Error in welcome/goodbye handler: {e}", exc_info=True)
