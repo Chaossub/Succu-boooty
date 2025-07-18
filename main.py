@@ -10,16 +10,14 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Initialize the bot client
 app = Client(
     "SuccuBot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML  # Remove this if you get HTML parse errors
+    parse_mode=ParseMode.HTML
 )
 
-# Import all handler modules
 from handlers import (
     welcome,
     help_cmd,
@@ -28,12 +26,12 @@ from handlers import (
     summon,
     xp,
     fun,
-    flyer,              # Import flyer for decorators, no .register()!
+    flyer,              # <-- Import only, do NOT call flyer.register(app)!
     flyer_scheduler,
     warnings
 )
 
-# Register handlers (SKIP flyer.register(app))
+# Register all handlers except flyer (which uses decorators directly)
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -42,9 +40,7 @@ summon.register(app)
 xp.register(app)
 fun.register(app)
 warnings.register(app)
-# flyer.register(app)  <--- REMOVE or COMMENT OUT this line!
 
-# Scheduler event loop setup for flyer_scheduler
 flyer_scheduler.set_main_loop(asyncio.get_event_loop())
 flyer_scheduler.register(app)
 
