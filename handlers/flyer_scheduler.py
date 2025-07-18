@@ -34,15 +34,12 @@ def log_debug(msg):
     print(msg, flush=True)
 
 def resolve_group_name(group):
-    # If user supplies a real ID or @username, just return as-is
     if group.startswith('-') or group.startswith('@'):
         return group
-    # If user supplies a name like "MODELS_CHAT", resolve from env vars
     val = os.environ.get(group)
     if val:
-        # If the variable contains a comma-separated list, just take the first value
         return val.split(",")[0].strip()
-    return group  # Fallback to original (will fail if not valid)
+    return group
 
 log_debug("flyer_scheduler.py module loaded!")
 
@@ -72,7 +69,6 @@ async def scheduleflyer_handler(client, message):
         log_debug(f"[ERROR] Invalid time format: {e}")
         return
 
-    # NEW: Warm up the group peer!
     try:
         await client.get_chat(group)
         log_debug(f"client.get_chat({group}) succeeded before scheduling.")
@@ -97,6 +93,7 @@ async def scheduleflyer_handler(client, message):
 async def post_flyer(client, flyer_name, group):
     log_debug(f"post_flyer CALLED with flyer_name={flyer_name}, group={group}")
     flyer = flyer_collection.find_one({"name": flyer_name})
+    log_debug(f"Loaded flyer from DB: {flyer}")
     if not flyer:
         log_debug(f"[ERROR] Flyer '{flyer_name}' not found in DB.")
         await client.send_message(group, f"❌ Flyer '{flyer_name}' not found.")
@@ -104,19 +101,17 @@ async def post_flyer(client, flyer_name, group):
 
     try:
         caption = flyer.get("caption", "")
-        file_id = flyer.get("file_id")
-        # Only send as photo if file_id is a non-empty string!
-        if file_id and isinstance(file_id, str) and file_id.strip():
+        photo_id = flyer.get("photo_id")  # Always use 'photo_id'
+        if photo_id and isinstance(photo_id, str) and photo_id.strip():
             if len(caption) > MAX_CAPTION_LENGTH:
                 short_caption = caption[:MAX_CAPTION_LENGTH - 10] + "…"
-                await client.send_photo(group, file_id, caption=short_caption)
+                await client.send_photo(group, photo_id, caption=short_caption)
                 await client.send_message(group, caption)
                 log_debug(f"SUCCESS! Flyer '{flyer_name}' (image) posted with truncated caption to group {group}")
             else:
-                await client.send_photo(group, file_id, caption=caption)
+                await client.send_photo(group, photo_id, caption=caption)
                 log_debug(f"SUCCESS! Flyer '{flyer_name}' (image) posted to group {group}")
         else:
-            # Send as text message (no photo)
             await client.send_message(group, caption or f"📢 Flyer: {flyer_name}")
             log_debug(f"SUCCESS! Flyer '{flyer_name}' (text) posted to group {group}")
     except Exception as e:
