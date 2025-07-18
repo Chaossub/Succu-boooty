@@ -4,6 +4,7 @@ from pyrogram.handlers import MessageHandler
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import pytz
+import asyncio
 
 logger = logging.getLogger(__name__)
 scheduler = BackgroundScheduler()
@@ -31,7 +32,7 @@ async def scheduleflyer_handler(client, message):
         return
 
     scheduler.add_job(
-        func=post_flyer,
+        func=run_post_flyer,
         trigger='date',
         run_date=post_time,
         args=[client, flyer_name, group]
@@ -40,6 +41,9 @@ async def scheduleflyer_handler(client, message):
 
 async def post_flyer(client, flyer_name, group):
     await client.send_message(group, f"📢 Scheduled Flyer: {flyer_name}")
+
+def run_post_flyer(client, flyer_name, group):
+    asyncio.create_task(post_flyer(client, flyer_name, group))
 
 def register(app):
     app.add_handler(
