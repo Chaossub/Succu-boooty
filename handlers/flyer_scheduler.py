@@ -19,6 +19,8 @@ mongo_db = os.getenv("MONGO_DBNAME")
 flyer_client = MongoClient(mongo_uri)[mongo_db]
 flyer_collection = flyer_client["flyers"]
 
+MAX_CAPTION_LENGTH = 1024
+
 def log_debug(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     msg = f"[SCHEDULER][{ts}] {msg}"
@@ -101,20 +103,21 @@ async def post_flyer(client, flyer_name, group):
         return
 
     try:
-        if flyer.get("file_id"):
-            # It's a photo flyer!
-            await client.send_photo(
-                group,
-                flyer["file_id"],
-                caption=flyer.get("caption", "")
-            )
-            log_debug(f"SUCCESS! Flyer '{flyer_name}' (image) posted to group {group}")
+        caption = flyer.get("caption", "")
+        file_id = flyer.get("file_id")
+        # Only send as photo if file_id is a non-empty string!
+        if file_id and isinstance(file_id, str) and file_id.strip():
+            if len(caption) > MAX_CAPTION_LENGTH:
+                short_caption = caption[:MAX_CAPTION_LENGTH - 10] + "…"
+                await client.send_photo(group, file_id, caption=short_caption)
+                await client.send_message(group, caption)
+                log_debug(f"SUCCESS! Flyer '{flyer_name}' (image) posted with truncated caption to group {group}")
+            else:
+                await client.send_photo(group, file_id, caption=caption)
+                log_debug(f"SUCCESS! Flyer '{flyer_name}' (image) posted to group {group}")
         else:
-            # Text-only flyer
-            await client.send_message(
-                group,
-                flyer.get("caption", f"📢 Flyer: {flyer_name}")
-            )
+            # Send as text message (no photo)
+            await client.send_message(group, caption or f"📢 Flyer: {flyer_name}")
             log_debug(f"SUCCESS! Flyer '{flyer_name}' (text) posted to group {group}")
     except Exception as e:
         log_debug(f"[ERROR] Could not post flyer '{flyer_name}' to group {group}: {e}")
