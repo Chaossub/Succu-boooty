@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import os
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -23,6 +24,17 @@ def log_debug(msg):
     # Log to stdout
     print(msg, flush=True)
 
+def resolve_group_name(group):
+    # If user supplies a real ID or @username, just return as-is
+    if group.startswith('-') or group.startswith('@'):
+        return group
+    # If user supplies a name like "MODELS_CHAT", resolve from env vars
+    val = os.environ.get(group)
+    if val:
+        # If the variable contains a comma-separated list, just take the first value
+        return val.split(",")[0].strip()
+    return group  # Fallback to original (will fail if not valid)
+
 log_debug("flyer_scheduler.py module loaded!")
 
 async def scheduleflyer_handler(client, message):
@@ -32,7 +44,7 @@ async def scheduleflyer_handler(client, message):
     if len(args) < 5:
         await message.reply(
             "❌ Usage: /scheduleflyer <flyer_name> <YYYY-MM-DD HH:MM> <group>\n\n"
-            "Example:\n/scheduleflyer tipping 2025-07-17 19:54 -1002884098395"
+            "Example:\n/scheduleflyer tipping 2025-07-17 19:54 MODELS_CHAT"
         )
         log_debug("scheduleflyer_handler: Not enough arguments!")
         return
@@ -40,7 +52,7 @@ async def scheduleflyer_handler(client, message):
     flyer_name = args[1]
     date_part = args[2]
     time_part = args[3]
-    group = args[4]
+    group = resolve_group_name(args[4])   # <--- THIS IS THE FIX!
     time_str = f"{date_part} {time_part}"
 
     try:
