@@ -28,12 +28,12 @@ from handlers import (
     summon,
     xp,
     fun,
-    flyer,
+    flyer,              # Just import flyer, DO NOT call flyer.register(app)
     flyer_scheduler,
     warnings
 )
 
-# Register all handlers
+# Register all handlers except flyer (flyer uses decorators, not register())
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -41,7 +41,6 @@ federation.register(app)
 summon.register(app)
 xp.register(app)
 fun.register(app)
-flyer.register(app)
 warnings.register(app)
 
 # --- THIS IS THE NEW PART FOR FLYER SCHEDULER EVENT LOOP FIX ---
