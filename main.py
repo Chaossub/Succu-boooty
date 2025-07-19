@@ -32,11 +32,13 @@ from handlers import (
     warnings,
     warmup,
     hi,
-    schedulemsg
+    schedulemsg    # <-- add this!
 )
 
-# --- SET MAIN EVENT LOOP FOR FLYER SCHEDULER ONLY ---
-flyer_scheduler.set_main_loop(asyncio.get_event_loop())
+# --- SET MAIN EVENT LOOP FOR ALL SCHEDULERS ---
+event_loop = asyncio.get_event_loop()
+flyer_scheduler.set_main_loop(event_loop)
+schedulemsg.set_main_loop(event_loop)      # <-- CRITICAL!
 
 # Register handlers (all should have register(app))
 welcome.register(app)
@@ -50,7 +52,7 @@ warnings.register(app)
 flyer.register(app)
 warmup.register(app)
 hi.register(app)
-schedulemsg.register(app)
+schedulemsg.register(app)          # <-- Must be after .set_main_loop()
 
 # Register the flyer scheduler
 flyer_scheduler.register(app)
@@ -59,4 +61,3 @@ print("✅ SuccuBot is running...")
 
 if __name__ == "__main__":
     app.run()
-
