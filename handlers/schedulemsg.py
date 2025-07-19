@@ -5,11 +5,9 @@ import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
-import traceback
 
 OWNER_ID = 6964994611
 scheduler = BackgroundScheduler()
-MAIN_LOOP = None  # Set by main.py
 SCHEDULED_MSGS = {}  # msg_id -> job
 
 def resolve_group_name(group):
@@ -20,13 +18,7 @@ def resolve_group_name(group):
         return val.split(",")[0].strip()
     return group
 
-def set_main_loop(loop):
-    global MAIN_LOOP
-    MAIN_LOOP = loop
-    print("[SCHEDULEMSG] MAIN_LOOP set.")
-
 async def schedulemsg_handler(client, message):
-    print("[SCHEDULEMSG] schedulemsg_handler called")
     if message.from_user.id != OWNER_ID:
         return await message.reply("Only the owner can schedule messages.")
     args = message.text.split(maxsplit=4)
@@ -52,7 +44,6 @@ async def schedulemsg_handler(client, message):
         local_tz = pytz.timezone("America/Los_Angeles")
         post_time = local_tz.localize(datetime.strptime(time_str, "%Y-%m-%d %H:%M"))
     except Exception as e:
-        print(f"[SCHEDULEMSG][ERROR] Time parse failed: {e}")
         return await message.reply(f"❌ Invalid time: {e}")
 
     msg_id = f"{group}|{int(post_time.timestamp())}"
@@ -64,7 +55,6 @@ async def schedulemsg_handler(client, message):
             args=[client, group, photo, text, msg_id]
         )
         SCHEDULED_MSGS[msg_id] = job
-        print(f"[SCHEDULEMSG] Scheduled photo job for {group} at {post_time} (msg_id={msg_id})")
         await message.reply(f"✅ Photo scheduled for {post_time.strftime('%Y-%m-%d %H:%M %Z')} in {group}.\nID: <code>{msg_id}</code>")
     else:
         job = scheduler.add_job(
@@ -74,62 +64,48 @@ async def schedulemsg_handler(client, message):
             args=[client, group, text, msg_id]
         )
         SCHEDULED_MSGS[msg_id] = job
-        print(f"[SCHEDULEMSG] Scheduled text job for {group} at {post_time} (msg_id={msg_id})")
         await message.reply(f"✅ Message scheduled for {post_time.strftime('%Y-%m-%d %H:%M %Z')} in {group}.\nID: <code>{msg_id}</code>")
 
 async def post_msg(client, group, text, msg_id):
-    print(f"[SCHEDULEMSG][post_msg] Trying to post message to {group}: {text!r}")
     try:
         await client.send_message(group, text)
-        print(f"[SCHEDULEMSG][post_msg] Successfully posted message to {group}.")
+        print(f"[SCHEDULEMSG] Posted message to {group}: {text}")
     except Exception as e:
-        print(f"[SCHEDULEMSG][post_msg][ERROR] Failed to post scheduled message: {e}\n{traceback.format_exc()}")
+        print(f"[SCHEDULEMSG] Failed to post scheduled message: {e}")
     SCHEDULED_MSGS.pop(msg_id, None)
 
 def run_post_msg(client, group, text, msg_id):
-    global MAIN_LOOP
-    if MAIN_LOOP is None:
-        print("[SCHEDULEMSG][ERROR] MAIN_LOOP is not set!")
-        return
+    print(f"[SCHEDULEMSG] run_post_msg CALLED for {group}, msg_id={msg_id}")
+    # Use the running event loop from the client instance
     try:
-        fut = asyncio.run_coroutine_threadsafe(post_msg(client, group, text, msg_id), MAIN_LOOP)
-        try:
-            exc = fut.exception(timeout=5)
-            if exc:
-                print(f"[SCHEDULEMSG][ERROR] Exception in post_msg coroutine: {exc}\n{traceback.format_exc()}")
-            else:
-                print(f"[SCHEDULEMSG] post_msg scheduled successfully for {group} (msg_id={msg_id})")
-        except Exception as e:
-            print(f"[SCHEDULEMSG][ERROR] Could not get future exception: {e}\n{traceback.format_exc()}")
+        loop = client.loop
+        if loop is None:
+            print("[SCHEDULEMSG] ERROR: client.loop is None!")
+            return
+        print(f"[SCHEDULEMSG] Submitting to client.loop: {loop}")
+        asyncio.run_coroutine_threadsafe(post_msg(client, group, text, msg_id), loop)
     except Exception as e:
-        print(f"[SCHEDULEMSG][ERROR] Could not schedule post_msg: {e}\n{traceback.format_exc()}")
+        print(f"[SCHEDULEMSG] FATAL run_post_msg error: {e}")
 
 async def post_photo(client, group, photo, caption, msg_id):
-    print(f"[SCHEDULEMSG][post_photo] Trying to post photo to {group}.")
     try:
         await client.send_photo(group, photo, caption=caption)
-        print(f"[SCHEDULEMSG][post_photo] Successfully posted photo to {group}.")
+        print(f"[SCHEDULEMSG] Posted photo to {group} with caption: {caption}")
     except Exception as e:
-        print(f"[SCHEDULEMSG][post_photo][ERROR] Failed to post scheduled photo: {e}\n{traceback.format_exc()}")
+        print(f"[SCHEDULEMSG] Failed to post scheduled photo: {e}")
     SCHEDULED_MSGS.pop(msg_id, None)
 
 def run_post_photo(client, group, photo, caption, msg_id):
-    global MAIN_LOOP
-    if MAIN_LOOP is None:
-        print("[SCHEDULEMSG][ERROR] MAIN_LOOP is not set!")
-        return
+    print(f"[SCHEDULEMSG] run_post_photo CALLED for {group}, msg_id={msg_id}")
     try:
-        fut = asyncio.run_coroutine_threadsafe(post_photo(client, group, photo, caption, msg_id), MAIN_LOOP)
-        try:
-            exc = fut.exception(timeout=5)
-            if exc:
-                print(f"[SCHEDULEMSG][ERROR] Exception in post_photo coroutine: {exc}\n{traceback.format_exc()}")
-            else:
-                print(f"[SCHEDULEMSG] post_photo scheduled successfully for {group} (msg_id={msg_id})")
-        except Exception as e:
-            print(f"[SCHEDULEMSG][ERROR] Could not get future exception: {e}\n{traceback.format_exc()}")
+        loop = client.loop
+        if loop is None:
+            print("[SCHEDULEMSG] ERROR: client.loop is None!")
+            return
+        print(f"[SCHEDULEMSG] Submitting photo to client.loop: {loop}")
+        asyncio.run_coroutine_threadsafe(post_photo(client, group, photo, caption, msg_id), loop)
     except Exception as e:
-        print(f"[SCHEDULEMSG][ERROR] Could not schedule post_photo: {e}\n{traceback.format_exc()}")
+        print(f"[SCHEDULEMSG] FATAL run_post_photo error: {e}")
 
 async def cancelmsg_handler(client, message):
     if message.from_user.id != OWNER_ID:
@@ -142,10 +118,8 @@ async def cancelmsg_handler(client, message):
     if job:
         job.remove()
         del SCHEDULED_MSGS[msg_id]
-        print(f"[SCHEDULEMSG] Canceled scheduled message {msg_id}")
         await message.reply(f"✅ Scheduled message {msg_id} canceled.")
     else:
-        print(f"[SCHEDULEMSG] Tried to cancel unknown message {msg_id}")
         await message.reply("❌ No such scheduled message.")
 
 async def listmsgs_handler(client, message):
@@ -170,6 +144,5 @@ def register(app):
         print("[SCHEDULEMSG] Scheduler started")
 
 def set_main_loop(loop):
-    global MAIN_LOOP
-    MAIN_LOOP = loop
-    print("[SCHEDULEMSG] MAIN_LOOP set by set_main_loop()")
+    print(f"[SCHEDULEMSG] MAIN_LOOP set by set_main_loop()")
+    # Not needed anymore; using app.loop!
