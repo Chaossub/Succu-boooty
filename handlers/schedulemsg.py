@@ -2,13 +2,13 @@ import os
 import asyncio
 from datetime import datetime
 import pytz
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from pyrogram import filters
 from pyrogram.handlers import MessageHandler
 
 OWNER_ID = 6964994611
-scheduler = BackgroundScheduler()
-SCHEDULED_MSGS = {}  # msg_id -> job
+scheduler = AsyncIOScheduler()
+SCHEDULED_MSGS = {}
 
 def resolve_group_name(group):
     if group.startswith('-') or group.startswith('@'):
@@ -49,7 +49,7 @@ async def schedulemsg_handler(client, message):
     msg_id = f"{group}|{int(post_time.timestamp())}"
     if photo:
         job = scheduler.add_job(
-            func=run_post_photo,
+            post_photo,
             trigger='date',
             run_date=post_time,
             args=[client, group, photo, text, msg_id]
@@ -58,7 +58,7 @@ async def schedulemsg_handler(client, message):
         await message.reply(f"✅ Photo scheduled for {post_time.strftime('%Y-%m-%d %H:%M %Z')} in {group}.\nID: <code>{msg_id}</code>")
     else:
         job = scheduler.add_job(
-            func=run_post_msg,
+            post_msg,
             trigger='date',
             run_date=post_time,
             args=[client, group, text, msg_id]
@@ -74,19 +74,6 @@ async def post_msg(client, group, text, msg_id):
         print(f"[SCHEDULEMSG] Failed to post scheduled message: {e}")
     SCHEDULED_MSGS.pop(msg_id, None)
 
-def run_post_msg(client, group, text, msg_id):
-    print(f"[SCHEDULEMSG] run_post_msg CALLED for {group}, msg_id={msg_id}")
-    # Use the running event loop from the client instance
-    try:
-        loop = client.loop
-        if loop is None:
-            print("[SCHEDULEMSG] ERROR: client.loop is None!")
-            return
-        print(f"[SCHEDULEMSG] Submitting to client.loop: {loop}")
-        asyncio.run_coroutine_threadsafe(post_msg(client, group, text, msg_id), loop)
-    except Exception as e:
-        print(f"[SCHEDULEMSG] FATAL run_post_msg error: {e}")
-
 async def post_photo(client, group, photo, caption, msg_id):
     try:
         await client.send_photo(group, photo, caption=caption)
@@ -94,18 +81,6 @@ async def post_photo(client, group, photo, caption, msg_id):
     except Exception as e:
         print(f"[SCHEDULEMSG] Failed to post scheduled photo: {e}")
     SCHEDULED_MSGS.pop(msg_id, None)
-
-def run_post_photo(client, group, photo, caption, msg_id):
-    print(f"[SCHEDULEMSG] run_post_photo CALLED for {group}, msg_id={msg_id}")
-    try:
-        loop = client.loop
-        if loop is None:
-            print("[SCHEDULEMSG] ERROR: client.loop is None!")
-            return
-        print(f"[SCHEDULEMSG] Submitting photo to client.loop: {loop}")
-        asyncio.run_coroutine_threadsafe(post_photo(client, group, photo, caption, msg_id), loop)
-    except Exception as e:
-        print(f"[SCHEDULEMSG] FATAL run_post_photo error: {e}")
 
 async def cancelmsg_handler(client, message):
     if message.from_user.id != OWNER_ID:
@@ -135,14 +110,9 @@ async def listmsgs_handler(client, message):
     await message.reply('\n'.join(lines))
 
 def register(app):
-    print("[SCHEDULEMSG] Registering schedulemsg handlers")
     app.add_handler(MessageHandler(schedulemsg_handler, filters.command("schedulemsg")), group=0)
     app.add_handler(MessageHandler(cancelmsg_handler, filters.command("cancelmsg")), group=0)
     app.add_handler(MessageHandler(listmsgs_handler, filters.command("listmsgs")), group=0)
     if not scheduler.running:
         scheduler.start()
-        print("[SCHEDULEMSG] Scheduler started")
-
-def set_main_loop(loop):
-    print(f"[SCHEDULEMSG] MAIN_LOOP set by set_main_loop()")
-    # Not needed anymore; using app.loop!
+        print("[SCHEDULEMSG] AsyncIOScheduler started")
