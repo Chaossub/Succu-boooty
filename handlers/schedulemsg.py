@@ -51,6 +51,7 @@ async def schedulemsg_handler(client, message):
         local_tz = pytz.timezone("America/Los_Angeles")
         post_time = local_tz.localize(datetime.strptime(time_str, "%Y-%m-%d %H:%M"))
     except Exception as e:
+        print(f"[SCHEDULEMSG] ERROR: Invalid time: {e}")
         return await message.reply(f"❌ Invalid time: {e}")
 
     msg_id = f"{group}|{int(post_time.timestamp())}"
@@ -90,7 +91,11 @@ def run_post_msg(client, group, text, msg_id):
     if MAIN_LOOP is None:
         print("[SCHEDULEMSG] ERROR: MAIN_LOOP is not set!")
         return
-    asyncio.run_coroutine_threadsafe(post_msg(client, group, text, msg_id), MAIN_LOOP)
+    try:
+        fut = asyncio.run_coroutine_threadsafe(post_msg(client, group, text, msg_id), MAIN_LOOP)
+        print(f"[SCHEDULEMSG] asyncio.run_coroutine_threadsafe returned {fut}")
+    except Exception as e:
+        print(f"[SCHEDULEMSG] ERROR: Failed to schedule post_msg: {e}")
 
 async def post_photo(client, group, photo, caption, msg_id):
     print(f"[SCHEDULEMSG] post_photo CALLED for {group}: {caption}")
@@ -107,7 +112,11 @@ def run_post_photo(client, group, photo, caption, msg_id):
     if MAIN_LOOP is None:
         print("[SCHEDULEMSG] ERROR: MAIN_LOOP is not set!")
         return
-    asyncio.run_coroutine_threadsafe(post_photo(client, group, photo, caption, msg_id), MAIN_LOOP)
+    try:
+        fut = asyncio.run_coroutine_threadsafe(post_photo(client, group, photo, caption, msg_id), MAIN_LOOP)
+        print(f"[SCHEDULEMSG] asyncio.run_coroutine_threadsafe returned {fut}")
+    except Exception as e:
+        print(f"[SCHEDULEMSG] ERROR: Failed to schedule post_photo: {e}")
 
 async def cancelmsg_handler(client, message):
     if message.from_user.id != OWNER_ID:
@@ -121,6 +130,7 @@ async def cancelmsg_handler(client, message):
         job.remove()
         del SCHEDULED_MSGS[msg_id]
         await message.reply(f"✅ Scheduled message {msg_id} canceled.")
+        print(f"[SCHEDULEMSG] Canceled {msg_id}")
     else:
         await message.reply("❌ No such scheduled message.")
 
