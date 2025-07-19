@@ -32,7 +32,7 @@ from handlers import (
     warnings,
     warmup,
     hi,
-    schedulemsg       # <--- Add this line!
+    schedulemsg       # <--- Added this line!
 )
 
 # Register handlers (all should have register(app))
@@ -49,8 +49,10 @@ warmup.register(app)
 hi.register(app)
 schedulemsg.register(app)    # <--- Register here!
 
-# Register the scheduler (if needed)
+# Set event loops for ALL background schedulers before app.run()
 flyer_scheduler.set_main_loop(asyncio.get_event_loop())
+schedulemsg.set_main_loop(asyncio.get_event_loop())   # <--- CRITICAL
+
 flyer_scheduler.register(app)
 
 print("✅ SuccuBot is running...")
