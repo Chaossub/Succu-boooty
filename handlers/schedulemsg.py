@@ -81,7 +81,8 @@ async def post_msg(client, group, text, msg_id):
 def run_post_msg(client, group, text, msg_id):
     global MAIN_LOOP
     if MAIN_LOOP is None:
-        MAIN_LOOP = asyncio.get_event_loop()
+        print("[SCHEDULER][schedulemsg] ERROR: MAIN_LOOP is not set!")
+        return
     asyncio.run_coroutine_threadsafe(post_msg(client, group, text, msg_id), MAIN_LOOP)
 
 async def post_photo(client, group, photo, caption, msg_id):
@@ -94,7 +95,8 @@ async def post_photo(client, group, photo, caption, msg_id):
 def run_post_photo(client, group, photo, caption, msg_id):
     global MAIN_LOOP
     if MAIN_LOOP is None:
-        MAIN_LOOP = asyncio.get_event_loop()
+        print("[SCHEDULER][schedulemsg] ERROR: MAIN_LOOP is not set!")
+        return
     asyncio.run_coroutine_threadsafe(post_photo(client, group, photo, caption, msg_id), MAIN_LOOP)
 
 async def cancelmsg_handler(client, message):
