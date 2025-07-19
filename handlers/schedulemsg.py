@@ -22,6 +22,7 @@ def resolve_group_name(group):
 def set_main_loop(loop):
     global MAIN_LOOP
     MAIN_LOOP = loop
+    print("[SCHEDULER][schedulemsg] MAIN_LOOP set!")
 
 async def schedulemsg_handler(client, message):
     if message.from_user.id != OWNER_ID:
@@ -72,28 +73,36 @@ async def schedulemsg_handler(client, message):
         await message.reply(f"✅ Message scheduled for {post_time.strftime('%Y-%m-%d %H:%M %Z')} in {group}.\nID: <code>{msg_id}</code>")
 
 async def post_msg(client, group, text, msg_id):
+    print(f"[SCHEDULER][schedulemsg] post_msg START for {group}, msg_id={msg_id}")
     try:
         await client.send_message(group, text)
+        print(f"[SCHEDULER][schedulemsg] post_msg SENT to {group}: {text}")
     except Exception as e:
-        print(f"Failed to post scheduled message: {e}")
+        print(f"[SCHEDULER][schedulemsg] ERROR sending to {group}: {e}")
     SCHEDULED_MSGS.pop(msg_id, None)
+    print(f"[SCHEDULER][schedulemsg] post_msg DONE for {msg_id}")
 
 def run_post_msg(client, group, text, msg_id):
     global MAIN_LOOP
+    print(f"[SCHEDULER][schedulemsg] run_post_msg CALLED for {msg_id}")
     if MAIN_LOOP is None:
         print("[SCHEDULER][schedulemsg] ERROR: MAIN_LOOP is not set!")
         return
     asyncio.run_coroutine_threadsafe(post_msg(client, group, text, msg_id), MAIN_LOOP)
 
 async def post_photo(client, group, photo, caption, msg_id):
+    print(f"[SCHEDULER][schedulemsg] post_photo START for {group}, msg_id={msg_id}")
     try:
         await client.send_photo(group, photo, caption=caption)
+        print(f"[SCHEDULER][schedulemsg] post_photo SENT to {group}")
     except Exception as e:
-        print(f"Failed to post scheduled photo: {e}")
+        print(f"[SCHEDULER][schedulemsg] ERROR sending photo to {group}: {e}")
     SCHEDULED_MSGS.pop(msg_id, None)
+    print(f"[SCHEDULER][schedulemsg] post_photo DONE for {msg_id}")
 
 def run_post_photo(client, group, photo, caption, msg_id):
     global MAIN_LOOP
+    print(f"[SCHEDULER][schedulemsg] run_post_photo CALLED for {msg_id}")
     if MAIN_LOOP is None:
         print("[SCHEDULER][schedulemsg] ERROR: MAIN_LOOP is not set!")
         return
@@ -136,3 +145,5 @@ def register(app):
 def set_main_loop(loop):
     global MAIN_LOOP
     MAIN_LOOP = loop
+    print("[SCHEDULER][schedulemsg] set_main_loop() called!")
+
