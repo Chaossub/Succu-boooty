@@ -18,7 +18,7 @@ app = Client(
     parse_mode=ParseMode.HTML
 )
 
-# Import all handlers
+# Import all handlers (import after app so set_main_loop is available!)
 from handlers import (
     welcome,
     help_cmd,
@@ -27,13 +27,17 @@ from handlers import (
     summon,
     xp,
     fun,
-    flyer,            # uses register(app)!
+    flyer,
     flyer_scheduler,
     warnings,
     warmup,
     hi,
-    schedulemsg       # <--- Added this line!
+    schedulemsg
 )
+
+# --- SET MAIN EVENT LOOPS FOR SCHEDULERS BEFORE ANY .register(app) ---
+flyer_scheduler.set_main_loop(asyncio.get_event_loop())
+schedulemsg.set_main_loop(asyncio.get_event_loop())
 
 # Register handlers (all should have register(app))
 welcome.register(app)
@@ -47,12 +51,9 @@ warnings.register(app)
 flyer.register(app)
 warmup.register(app)
 hi.register(app)
-schedulemsg.register(app)    # <--- Register here!
+schedulemsg.register(app)
 
-# Set event loops for ALL background schedulers before app.run()
-flyer_scheduler.set_main_loop(asyncio.get_event_loop())
-schedulemsg.set_main_loop(asyncio.get_event_loop())   # <--- CRITICAL
-
+# Register the flyer scheduler (must be after set_main_loop above)
 flyer_scheduler.register(app)
 
 print("✅ SuccuBot is running...")
