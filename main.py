@@ -7,11 +7,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---- Logging (shows in Render logs)
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 log = logging.getLogger("SuccuBot")
 
 def need(name: str) -> str:
@@ -32,31 +28,18 @@ app = Client(
     parse_mode=ParseMode.HTML,
 )
 
-# === Import and register handlers ===
+# === Register handlers ===
 from handlers import (
-    welcome,
-    help_cmd,
-    moderation,
-    federation,
-    summon,
-    xp,
-    fun,
-    flyer,
-    flyer_scheduler,
-    warnings,
-    warmup,
-    hi,
-    schedulemsg,
+    welcome, help_cmd, moderation, federation, summon, xp, fun,
+    flyer, flyer_scheduler, warnings, warmup, hi, schedulemsg
 )
 from handlers.req_handlers import wire_requirements_handlers
 from dm_foolproof import register as register_dm_foolproof
 
-# set event loop for schedulers BEFORE registering
 event_loop = asyncio.get_event_loop()
 flyer_scheduler.set_main_loop(event_loop)
 schedulemsg.set_main_loop(event_loop)
 
-# register all handlers
 welcome.register(app)
 help_cmd.register(app)
 moderation.register(app)
@@ -79,7 +62,7 @@ async def main():
     log.info("✅ SuccuBot is running and will idle…")
     try:
         while True:
-            await asyncio.sleep(3600)  # keep the worker alive
+            await asyncio.sleep(3600)
     except asyncio.CancelledError:
         pass
     finally:
@@ -93,4 +76,3 @@ if __name__ == "__main__":
     except Exception:
         log.exception("❌ Fatal error during startup")
         raise
-
