@@ -1,6 +1,6 @@
 # req_handlers.py
 # Manual admin commands for requirements, reminders, and end-of-month kick.
-# Wire with: from req_handlers import wire_requirements_handlers; wire_requirements_handlers(app)
+# Wire in main.py with: from req_handlers import wire_requirements_handlers; wire_requirements_handlers(app)
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
@@ -11,9 +11,9 @@ import req_store as store
 
 # === ACCESS CONTROL ===
 OWNER_ID = 6964994611  # Roni (hardwired owner)
-ADMINS = {OWNER_ID}    # add other admin IDs here, e.g., {OWNER_ID, 123456789}
+ADMINS = {OWNER_ID}    # other admins can be added at runtime in main.py
 
-# If set, /kickdefaulters without an arg uses this. Otherwise falls back to current chat.
+# If set, /kickdefaulters without an arg uses this; else falls back to current chat
 DEFAULT_GROUP_ID = None  # e.g., -1001234567890
 
 REMINDER_TEMPLATES = [
@@ -24,6 +24,7 @@ REMINDER_TEMPLATES = [
 ]
 
 def _is_admin(user_id: int) -> bool:
+    # Owner always recognized; others if present in ADMINS (can be extended in main.py)
     return (user_id == OWNER_ID) or (user_id in ADMINS)
 
 def _admin_only(func):
@@ -35,7 +36,7 @@ def _admin_only(func):
     return wrapper
 
 async def fmt_status(client: Client, u: dict) -> str:
-    # Live username lookup for display (still tracked by user_id internally)
+    # Live username lookup for display (internal tracking stays by user_id)
     try:
         tg_user = await client.get_users(u["user_id"])
         uname_display = f"@{tg_user.username}" if getattr(tg_user, "username", None) else f"ID:{u['user_id']}"
@@ -74,7 +75,7 @@ HELP_TEXT = (
 "• /remindnow [idx] — DM all behind (rotates templates if idx omitted)\n"
 "• /kickdefaulters [chat_id] — kick behind users (no pass)\n"
 "\n"
-f"Owner: `{OWNER_ID}` is always recognized. Add other admins in code.\n"
+f"Owner: `{OWNER_ID}` is always recognized. Add other admins at runtime in main.py.\n"
 )
 
 def wire_requirements_handlers(app: Client):
@@ -165,11 +166,10 @@ def wire_requirements_handlers(app: Client):
             title = "❌ Behind"
         if not rows:
             return await message.reply_text(f"{title}: none.")
-        # Resolve usernames for first 50 rows
-        out_lines = []
+        lines = []
         for u in rows[:50]:
-            out_lines.append(await fmt_status(client, u))
-        await message.reply_text(f"**{title} (showing {len(out_lines)})**\n" + "\n".join(out_lines))
+            lines.append(await fmt_status(client, u))
+        await message.reply_text(f"**{title} (showing {len(lines)})**\n" + "\n".join(lines))
 
     @app.on_message(filters.command("grantpass"))
     @_admin_only
