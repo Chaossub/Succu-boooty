@@ -29,6 +29,7 @@ def build_app() -> Client:
         workdir=".",
     )
 
+# Optional tiny health server (USE_HTTP_HEALTH=1)
 async def run_http_health():
     if os.getenv("USE_HTTP_HEALTH", "1") != "1":
         return
@@ -37,8 +38,11 @@ async def run_http_health():
         from fastapi import FastAPI
         import uvicorn
         app = FastAPI()
+
         @app.get("/health")
-        def health(): return {"ok": True}
+        def health():
+            return {"ok": True}
+
         log.info("Starting FastAPI health server on :%d", port)
         config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
         server = uvicorn.Server(config)
@@ -66,6 +70,7 @@ def _priority_key(modname: str) -> tuple:
         "handlers.flyer": 80,
         "handlers.menu": 85,
         "handlers.warmup": 90,
+        "handlers.membership_watch": 95,
     }
     return (prio.get(modname, 100), modname)
 
