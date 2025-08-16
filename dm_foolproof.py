@@ -1,7 +1,7 @@
-# dm_foolproof.py
 import os
 import time
 import asyncio
+import secrets
 from typing import Optional, List, Dict
 
 from pyrogram import Client, filters
@@ -23,7 +23,6 @@ RONI_NAME = os.getenv("RONI_NAME", "Roni")
 RUBY_ID = int(os.getenv("RUBY_ID", "0"))            # Ruby (optional direct-DM button)
 RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
 
-# Optional: super admin to show fuller DM help
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))
 
 DM_READY_NOTIFY_MODE = os.getenv("DM_READY_NOTIFY_MODE", "first_time").lower()  # first_time|always|off
@@ -31,18 +30,72 @@ DM_FORWARD_MODE = os.getenv("DM_FORWARD_MODE", "all").lower()                   
 SHOW_RELAY_KB = os.getenv("SHOW_RELAY_KB", "first_time").lower()                # first_time|always|daily
 
 # ========= STATE =========
-_awaiting_relay: Dict[int, Dict[str, bool]] = {}    # { user_id: {"anon": bool} }
-_kb_last_shown: Dict[int, float] = {}               # throttle for daily menus
+# Users waiting to send a relay (identified/anon): { user_id: {"anon": bool} }
+_awaiting_relay: Dict[int, Dict[str, bool]] = {}
+# Throttle for showing intro/contact
+_kb_last_shown: Dict[int, float] = {}               # uid -> ts
+# Anonymous reply bridge:
+#   thread_token -> user_id (anon origin)
+_anon_threads: Dict[str, int] = {}
+#   admin_id -> thread_token (pending reply)
+_admin_pending_reply: Dict[int, str] = {}
 
+# ========= HELPERS =========
 def _targets() -> List[int]:
-    # primary: OWNER_ID; fallback: req-admins
     if OWNER_ID > 0:
         return [OWNER_ID]
     return _store.list_admins()
 
+async def _is_admin(app: Client, chat_id: int, user_id: int) -> bool:
+    if user_id in _store.list_admins():
+        return True
+    try:
+        member = await app.get_chat_member(chat_id, user_id)
+        return member.privileges is not None or member.status in ("administrator", "creator")
+    except Exception:
+        return False
+
+async def _notify_admins(app: Client, text: str, reply_uid: Optional[int] = None):
+    kb = None
+    if reply_uid:
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Reply in DM", url=f"tg://user?id={reply_uid}")]])
+    for uid in _targets():
+        try:
+            await app.send_message(uid, text, reply_markup=kb)
+        except Exception:
+            pass
+
+async def _copy_to_admins(app: Client, src: Message, header: str, reply_uid: Optional[int] = None, extra_kb: InlineKeyboardMarkup = None):
+    recips = _targets()
+    if not recips:
+        return
+    for target in recips:
+        try:
+            kb = extra_kb
+            if (kb is None) and reply_uid:
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Reply in DM", url=f"tg://user?id={reply_uid}")]])
+            await app.send_message(target, header, reply_markup=kb)
+            await app.copy_message(chat_id=target, from_chat_id=src.chat.id, message_id=src.id)
+        except FloodWait as e:
+            await asyncio.sleep(int(getattr(e, "value", 1)) or 1)
+        except RPCError:
+            continue
+
+def _should_show_kb(uid: int) -> bool:
+    if SHOW_RELAY_KB == "always":
+        return True
+    if SHOW_RELAY_KB == "first_time":
+        return False
+    if SHOW_RELAY_KB == "daily":
+        last = _kb_last_shown.get(uid, 0)
+        return (time.time() - last) >= 24 * 3600
+    return False
+
+def _mark_kb_shown(uid: int) -> None:
+    _kb_last_shown[uid] = time.time()
+
 # ========= UI =========
 def _intro_kb() -> InlineKeyboardMarkup:
-    # Two-button launcher: Contact + Help
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📇 Contact", callback_data="dmf_open_contact")],
         [InlineKeyboardButton("❔ Help", callback_data="dmf_show_help")],
@@ -69,16 +122,11 @@ def _relay_kb() -> InlineKeyboardMarkup:
 def _cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Cancel", callback_data="dmf_relay_cancel")]])
 
-def _spicy_intro(user_first_name: Optional[str]) -> str:
-    name = user_first_name or "there"
-    # 🔥 short & sweet welcome
-    return (
-        f"Welcome to the Sanctuary, {name} 😈\n"
-        "You’re all set — I’m listening. Need us? Tap a button below 👇"
-    )
+def _spicy_intro(name: Optional[str]) -> str:
+    name = name or "there"
+    return f"Welcome to the Sanctuary, {name} 😈\nYou’re all set — need us? Tap a button below 👇"
 
 def _dm_help_text(uid: int, is_owner_or_super: bool) -> str:
-    # concise DM help; only what makes sense in private chat
     lines = ["<b>What you can do here</b>"]
     lines += [
         "\n🛠 <b>General</b>",
@@ -103,69 +151,16 @@ def _dm_help_text(uid: int, is_owner_or_super: bool) -> str:
             "/dmreadylist — list DM-ready",
             "/dmnudge <@user|id> — nudge",
             "/reqexempt list/add/remove — exemptions",
-            "/reqadd <amount> — add purchase",
-            "/reqgame — add game",
-            "/reqnote <text> — note",
-            "/reqexport — export CSV",
+            "/reqadd <amount>, /reqgame, /reqnote <text>, /reqexport",
             "/reqadmins — manage req-admins",
-            "/reqscan — scan failing (group)",
-            "/reqenforce — enforce (group)",
-            "/trackall — track all (group)",
+            "/reqscan, /reqenforce — (group)",
+            "/trackall — (group)",
         ]
     return "\n".join(lines)
 
-def _should_show_kb(uid: int) -> bool:
-    if SHOW_RELAY_KB == "always":
-        return True
-    if SHOW_RELAY_KB == "first_time":
-        return False
-    if SHOW_RELAY_KB == "daily":
-        last = _kb_last_shown.get(uid, 0)
-        return (time.time() - last) >= 24 * 3600
-    return False
-
-def _mark_kb_shown(uid: int) -> None:
-    _kb_last_shown[uid] = time.time()
-
-# ========= HELPERS =========
-async def _is_admin(app: Client, chat_id: int, user_id: int) -> bool:
-    if user_id in _store.list_admins():
-        return True
-    try:
-        member = await app.get_chat_member(chat_id, user_id)
-        return member.privileges is not None or member.status in ("administrator", "creator")
-    except Exception:
-        return False
-
-async def _notify_admins(app: Client, text: str, reply_uid: Optional[int] = None):
-    kb = None
-    if reply_uid:
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Reply in DM", url=f"tg://user?id={reply_uid}")]])
-    for uid in _targets():
-        try:
-            await app.send_message(uid, text, reply_markup=kb)
-        except Exception:
-            pass
-
-async def _copy_to_admins(app: Client, src: Message, header: str, reply_uid: Optional[int] = None):
-    recipients = _targets()
-    if not recipients:
-        return
-    for target in recipients:
-        try:
-            kb = None
-            if reply_uid:
-                kb = InlineKeyboardMarkup([[InlineKeyboardButton("💬 Reply in DM", url=f"tg://user?id={reply_uid}")]])
-            await app.send_message(target, header, reply_markup=kb)
-            await app.copy_message(chat_id=target, from_chat_id=src.chat.id, message_id=src.id)
-        except FloodWait as e:
-            await asyncio.sleep(int(getattr(e, "value", 1)) or 1)
-        except RPCError:
-            continue
-
 # ========= REGISTER =========
 def register(app: Client):
-    # 1) Group: post a deep-link that opens DM with bot
+    # 1) Group: deep-link to open DM
     @app.on_message(filters.command("dmsetup") & ~filters.scheduled)
     async def dmsetup(client: Client, m: Message):
         if not await _is_admin(client, m.chat.id, m.from_user.id):
@@ -191,19 +186,41 @@ def register(app: Client):
         await m.reply_text("How would you like to reach us?", reply_markup=_relay_kb())
         _mark_kb_shown(uid)
 
-    # 3) DM: any message — mark ready, optional forward, then spicy intro + two buttons when appropriate
+    # 3) DM: any message — admin reply bridge, user relay, spicy intro, pings/forward
     @app.on_message(filters.private & ~filters.scheduled)
     async def on_private_message(client: Client, m: Message):
         if not m.from_user:
             return
         uid = m.from_user.id
 
-        # If user is in relay mode, consume THIS message and send it onward
+        # --- ADMIN REPLY MODE (responding to an anon thread) ---
+        if uid in _admin_pending_reply:
+            token = _admin_pending_reply.pop(uid)
+            target_uid = _anon_threads.get(token)
+            if not target_uid:
+                return await m.reply_text("This anonymous thread has expired or was cleared.")
+            # Copy admin's message to the anonymous user
+            header = f"📮 Message from {RONI_NAME}:"
+            try:
+                await client.send_message(target_uid, header)
+                await client.copy_message(chat_id=target_uid, from_chat_id=m.chat.id, message_id=m.id)
+                await m.reply_text("Sent anonymously ✅")
+            except RPCError:
+                await m.reply_text("Could not deliver message (user may have blocked the bot).")
+            return  # don't process this as a normal DM
+
+        # --- USER RELAY MODE (if user chose relay) ---
         if uid in _awaiting_relay:
             anon = _awaiting_relay.pop(uid).get("anon", False)
             if anon:
-                header = f"📨 Anonymous relay to {RONI_NAME}"
-                await _copy_to_admins(client, m, header=header, reply_uid=None)
+                # Create an opaque thread token and store mapping
+                token = secrets.token_urlsafe(8)
+                _anon_threads[token] = uid
+                # Send to admins with a Reply anonymously button (no identity leak)
+                kb = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("↩️ Reply anonymously", callback_data=f"dmf_anon_reply:{token}")]]
+                )
+                await _copy_to_admins(client, m, header=f"📨 Anonymous relay to {RONI_NAME}", reply_uid=None, extra_kb=kb)
                 await m.reply_text(f"Sent anonymously to {RONI_NAME} ✅")
             else:
                 header = f"📨 Relay to {RONI_NAME} from {m.from_user.mention} (<code>{uid}</code>)"
@@ -211,11 +228,11 @@ def register(app: Client):
                 await m.reply_text(f"Sent to {RONI_NAME} ✅")
             return
 
-        # Detect first-time before setting
+        # --- NORMAL DM FLOW ---
         first_time = not _store.is_dm_ready_global(uid)
         _store.set_dm_ready_global(uid, True, by_admin=False)
 
-        # Ping about readiness per mode
+        # Ping admin about readiness (per mode)
         should_ping_ready = (
             DM_READY_NOTIFY_MODE == "always" or
             (DM_READY_NOTIFY_MODE == "first_time" and first_time)
@@ -227,7 +244,7 @@ def register(app: Client):
                 reply_uid=uid
             )
 
-        # Auto-forward this DM per mode (skip /start noise)
+        # Optional: auto-forward this DM (skip /start noise)
         is_start_cmd = bool(m.text and m.text.strip().lower().startswith("/start"))
         should_forward = (
             not is_start_cmd and
@@ -238,7 +255,7 @@ def register(app: Client):
             header = f"💌 New DM from {m.from_user.mention} (<code>{uid}</code>):"
             await _copy_to_admins(client, m, header=header, reply_uid=uid)
 
-        # Decide if we show spicy intro + buttons
+        # Spicy intro + 2 buttons
         show_intro = False
         if is_start_cmd:
             show_intro = True
@@ -272,10 +289,7 @@ def register(app: Client):
         if not _targets():
             return await cq.answer("No admin configured to receive relays.", show_alert=True)
         _awaiting_relay[uid] = {"anon": False}
-        await cq.message.reply_text(
-            f"Okay! Type the message you want me to send to {RONI_NAME}.",
-            reply_markup=_cancel_kb()
-        )
+        await cq.message.reply_text(f"Okay! Type the message you want me to send to {RONI_NAME}.", reply_markup=_cancel_kb())
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_relay_anon_start$"))
@@ -284,12 +298,23 @@ def register(app: Client):
         if not _targets():
             return await cq.answer("No admin configured to receive relays.", show_alert=True)
         _awaiting_relay[uid] = {"anon": True}
-        await cq.message.reply_text(
-            f"You're anonymous. Type the message you want me to send to {RONI_NAME}.",
-            reply_markup=_cancel_kb()
-        )
+        await cq.message.reply_text(f"You're anonymous. Type the message you want me to send to {RONI_NAME}.", reply_markup=_cancel_kb())
         await cq.answer()
 
+    # 7) Callback: admin chooses to reply to an anonymous thread
+    @app.on_callback_query(filters.regex("^dmf_anon_reply:"))
+    async def cb_anon_reply(client: Client, cq: CallbackQuery):
+        admin_id = cq.from_user.id
+        token = cq.data.split(":", 1)[1]
+        if admin_id not in _targets():
+            return await cq.answer("Only admins can reply.", show_alert=True)
+        if token not in _anon_threads:
+            return await cq.answer("That anonymous thread has expired.", show_alert=True)
+        _admin_pending_reply[admin_id] = token
+        await cq.message.reply_text("Reply mode enabled. Type your reply now — it will be sent anonymously. Use /cancel to exit.")
+        await cq.answer("Reply to this message to send anonymously.")
+
+    # 8) Callback: cancel user-side relay
     @app.on_callback_query(filters.regex("^dmf_relay_cancel$"))
     async def cb_relay_cancel(client: Client, cq: CallbackQuery):
         uid = cq.from_user.id
@@ -300,7 +325,7 @@ def register(app: Client):
         except Exception:
             pass
 
-    # 7) Admin/manual DM-ready toggle (reply or self)
+    # 9) Admin/manual DM-ready toggle (reply or self)
     @app.on_message(filters.command(["dmready", "dmunready"]) & ~filters.scheduled)
     async def dm_ready_toggle(client: Client, m: Message):
         ready = m.command[0].lower() == "dmready"
@@ -322,7 +347,7 @@ def register(app: Client):
             except Exception:
                 await _notify_admins(client, f"🔔 DM-ready: <code>{target_id}</code> — set by admin", reply_uid=target_id)
 
-    # 8) List global DM-ready
+    # 10) List global DM-ready
     @app.on_message(filters.command("dmreadylist") & ~filters.scheduled)
     async def dmreadylist(client: Client, m: Message):
         dm = _store.list_dm_ready_global()
@@ -338,7 +363,7 @@ def register(app: Client):
                 lines.append(f"• <code>{uid}</code>")
         await m.reply_text("<b>DM-ready (global):</b>\n" + "\n".join(lines))
 
-    # 9) Admin nudge
+    # 11) Admin nudge
     @app.on_message(filters.command("dmnudge") & ~filters.scheduled)
     async def dmnudge(client: Client, m: Message):
         if not await _is_admin(client, m.chat.id, m.from_user.id):
