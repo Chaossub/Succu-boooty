@@ -1,17 +1,15 @@
-# handlers/menu.py
-# /menu + “💕 Menu” callback with FOUR fixed tabs (Roni, Ruby, Rin, Savy).
-# Includes a Menu-specific 💌 Contact button that opens ONLY direct DMs (no anon).
-# Models add/update by sending a PHOTO with caption:
-#   /addmenu <Roni|Ruby|Rin|Savy> <menu text>
-# Stores to a small JSON file (MODEL_MENUS_PATH).
+# /menu view with four tabs (Roni, Ruby, Rin, Savy)
+# Buttons: 💌 Contact (menu-only, direct to all four), ‼️ Rules, ✨ Buyer Requirements, ❔ Help
+# Models add/update a photo menu via:
+#   send a PHOTO with caption:  /addmenu Roni  <menu text...>
+#   or reply to a PHOTO with:   /addmenu Roni  <menu text...>
 
 import os, json
 from typing import Dict, Any, Optional
-
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.enums import ChatType
 
-# ============ CONFIG ============
 OWNER_ID       = int(os.getenv("OWNER_ID", "0"))
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))
 MODEL_MENUS_PATH = os.getenv("MODEL_MENUS_PATH", "model_menus.json")
@@ -23,13 +21,14 @@ ALLOWED_MENU_NAMES = {
     "savy": "Savy",
 }
 
-# ============ STORAGE ============
+# ---------- storage ----------
 def _load_all() -> Dict[str, Dict[str, Any]]:
     try:
         with open(MODEL_MENUS_PATH, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict): return data
-    except Exception: pass
+    except Exception:
+        pass
     return {}
 
 def _save_all(data: Dict[str, Dict[str, Any]]) -> None:
@@ -46,9 +45,8 @@ def _set_menu(slug: str, title: str, text: str, photo_id: str) -> None:
     allm[slug] = {"title": title, "text": text, "photo": photo_id}
     _save_all(allm)
 
-# ============ UI ============
+# ---------- UI ----------
 def _tabs_kb() -> InlineKeyboardMarkup:
-    # Row 1: fixed tabs; Row 2: 💌 Contact (menu-only); Row 3: ‼️ Rules / ✨ Buyer; Row 4: ❔ Help
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("Roni", callback_data="mmenu_show:roni"),
@@ -68,34 +66,34 @@ def _deeplink_kb(username: str) -> InlineKeyboardMarkup:
     url = f"https://t.me/{username}?start=ready"
     return InlineKeyboardMarkup([[InlineKeyboardButton("💌 DM Now", url=url)]])
 
-# ============ PERMS ============
+# ---------- perms ----------
 async def _is_admin_here(client: Client, chat_id: int, user_id: int) -> bool:
     try:
         m = await client.get_chat_member(chat_id, user_id)
         return (m.privileges is not None) or (m.status in ("administrator", "creator"))
-    except Exception: return False
+    except Exception:
+        return False
 
 def _is_owner_or_super(uid: int) -> bool:
     return uid in (OWNER_ID, SUPER_ADMIN_ID)
 
-# ============ REGISTER ============
+# ---------- register ----------
 def register(app: Client):
 
-    @app.on_message(filters.command("menu") & ~filters.scheduled)
+    @app.on_message(filters.command("menu"))
     async def menu_cmd(client: Client, m: Message):
-        if m.chat and m.chat.type == "private":
-            await m.reply_text("Pick a menu:", reply_markup=_tabs_kb()); return
+        if m.chat and m.chat.type == ChatType.PRIVATE:
+            await m.reply_text("Pick a menu:", reply_markup=_tabs_kb())
+            return
         me = await client.get_me()
         if not me.username:
             return await m.reply_text("I need a public @username to open the menu in DM. Ask an admin to set it.")
         await m.reply_text("Tap to DM and open the Menu:", reply_markup=_deeplink_kb(me.username))
 
-    # “💕 Menu” button from dm_foolproof
     @app.on_callback_query(filters.regex("^dmf_open_menu$"))
     async def cb_open_menu(client: Client, cq: CallbackQuery):
         await cq.message.reply_text("Pick a menu:", reply_markup=_tabs_kb()); await cq.answer()
 
-    # Show a specific model menu
     @app.on_callback_query(filters.regex("^mmenu_show:"))
     async def cb_mmenu_show(client: Client, cq: CallbackQuery):
         _, slug = cq.data.split(":", 1)
@@ -115,19 +113,16 @@ def register(app: Client):
             await cq.message.reply_text(text, disable_web_page_preview=True)
         await cq.answer()
 
-    # /addmenu — must be sent with/for a photo
-    @app.on_message(filters.command("addmenu") & ~filters.scheduled)
+    @app.on_message(filters.command("addmenu"))
     async def addmenu_cmd(client: Client, m: Message):
         uid = m.from_user.id if m.from_user else 0
-        # Permissions: in DM -> owner/super; in groups -> group admin
-        if m.chat.type == "private":
+        if m.chat.type == ChatType.PRIVATE:
             if not _is_owner_or_super(uid):
                 return await m.reply_text("Only the owner can set menus in DM.")
         else:
             if not await _is_admin_here(client, m.chat.id, uid):
                 return await m.reply_text("Admins only.")
 
-        # Find the photo message + get the command text
         photo_msg: Optional[Message] = None
         cmd_text: Optional[str] = None
         if m.photo:
@@ -135,15 +130,18 @@ def register(app: Client):
         elif m.reply_to_message and m.reply_to_message.photo:
             photo_msg = m.reply_to_message; cmd_text = (m.text or "").strip()
         else:
-            return await m.reply_text("Send a photo with caption:\n<code>/addmenu Roni Your menu text…</code>\n\n"
-                                      "Or reply to a photo with:\n<code>/addmenu Roni Your menu text…</code>")
+            return await m.reply_text(
+                "Send a photo with caption:\n<code>/addmenu Roni Your menu text…</code>\n\n"
+                "Or reply to a photo with:\n<code>/addmenu Roni Your menu text…</code>"
+            )
 
         if not cmd_text:
             return await m.reply_text("Caption is empty. Usage:\n<code>/addmenu Roni Your menu text…</code>")
 
-        parts = cmd_text.split(maxsplit=2)  # ['/addmenu','Name','text...']
+        parts = cmd_text.split(maxsplit=2)
         if len(parts) < 3:
             return await m.reply_text("Usage:\n<code>/addmenu Roni Your menu text…</code>")
+
         _, raw_name, menu_text = parts
         slug = raw_name.strip().lower()
         if slug not in ALLOWED_MENU_NAMES:
