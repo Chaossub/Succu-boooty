@@ -1,3 +1,23 @@
+# dm_foolproof.py
+# Complete handler: DM-ready flow, spicy intro, Contact/Help menu,
+# direct-DM buttons (Roni/Ruby), identified & anonymous relay,
+# and admin "reply anonymously" bridge back to user.
+#
+# Default /dmsetup caption: "Tap to DM for quick support—Contact menu, Help, and anonymous relay in one click."
+# You can override with env:
+#   DMSETUP_TEXT="your custom text"
+#   DMSETUP_BTN="💌 DM Now"
+#
+# Other env:
+#   OWNER_ID=6964994611
+#   RONI_NAME=Roni
+#   RUBY_ID=<ruby_user_id>      (optional)
+#   RUBY_NAME=Ruby              (optional)
+#   SUPER_ADMIN_ID=6964994611   (optional for showing admin help in DMs)
+#   DM_READY_NOTIFY_MODE=first_time|always|off
+#   DM_FORWARD_MODE=all|first|off
+#   SHOW_RELAY_KB=first_time|always|daily
+
 import os
 import time
 import asyncio
@@ -23,6 +43,7 @@ RONI_NAME = os.getenv("RONI_NAME", "Roni")
 RUBY_ID = int(os.getenv("RUBY_ID", "0"))            # Ruby (optional direct-DM button)
 RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
 
+# Optional: super admin to show fuller DM help
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))
 
 DM_READY_NOTIFY_MODE = os.getenv("DM_READY_NOTIFY_MODE", "first_time").lower()  # first_time|always|off
@@ -42,6 +63,7 @@ _admin_pending_reply: Dict[int, str] = {}
 
 # ========= HELPERS =========
 def _targets() -> List[int]:
+    # primary: OWNER_ID; fallback: req-admins
     if OWNER_ID > 0:
         return [OWNER_ID]
     return _store.list_admins()
@@ -66,10 +88,10 @@ async def _notify_admins(app: Client, text: str, reply_uid: Optional[int] = None
             pass
 
 async def _copy_to_admins(app: Client, src: Message, header: str, reply_uid: Optional[int] = None, extra_kb: InlineKeyboardMarkup = None):
-    recips = _targets()
-    if not recips:
+    recipients = _targets()
+    if not recipients:
         return
-    for target in recips:
+    for target in recipients:
         try:
             kb = extra_kb
             if (kb is None) and reply_uid:
@@ -96,6 +118,7 @@ def _mark_kb_shown(uid: int) -> None:
 
 # ========= UI =========
 def _intro_kb() -> InlineKeyboardMarkup:
+    # Two-button launcher: Contact + Help
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📇 Contact", callback_data="dmf_open_contact")],
         [InlineKeyboardButton("❔ Help", callback_data="dmf_show_help")],
@@ -168,12 +191,18 @@ def register(app: Client):
         me = await client.get_me()
         if not me.username:
             return await m.reply_text("I need a username set to create a DM button.")
+
+        # Build deep-link and button
         url = f"https://t.me/{me.username}?start=ready"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💌 Open DM with the bot", url=url)]])
-        await m.reply_text(
-            "Tap to open a DM. Send any message and you'll be marked DM-ready automatically.",
-            reply_markup=kb
+        btn_label = os.getenv("DMSETUP_BTN", "💌 DM Now")
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_label, url=url)]])
+
+        # Caption (env override; default to the requested line)
+        text = os.getenv(
+            "DMSETUP_TEXT",
+            "Tap to DM for quick support—Contact menu, Help, and anonymous relay in one click."
         )
+        await m.reply_text(text, reply_markup=kb)
 
     # 2) DM: /message (also /contact, /menu) → open contact options directly
     @app.on_message(filters.private & filters.command(["message", "contact", "menu"]) & ~filters.scheduled)
@@ -255,7 +284,7 @@ def register(app: Client):
             header = f"💌 New DM from {m.from_user.mention} (<code>{uid}</code>):"
             await _copy_to_admins(client, m, header=header, reply_uid=uid)
 
-        # Spicy intro + 2 buttons
+        # Spicy intro + 2 buttons (Contact / Help)
         show_intro = False
         if is_start_cmd:
             show_intro = True
@@ -289,7 +318,10 @@ def register(app: Client):
         if not _targets():
             return await cq.answer("No admin configured to receive relays.", show_alert=True)
         _awaiting_relay[uid] = {"anon": False}
-        await cq.message.reply_text(f"Okay! Type the message you want me to send to {RONI_NAME}.", reply_markup=_cancel_kb())
+        await cq.message.reply_text(
+            f"Okay! Type the message you want me to send to {RONI_NAME}.",
+            reply_markup=_cancel_kb()
+        )
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_relay_anon_start$"))
@@ -298,7 +330,10 @@ def register(app: Client):
         if not _targets():
             return await cq.answer("No admin configured to receive relays.", show_alert=True)
         _awaiting_relay[uid] = {"anon": True}
-        await cq.message.reply_text(f"You're anonymous. Type the message you want me to send to {RONI_NAME}.", reply_markup=_cancel_kb())
+        await cq.message.reply_text(
+            f"You're anonymous. Type the message you want me to send to {RONI_NAME}.",
+            reply_markup=_cancel_kb()
+        )
         await cq.answer()
 
     # 7) Callback: admin chooses to reply to an anonymous thread
