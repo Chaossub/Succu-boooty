@@ -1,247 +1,74 @@
 import json
 import os
-import time
-from dataclasses import dataclass, asdict, field
-from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
 
-# Where to persist requirement data (JSON file)
-DEFAULT_PATH = os.getenv("REQ_STORE_PATH", "data/req_store.json")
-os.makedirs(os.path.dirname(DEFAULT_PATH) or ".", exist_ok=True)
+STORE_FILE = "req_store.json"
 
-def _month_key(ts: Optional[float] = None) -> str:
-    """Return current month key as YYYY-MM."""
-    import datetime as _dt
-    dt = _dt.datetime.fromtimestamp(ts or time.time())
-    return f"{dt.year:04d}-{dt.month:02d}"
+if not os.path.exists(STORE_FILE):
+    with open(STORE_FILE, "w") as f:
+        json.dump({"monthly": {}, "global_dm_ready": {}, "exemptions": {}}, f)
 
-@dataclass
-class UserReq:
-    purchases: float = 0.0
-    games: int = 0
-    notes: str = ""
-    dm_ready: bool = False
+def _load():
+    with open(STORE_FILE, "r") as f:
+        return json.load(f)
 
-@dataclass
-class StoreState:
-    # months[YYYY-MM]["users"][str(user_id)] = UserReq
-    months: Dict[str, Dict[str, Dict[str, UserReq]]] = field(default_factory=dict)
-    admins: List[int] = field(default_factory=list)
-    # exemptions:
-    #   global: { user_id_str: {"until": float|None, "note": str} }
-    #   groups: { chat_id_str: { user_id_str: {"until": float|None, "note": str} } }
-    exemptions: Dict[str, dict] = field(default_factory=lambda: {"global": {}, "groups": {}})
+def _save(data):
+    with open(STORE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-def _as_userreq(d: dict) -> UserReq:
-    return UserReq(
-        purchases=float(d.get("purchases", 0.0)),
-        games=int(d.get("games", 0)),
-        notes=str(d.get("notes", "")),
-        dm_ready=bool(d.get("dm_ready", False)),
-    )
+def _month_key():
+    now = datetime.utcnow()
+    return f"{now.year}-{now.month:02d}"
 
-class ReqStore:
-    """JSON-backed store for monthly requirements, admins, and exemptions."""
+# Monthly requirements
+def get_month_data():
+    data = _load()
+    mkey = _month_key()
+    return data["monthly"].setdefault(mkey, {})
 
-    def __init__(self, path: str = DEFAULT_PATH):
-        self.path = path
-        self.state: StoreState = StoreState()
-        self._load()
+def save_month_data(month_data):
+    data = _load()
+    mkey = _month_key()
+    data["monthly"][mkey] = month_data
+    _save(data)
 
-    # ---------- persistence ----------
-    def _load(self):
-        if not os.path.exists(self.path):
-            self._save()
-            return
-        with open(self.path, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+# Global DM-ready
+def set_dm_ready(user_id: int, ready: bool):
+    data = _load()
+    if ready:
+        data["global_dm_ready"][str(user_id)] = True
+    else:
+        data["global_dm_ready"].pop(str(user_id), None)
+    _save(data)
 
-        # months
-        months: Dict[str, Dict[str, Dict[str, UserReq]]] = {}
-        for mk, month in raw.get("months", {}).items():
-            users = {}
-            for uid, data in month.get("users", {}).items():
-                users[uid] = _as_userreq(data) if isinstance(data, dict) else data
-            months[mk] = {"users": users}
+def is_dm_ready(user_id: int) -> bool:
+    return str(user_id) in _load()["global_dm_ready"]
 
-        admins = list(map(int, raw.get("admins", [])))
+def list_dm_ready():
+    return list(map(int, _load()["global_dm_ready"].keys()))
 
-        # exemptions (backward compatible)
-        ex_raw = raw.get("exemptions") or {"global": {}, "groups": {}}
-        if "global" not in ex_raw: ex_raw["global"] = {}
-        if "groups" not in ex_raw: ex_raw["groups"] = {}
+# Exemptions
+def add_exemption(user_id: int, days: int = None, note: str = None):
+    data = _load()
+    expiry = None
+    if days:
+        expiry = (datetime.utcnow() + timedelta(days=days)).isoformat()
+    data["exemptions"][str(user_id)] = {"expiry": expiry, "note": note}
+    _save(data)
 
-        self.state = StoreState(months=months, admins=admins, exemptions=ex_raw)
+def remove_exemption(user_id: int):
+    data = _load()
+    data["exemptions"].pop(str(user_id), None)
+    _save(data)
 
-    def _save(self):
-        months_raw = {}
-        for mk, month in self.state.months.items():
-            out_users = {}
-            for uid, val in month.get("users", {}).items():
-                out_users[uid] = asdict(val) if isinstance(val, UserReq) else val
-            months_raw[mk] = {"users": out_users}
-        raw = {
-            "months": months_raw,
-            "admins": self.state.admins,
-            "exemptions": self.state.exemptions,
-        }
-        with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(raw, f, ensure_ascii=False, indent=2)
-
-    # ---------- admins ----------
-    def list_admins(self) -> List[int]:
-        return sorted(set(self.state.admins))
-
-    def add_admin(self, user_id: int) -> bool:
-        s = set(self.state.admins)
-        if user_id in s:
-            return False
-        s.add(user_id)
-        self.state.admins = sorted(s)
-        self._save()
-        return True
-
-    def remove_admin(self, user_id: int) -> bool:
-        s = set(self.state.admins)
-        if user_id not in s:
-            return False
-        s.remove(user_id)
-        self.state.admins = sorted(s)
-        self._save()
-        return True
-
-    # ---------- month/user helpers ----------
-    def _ensure_month(self, key: Optional[str] = None) -> str:
-        key = key or _month_key()
-        self.state.months.setdefault(key, {"users": {}})
-        return key
-
-    def _ensure_user(self, user_id: int, month_key: Optional[str] = None) -> Tuple[str, UserReq]:
-        mk = self._ensure_month(month_key)
-        users = self.state.months[mk]["users"]
-        s_uid = str(user_id)
-        if s_uid not in users:
-            users[s_uid] = UserReq()
-        elif isinstance(users[s_uid], dict):
-            users[s_uid] = _as_userreq(users[s_uid])
-        return mk, users[s_uid]
-
-    # ---------- requirement ops ----------
-    def add_purchase(self, user_id: int, amount: float, month_key: Optional[str] = None):
-        mk, u = self._ensure_user(user_id, month_key)
-        u.purchases += max(0.0, float(amount))
-        self._save()
-        return mk, u
-
-    def add_game(self, user_id: int, month_key: Optional[str] = None):
-        mk, u = self._ensure_user(user_id, month_key)
-        u.games += 1
-        self._save()
-        return mk, u
-
-    def set_note(self, user_id: int, note: str, month_key: Optional[str] = None):
-        mk, u = self._ensure_user(user_id, month_key)
-        u.notes = note.strip()
-        self._save()
-        return mk, u
-
-    def set_dm_ready(self, user_id: int, ready: bool, month_key: Optional[str] = None):
-        mk, u = self._ensure_user(user_id, month_key)
-        u.dm_ready = bool(ready)
-        self._save()
-        return mk, u
-
-    def get_status(self, user_id: int, month_key: Optional[str] = None):
-        return self._ensure_user(user_id, month_key)
-
-    def export_csv(self, month_key: Optional[str] = None) -> str:
-        import csv
-        from io import StringIO
-        mk = month_key or _month_key()
-        self._ensure_month(mk)
-        users = self.state.months[mk]["users"]
-        sio = StringIO()
-        w = csv.writer(sio)
-        w.writerow(["user_id", "purchases", "games", "dm_ready", "notes"])
-        for s_uid, data in sorted(users.items(), key=lambda kv: int(kv[0])):
-            if isinstance(data, dict):
-                data = _as_userreq(data)
-            w.writerow([s_uid, f"{data.purchases:.2f}", data.games, int(data.dm_ready), data.notes])
-        return sio.getvalue()
-
-    # ---------- exemptions ----------
-    def _now(self) -> float:
-        return time.time()
-
-    def _parse_duration(self, duration: Optional[str]) -> Optional[float]:
-        """Parse '72h', '7d' etc. Returns seconds or None for indefinite."""
-        if not duration:
-            return None
-        s = duration.strip().lower()
-        try:
-            if s.endswith("h"):
-                return float(s[:-1]) * 3600.0
-            if s.endswith("d"):
-                return float(s[:-1]) * 86400.0
-            # raw number = hours
-            return float(s) * 3600.0
-        except Exception:
-            return None
-
-    def add_exemption(self, user_id: int, chat_id: Optional[int] = None, duration: Optional[str] = None, note: str = "") -> dict:
-        """If chat_id is None -> global exemption; else group-only."""
-        until = None
-        secs = self._parse_duration(duration)
-        if secs:
-            until = self._now() + secs
-
-        if chat_id is None:
-            self.state.exemptions["global"][str(user_id)] = {"until": until, "note": note}
+def get_exemptions():
+    data = _load()
+    now = datetime.utcnow()
+    valid = {}
+    for uid, info in list(data["exemptions"].items()):
+        if info["expiry"] and datetime.fromisoformat(info["expiry"]) < now:
+            data["exemptions"].pop(uid)
         else:
-            gid = str(chat_id)
-            groups = self.state.exemptions["groups"]
-            groups.setdefault(gid, {})
-            groups[gid][str(user_id)] = {"until": until, "note": note}
-        self._save()
-        return {"until": until, "note": note}
-
-    def remove_exemption(self, user_id: int, chat_id: Optional[int] = None) -> bool:
-        removed = False
-        if chat_id is None:
-            removed = self.state.exemptions["global"].pop(str(user_id), None) is not None
-        else:
-            gid = str(chat_id)
-            grp = self.state.exemptions["groups"].get(gid, {})
-            removed = grp.pop(str(user_id), None) is not None
-        if removed:
-            self._save()
-        return removed
-
-    def list_exemptions(self, chat_id: Optional[int] = None) -> Dict[str, dict]:
-        """Return mapping user_id_str -> {until, note} for the scope."""
-        if chat_id is None:
-            return dict(self.state.exemptions.get("global", {}))
-        return dict(self.state.exemptions.get("groups", {}).get(str(chat_id), {}))
-
-    def is_exempt(self, user_id: int, chat_id: Optional[int] = None) -> bool:
-        """Check if user is exempt (unexpired), in group scope or globally."""
-        now = self._now()
-
-        # group scope
-        if chat_id is not None:
-            rec = self.state.exemptions.get("groups", {}).get(str(chat_id), {}).get(str(user_id))
-            if rec:
-                until = rec.get("until")
-                if until is None or until > now:
-                    return True
-                # expired -> cleanup
-                self.remove_exemption(user_id, chat_id)
-
-        # global scope
-        rec = self.state.exemptions.get("global", {}).get(str(user_id))
-        if rec:
-            until = rec.get("until")
-            if until is None or until > now:
-                return True
-            self.remove_exemption(user_id, None)
-
-        return False
+            valid[uid] = info
+    _save(data)
+    return valid
