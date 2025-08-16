@@ -1,23 +1,21 @@
-# dm_foolproof.py
-# DM entry:
-#  • /start in DM -> welcome with [💕 Menu] + [💌 Contact] + [❔ Help]
-#  • “💌 Contact” from welcome includes: direct DM to (Roni, Ruby) + Anonymous (admins only) + Suggestions
-#  • “💌 Contact” inside the Menu is separate and shows ONLY direct DMs to (Roni, Ruby, Rin, Savy) — NO anon there
-#  • Anon always goes to OWNER/admin, never to models
-#  • /message -> uses the Menu-style contact (no anon)
-#  • Includes Rules/Buyer callbacks so Menu buttons work
+# DM entry & messaging helper:
+#  • /start in DM -> welcome with [💕 Menu] + [💌 Contact] + [🔗 Find our models elsewhere] + [❔ Help]
+#  • Welcome Contact: direct DMs (Roni/Ruby) + Anonymous to admins + Suggestions
+#  • Menu Contact: direct DMs only (Roni/Ruby/Rin/Savy) — no anonymous here
+#  • /message -> Menu Contact (no anon)
+#  • Anonymous bridge lets OWNER reply anonymously back
+#  • Also provides Rules / Buyer callbacks for the Menu
 
-import os, time, asyncio, secrets
+import os, time, asyncio, secrets, json
 from typing import Optional, List, Dict
-
 from pyrogram import Client, filters
 from pyrogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
-    ReplyKeyboardMarkup, ReplyKeyboardRemove
+    Message, InlineKeyboardMarkup, InlineKeyboardButton,
+    CallbackQuery, ReplyKeyboardMarkup, ReplyKeyboardRemove
 )
 from pyrogram.errors import RPCError, FloodWait, UserIsBlocked, PeerIdInvalid
 
-# Optional store (dm-ready/admins). Falls back to in-memory if missing.
+# Optional store
 try:
     from req_store import ReqStore
     _store = ReqStore()
@@ -31,7 +29,7 @@ except Exception:
         def list_admins(self): return list(self._admins)
     _store = _DummyStore()
 
-# ========= ENV / CONFIG =========
+# ==== ENV ====
 OWNER_ID       = int(os.getenv("OWNER_ID", "0"))
 SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))
 
@@ -48,18 +46,30 @@ DM_READY_NOTIFY_MODE = os.getenv("DM_READY_NOTIFY_MODE", "first_time").lower()  
 DM_FORWARD_MODE      = os.getenv("DM_FORWARD_MODE", "off").lower()              # off|first|all
 SHOW_RELAY_KB        = os.getenv("SHOW_RELAY_KB", "first_time").lower()         # first_time|daily
 
-RULES_TEXT     = os.getenv("RULES_TEXT", "")
-BUYER_REQ_TEXT = os.getenv("BUYER_REQ_TEXT", "")
+RULES_TEXT      = os.getenv("RULES_TEXT", "")
+BUYER_REQ_TEXT  = os.getenv("BUYER_REQ_TEXT", "")
 RULES_PHOTO     = os.getenv("RULES_PHOTO")
 BUYER_REQ_PHOTO = os.getenv("BUYER_REQ_PHOTO")
 
-# ========= STATE =========
-_pending: Dict[int, Dict[str, bool]] = {}      # {"kind": "anon"|"suggest", "anon": bool}
-_kb_last_shown: Dict[int, float] = {}
-_anon_threads: Dict[str, int] = {}             # token -> user_id
-_admin_pending_reply: Dict[int, str] = {}      # admin_id -> token
+# For "Find our models elsewhere"
+MODELS_LINKS_TEXT = os.getenv(
+    "MODELS_LINKS_TEXT",
+    "Here are our verified links 💖\n\n"
+    "• Roni — <a href='https://example.com/roni'>Profile</a>\n"
+    "• Ruby — <a href='https://example.com/ruby'>Profile</a>\n"
+    "• Rin — <a href='https://example.com/rin'>Profile</a>\n"
+    "• Savy — <a href='https://example.com/savy'>Profile</a>\n"
+)
+MODELS_LINKS_PHOTO = os.getenv("MODELS_LINKS_PHOTO")
+MODELS_LINKS_BUTTONS_JSON = os.getenv("MODELS_LINKS_BUTTONS_JSON")
 
-# ========= HELPERS =========
+# ==== STATE ====
+_pending: Dict[int, Dict[str, bool]] = {}
+_kb_last_shown: Dict[int, float] = {}
+_anon_threads: Dict[str, int] = {}         # token -> user_id
+_admin_pending_reply: Dict[int, str] = {}  # admin_id -> token
+
+# ==== HELPERS ====
 def _targets_owner_only() -> List[int]:
     return [OWNER_ID] if OWNER_ID > 0 else []
 
@@ -77,7 +87,7 @@ async def _is_admin(app: Client, chat_id: int, user_id: int) -> bool:
 
 def _should_show_kb_daily(uid: int) -> bool:
     last = _kb_last_shown.get(uid, 0)
-    return (time.time() - last) >= 24*3600
+    return (time.time() - last) >= 24 * 3600
 
 def _mark_kb_shown(uid: int) -> None:
     _kb_last_shown[uid] = time.time()
@@ -97,17 +107,16 @@ async def _copy_to(app: Client, targets: List[int], src: Message, header: str, r
         except RPCError:
             continue
 
-# ========= UI =========
+# ==== UI BUILDERS ====
 def _welcome_kb() -> InlineKeyboardMarkup:
-    # Welcome includes Menu + Contact + Help
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💕 Menu", callback_data="dmf_open_menu")],
         [InlineKeyboardButton("💌 Contact", callback_data="dmf_open_direct")],
+        [InlineKeyboardButton("🔗 Find our models elsewhere", callback_data="dmf_models_links")],
         [InlineKeyboardButton("❔ Help", callback_data="dmf_show_help")],
     ])
 
 def _contact_welcome_kb() -> InlineKeyboardMarkup:
-    # Welcome contact: direct to Roni/Ruby + Anonymous + Suggestions
     rows = []
     row_direct = []
     if OWNER_ID > 0:
@@ -120,7 +129,6 @@ def _contact_welcome_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def _contact_menu_kb() -> InlineKeyboardMarkup:
-    # Menu contact: ONLY direct links (no anon)
     rows = []
     row1 = []
     if OWNER_ID > 0:
@@ -148,11 +156,42 @@ def _suggest_kb() -> InlineKeyboardMarkup:
 def _cancel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Cancel", callback_data="dmf_cancel")]])
 
+def _build_links_kb() -> Optional[InlineKeyboardMarkup]:
+    raw = MODELS_LINKS_BUTTONS_JSON
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        rows: List[List[InlineKeyboardButton]] = []
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            row = []
+            for it in data:
+                t = str(it.get("text") or "").strip()
+                u = str(it.get("url") or "").strip()
+                if t and u:
+                    row.append(InlineKeyboardButton(t, url=u))
+                if len(row) == 2:
+                    rows.append(row); row = []
+            if row: rows.append(row)
+        elif isinstance(data, list) and data and isinstance(data[0], list):
+            for r in data:
+                row = []
+                for it in r:
+                    t = str(it.get("text") or "").strip()
+                    u = str(it.get("url") or "").strip()
+                    if t and u:
+                        row.append(InlineKeyboardButton(t, url=u))
+                if row: rows.append(row)
+        if rows:
+            return InlineKeyboardMarkup(rows)
+    except Exception:
+        pass
+    return None
+
 def _spicy_intro(name: Optional[str]) -> str:
     name = name or "there"
     return f"Welcome to the Sanctuary, {name} 😈\nYou’re all set — tap Menu to see your options 👇"
 
-# Fallback help
 def _fallback_full_help(is_admin: bool) -> str:
     lines = ["<b>SuccuBot Commands</b>",
              "\n🛠 <b>General</b>",
@@ -172,13 +211,13 @@ def _build_full_help_text(is_admin: bool) -> str:
     except Exception:
         return _fallback_full_help(is_admin)
 
-# ========= REGISTER =========
+# ==== REGISTER ====
 def register(app: Client):
 
-    # Group helper: deep-link to DM
-    @app.on_message(filters.command("dmsetup") & ~filters.scheduled)
+    # Deep link poster for groups
+    @app.on_message(filters.command("dmsetup"))
     async def dmsetup(client: Client, m: Message):
-        if not await _is_admin(client, m.chat.id, m.from_user.id):
+        if m.chat and not await _is_admin(client, m.chat.id, m.from_user.id):
             return await m.reply_text("Admins only.")
         me = await client.get_me()
         if not me.username:
@@ -188,8 +227,8 @@ def register(app: Client):
         text = os.getenv("DMSETUP_TEXT", "Tap to DM and open the Menu.")
         await m.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn, url=url)]]))
 
-    # /message -> use MENU-style contact (no anon)
-    @app.on_message(filters.private & filters.command(["message", "contact"]) & ~filters.scheduled)
+    # /message — menu-style contact (no anon)
+    @app.on_message(filters.private & filters.command(["message", "contact"]))
     async def dm_message_panel(client: Client, m: Message):
         uid = m.from_user.id
         first_time = not _store.is_dm_ready_global(uid)
@@ -200,8 +239,8 @@ def register(app: Client):
         await m.reply_text("Contact a model directly:", reply_markup=_contact_menu_kb())
         _mark_kb_shown(uid)
 
-    # DM inbox: pending flows, anon-reply, welcome, (optional) forwarding
-    @app.on_message(filters.private & ~filters.command(["message", "contact"]) & ~filters.scheduled)
+    # DM inbox (welcome, anon/suggestions, optional forward)
+    @app.on_message(filters.private & ~filters.command(["message", "contact"]))
     async def on_private_message(client: Client, m: Message):
         if not m.from_user: return
         uid = m.from_user.id
@@ -222,7 +261,7 @@ def register(app: Client):
                 await m.reply_text("Could not deliver message.")
             return
 
-        # Pending flows (anon/suggestion) - only reachable via Welcome buttons
+        # Pending flows (started from welcome contact)
         if uid in _pending:
             spec = _pending.pop(uid)
             kind = spec.get("kind")
@@ -250,26 +289,26 @@ def register(app: Client):
                     await _copy_to(client, targets, m, header=header)
                     return await m.reply_text("Thanks! Your suggestion was sent ✅")
 
-        # First-time DM + optional notify
+        # First DM & notify
         first_time = not _store.is_dm_ready_global(uid)
         if first_time:
             _store.set_dm_ready_global(uid, True, by_admin=False)
             if DM_READY_NOTIFY_MODE in ("always", "first_time") and _targets_any():
                 await _notify(client, _targets_any(), f"🔔 DM-ready: {m.from_user.mention} (<code>{uid}</code>) — via private chat")
 
-        # Optional auto-forward (OFF by default)
+        # Optional auto-forward (off by default)
         is_start_cmd = bool(m.text and m.text.strip().lower().startswith("/start"))
         if DM_FORWARD_MODE in ("all", "first") and not is_start_cmd and _targets_any():
             if DM_FORWARD_MODE == "all" or (DM_FORWARD_MODE == "first" and first_time):
                 await _copy_to(client, _targets_any(), m, header=f"💌 New DM from {m.from_user.mention} (<code>{uid}</code>):")
 
-        # Show welcome on /start, first DM, or daily
+        # Show the welcome UI (on /start, first DM, or daily)
         show_intro = is_start_cmd or (first_time and SHOW_RELAY_KB == "first_time") or (SHOW_RELAY_KB == "daily" and _should_show_kb_daily(uid))
         if show_intro:
             await m.reply_text(_spicy_intro(m.from_user.first_name if m.from_user else None), reply_markup=_welcome_kb())
             _mark_kb_shown(uid)
 
-    # HELP
+    # Help
     @app.on_callback_query(filters.regex("^dmf_show_help$"))
     async def cb_show_help(client: Client, cq: CallbackQuery):
         uid = cq.from_user.id
@@ -277,19 +316,32 @@ def register(app: Client):
         await cq.message.reply_text(_build_full_help_text(is_admin))
         await cq.answer()
 
-    # CONTACT (welcome)
+    # Contact (welcome)
     @app.on_callback_query(filters.regex("^dmf_open_direct$"))
     async def cb_open_direct_welcome(client: Client, cq: CallbackQuery):
         await cq.message.reply_text("How would you like to reach us?", reply_markup=_contact_welcome_kb())
         await cq.answer()
 
-    # CONTACT (menu) — NO anon here
+    # Contact (menu) — no anon here
     @app.on_callback_query(filters.regex("^dmf_open_direct_menu$"))
     async def cb_open_direct_menu(client: Client, cq: CallbackQuery):
         await cq.message.reply_text("Contact a model directly:", reply_markup=_contact_menu_kb())
         await cq.answer()
 
-    # ========= Anonymous + Suggestions (reachable from WELCOME contact only) =========
+    # Links (welcome)
+    @app.on_callback_query(filters.regex("^dmf_models_links$"))
+    async def cb_models_links(client: Client, cq: CallbackQuery):
+        kb = _build_links_kb()
+        try:
+            if MODELS_LINKS_PHOTO:
+                await client.send_photo(cq.from_user.id, MODELS_LINKS_PHOTO, caption=MODELS_LINKS_TEXT, reply_markup=kb)
+            else:
+                await cq.message.reply_text(MODELS_LINKS_TEXT, reply_markup=kb, disable_web_page_preview=False)
+        except Exception:
+            await cq.message.reply_text(MODELS_LINKS_TEXT, disable_web_page_preview=False)
+        await cq.answer()
+
+    # Anonymous + Suggestions (from welcome)
     @app.on_callback_query(filters.regex("^dmf_anon_admins$"))
     async def cb_anon_admins(client: Client, cq: CallbackQuery):
         uid = cq.from_user.id
@@ -337,7 +389,7 @@ def register(app: Client):
         try: await client.send_message(cq.from_user.id, "Canceled.", reply_markup=ReplyKeyboardRemove())
         except Exception: pass
 
-    # ========= Rules / Buyer (used by Menu buttons) =========
+    # Rules / Buyer (used by Menu buttons)
     @app.on_callback_query(filters.regex("^dmf_rules$"))
     async def cb_rules(client: Client, cq: CallbackQuery):
         if RULES_PHOTO:
@@ -358,13 +410,13 @@ def register(app: Client):
         await client.send_message(cq.from_user.id, "Tap to check your status:", reply_markup=kb)
         await cq.answer()
 
-    # ========= Admin utilities =========
-    @app.on_message(filters.command(["dmready", "dmunready"]) & ~filters.scheduled)
+    # Admin utilities
+    @app.on_message(filters.command(["dmready", "dmunready"]))
     async def dm_ready_toggle(client: Client, m: Message):
         ready = m.command[0].lower() == "dmready"
         target_id = m.from_user.id
         if m.reply_to_message and m.reply_to_message.from_user:
-            if m.chat.type != "private" and not await _is_admin(client, m.chat.id, m.from_user.id):
+            if m.chat and not await _is_admin(client, m.chat.id, m.from_user.id):
                 return await m.reply_text("Admins only for toggling others.")
             target_id = m.reply_to_message.from_user.id
         try: _store.set_dm_ready_global(target_id, ready, by_admin=(target_id != m.from_user.id))
@@ -379,7 +431,7 @@ def register(app: Client):
             except Exception:
                 await _notify(client, _targets_any(), f"🔔 DM-ready: <code>{target_id}</code> — set by admin")
 
-    @app.on_message(filters.command("dmreadylist") & ~filters.scheduled)
+    @app.on_message(filters.command("dmreadylist"))
     async def dmreadylist(client: Client, m: Message):
         try: dm = _store.list_dm_ready_global()
         except Exception: dm = {}
@@ -394,13 +446,13 @@ def register(app: Client):
                 lines.append(f"• <code>{uid}</code>")
         await m.reply_text("<b>DM-ready (global):</b>\n" + "\n".join(lines))
 
-    @app.on_message(filters.command("dmnudge") & ~filters.scheduled)
+    @app.on_message(filters.command("dmnudge"))
     async def dmnudge(client: Client, m: Message):
-        if m.chat.type == "private":
-            if m.from_user.id not in (OWNER_ID, SUPER_ADMIN_ID):
+        if m.chat and m.chat.type != "private":
+            if not await _is_admin(client, m.chat.id, m.from_user.id):
                 return await m.reply_text("Admins only.")
         else:
-            if not await _is_admin(client, m.chat.id, m.from_user.id):
+            if m.from_user.id not in (OWNER_ID, SUPER_ADMIN_ID):
                 return await m.reply_text("Admins only.")
         target: Optional[int] = None
         if m.reply_to_message and m.reply_to_message.from_user:
