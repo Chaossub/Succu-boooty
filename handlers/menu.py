@@ -1,158 +1,238 @@
-# /menu view with four tabs: Roni, Ruby, Rin, Savy
-# Buttons: 💌 Contact (menu-only direct), ‼️ Rules, ✨ Buyer Requirements, ❔ Help, ⬅️ Back
-# Add/update a photo menu via:
-#   send a PHOTO with caption:  /addmenu Roni  <menu text>
-#   or reply to a PHOTO with:   /addmenu Roni  <menu text>
+# handlers/menu.py
+# Model menus (Roni, Ruby, Rin, Savy)
+# - /addmenu <Name> <text...>   (DM recommended)  — supports text-only OR photo+caption OR reply-to-photo
+# - /menu                        — show tabs & open a model's menu
+# - /menus                       — list which menus exist
+# - /deletemenu <Name>           — delete a menu
+#
+# Storage: MongoDB (MONGO_URI, MONGO_DBNAME). Collection: "model_menus".
 
-import os, json
-from typing import Dict, Any, Optional
+import os
+import time
+from typing import Optional, Tuple, Dict
+
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.enums import ChatType
+from pyrogram.types import (
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+)
 
-OWNER_ID       = int(os.getenv("OWNER_ID", "0"))
-SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))
-MODEL_MENUS_PATH = os.getenv("MODEL_MENUS_PATH", "model_menus.json")
+from pymongo import MongoClient, UpdateOne
 
-ALLOWED_MENU_NAMES = {
+# -------------------- Config --------------------
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB = os.getenv("MONGO_DBNAME", "succubus")
+COLL = "model_menus"
+
+ALLOWED_MODELS = {
     "roni": "Roni",
     "ruby": "Ruby",
-    "rin":  "Rin",
+    "rin": "Rin",
     "savy": "Savy",
 }
 
-# ---------- storage ----------
-def _load_all() -> Dict[str, Dict[str, Any]]:
-    try:
-        with open(MODEL_MENUS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict): return data
-    except Exception:
-        pass
-    return {}
+BTN_MENU = os.getenv("BTN_MENU", "💕 Menu")
 
-def _save_all(data: Dict[str, Dict[str, Any]]) -> None:
-    tmp = MODEL_MENUS_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, MODEL_MENUS_PATH)
+# ----------------- DB Helpers -------------------
+_client: Optional[MongoClient] = None
+def _db():
+    global _client
+    if _client is None:
+        if not MONGO_URI:
+            raise RuntimeError("MONGO_URI not set")
+        _client = MongoClient(MONGO_URI, connect=False)
+    return _client[MONGO_DB][COLL]
 
-def _get_menu(slug: str) -> Optional[Dict[str, Any]]:
-    return _load_all().get(slug)
+def set_menu(name: str, text: str, photo_id: Optional[str], by_id: Optional[int]):
+    coll = _db()
+    coll.update_one(
+        {"name": name},
+        {"$set": {
+            "name": name,
+            "text": text,
+            "photo_id": photo_id,
+            "updated_at": int(time.time()),
+            "by": by_id
+        }},
+        upsert=True
+    )
 
-def _set_menu(slug: str, title: str, text: str, photo_id: str) -> None:
-    allm = _load_all()
-    allm[slug] = {"title": title, "text": text, "photo": photo_id}
-    _save_all(allm)
+def get_menu(name: str) -> Optional[Dict]:
+    return _db().find_one({"name": name})
 
-# ---------- UI ----------
+def list_menus():
+    return [x["name"] for x in _db().find({}, {"name": 1}).sort("name", 1)]
+
+def delete_menu(name: str) -> bool:
+    res = _db().delete_one({"name": name})
+    return res.deleted_count > 0
+
+# ----------------- Parse Helpers ----------------
+def _norm_name(raw: str) -> Optional[str]:
+    if not raw:
+        return None
+    key = raw.strip().lower()
+    return ALLOWED_MODELS.get(key)
+
+def _extract_text_and_model(m: Message) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract model name and menu text from message (DM-friendly).
+    Accepts:
+      - command + name + newline(s) + text...
+      - command + name + inline rest
+      - command (caption) on a photo
+    """
+    content = (m.caption or m.text or "").strip()
+    if not content:
+        return None, None
+
+    # Split "/addmenu Name ..." with newlines preserved after the name
+    parts = content.split(None, 2)  # [/addmenu, Name, rest...]
+    if len(parts) < 2:
+        return None, None
+
+    model = _norm_name(parts[1])
+    if not model:
+        return None, None
+
+    # Any remaining text is the menu body (may include newlines)
+    if len(parts) >= 3 and parts[2].strip():
+        return model, parts[2].strip()
+
+    # If user wrote on the next lines (e.g., they pressed Enter after name)
+    lines = content.splitlines()
+    if len(lines) > 1:
+        rest = "\n".join(lines[1:]).strip()
+        if rest:
+            return model, rest
+
+    return model, None
+
+def _photo_id_from(m: Message) -> Optional[str]:
+    if m.photo:
+        return m.photo[-1].file_id
+    if m.reply_to_message and m.reply_to_message.photo:
+        return m.reply_to_message.photo[-1].file_id
+    return None
+
+# ----------------- Keyboards --------------------
 def _tabs_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+    rows = [
         [
-            InlineKeyboardButton("Roni", callback_data="mmenu_show:roni"),
-            InlineKeyboardButton("Ruby", callback_data="mmenu_show:ruby"),
-            InlineKeyboardButton("Rin",  callback_data="mmenu_show:rin"),
-            InlineKeyboardButton("Savy", callback_data="mmenu_show:savy"),
+            InlineKeyboardButton("Roni", callback_data="menu_tab:Roni"),
+            InlineKeyboardButton("Ruby", callback_data="menu_tab:Ruby"),
         ],
-        [InlineKeyboardButton("💌 Contact", callback_data="dmf_open_direct_menu")],
         [
-            InlineKeyboardButton("‼️ Rules", callback_data="dmf_rules"),
-            InlineKeyboardButton("✨ Buyer Requirements", callback_data="dmf_buyer"),
+            InlineKeyboardButton("Rin", callback_data="menu_tab:Rin"),
+            InlineKeyboardButton("Savy", callback_data="menu_tab:Savy"),
         ],
-        [InlineKeyboardButton("❔ Help", callback_data="dmf_show_help")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="dmf_back_welcome")],
-    ])
+    ]
+    return InlineKeyboardMarkup(rows)
 
-def _deeplink_kb(username: str) -> InlineKeyboardMarkup:
-    url = f"https://t.me/{username}?start=ready"
-    return InlineKeyboardMarkup([[InlineKeyboardButton("💌 DM Now", url=url)]])
+def _back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="menu_back")]])
 
-# ---------- perms ----------
-async def _is_admin_here(client: Client, chat_id: int, user_id: int) -> bool:
-    try:
-        m = await client.get_chat_member(chat_id, user_id)
-        return (m.privileges is not None) or (m.status in ("administrator", "creator"))
-    except Exception:
-        return False
-
-def _is_owner_or_super(uid: int) -> bool:
-    return uid in (OWNER_ID, SUPER_ADMIN_ID)
-
-# ---------- register ----------
+# ----------------- Handlers ---------------------
 def register(app: Client):
 
-    @app.on_message(filters.command("menu"))
-    async def menu_cmd(client: Client, m: Message):
-        if m.chat and m.chat.type == ChatType.PRIVATE:
-            await m.reply_text("Pick a menu:", reply_markup=_tabs_kb())
-            return
-        me = await client.get_me()
-        if not me.username:
-            return await m.reply_text("I need a public @username to open the menu in DM.")
-        await m.reply_text("Tap to DM and open the Menu:", reply_markup=_deeplink_kb(me.username))
-
-    @app.on_callback_query(filters.regex("^dmf_open_menu$"))
-    async def cb_open_menu(client: Client, cq: CallbackQuery):
-        await cq.message.reply_text("Pick a menu:", reply_markup=_tabs_kb()); await cq.answer()
-
-    @app.on_callback_query(filters.regex("^mmenu_show:"))
-    async def cb_mmenu_show(client: Client, cq: CallbackQuery):
-        _, slug = cq.data.split(":", 1)
-        slug = slug.strip().lower()
-        title = ALLOWED_MENU_NAMES.get(slug, slug.capitalize())
-        menu = _get_menu(slug)
-        if not menu:
-            await cq.message.reply_text(f"<b>{title}</b>\n\nNo menu has been added yet.",
-                                        reply_markup=_tabs_kb(), disable_web_page_preview=True)
-            return await cq.answer("No menu set yet.")
-        photo = menu.get("photo")
-        text  = f"<b>{menu.get('title') or title}</b>\n\n{menu.get('text','')}".strip()
-        try:
-            if photo:
-                await client.send_photo(cq.from_user.id, photo, caption=text, reply_markup=_tabs_kb())
-            else:
-                await cq.message.reply_text(text, reply_markup=_tabs_kb(), disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text(text, reply_markup=_tabs_kb(), disable_web_page_preview=True)
-        await cq.answer()
-
     @app.on_message(filters.command("addmenu"))
-    async def addmenu_cmd(client: Client, m: Message):
-        uid = m.from_user.id if m.from_user else 0
-        if m.chat.type == ChatType.PRIVATE:
-            if not _is_owner_or_super(uid):
-                return await m.reply_text("Only the owner can set menus in DM.")
-        else:
-            if not await _is_admin_here(client, m.chat.id, uid):
-                return await m.reply_text("Admins only.")
-
-        photo_msg: Optional[Message] = None
-        cmd_text: Optional[str] = None
-        if m.photo:
-            photo_msg = m; cmd_text = (m.caption or "").strip()
-        elif m.reply_to_message and m.reply_to_message.photo:
-            photo_msg = m.reply_to_message; cmd_text = (m.text or "").strip()
-        else:
+    async def addmenu_handler(client: Client, m: Message):
+        # Recommend doing this in DM; we'll still allow admins in groups if you prefer.
+        if m.chat.type != ChatType.PRIVATE:
+            me = await client.get_me()
             return await m.reply_text(
-                "Send a photo with caption:\n<code>/addmenu Roni Your menu text…</code>\n\n"
-                "Or reply to a photo with:\n<code>/addmenu Roni Your menu text…</code>"
+                "For safety, add menus in DM.\n"
+                f"Open: https://t.me/{me.username}",
+                disable_web_page_preview=True
             )
 
-        if not cmd_text:
-            return await m.reply_text("Caption is empty. Usage:\n<code>/addmenu Roni Your menu text…</code>")
+        model, text = _extract_text_and_model(m)
+        photo_id = _photo_id_from(m)
 
-        parts = cmd_text.split(maxsplit=2)
-        if len(parts) < 3:
-            return await m.reply_text("Usage:\n<code>/addmenu Roni Your menu text…</code>")
+        if not model:
+            return await m.reply_text(
+                "Which model? Use one of: <code>Roni</code>, <code>Ruby</code>, <code>Rin</code>, <code>Savy</code>\n\n"
+                "Examples:\n"
+                "<code>/addmenu Roni &lt;b&gt;Roni’s Menu&lt;/b&gt; • GFE $XX • Customs $XX</code>\n"
+                "or send a photo and put the same command in the caption.",
+                disable_web_page_preview=True
+            )
 
-        _, raw_name, menu_text = parts
-        slug = raw_name.strip().lower()
-        if slug not in ALLOWED_MENU_NAMES:
-            return await m.reply_text("Invalid name. Choose one of: Roni, Ruby, Rin, Savy")
+        if not text and not photo_id:
+            # They sent only "/addmenu Name" with no body/photo
+            return await m.reply_text(
+                "I need the menu text.\n\n"
+                "Send one message like:\n"
+                "<code>/addmenu {name}\n"
+                "&lt;b&gt;Title&lt;/b&gt;\\n• line\\n• line</code>\n"
+                "Or send a photo and put the command + text in the caption.\n"
+                "You can also reply to a photo with: <code>/addmenu {name} Your text…</code>".format(name=model),
+                disable_web_page_preview=True
+            )
 
-        title = ALLOWED_MENU_NAMES[slug]
-        if not photo_msg.photo:
-            return await m.reply_text("That message doesn’t contain a photo.")
-        file_id = photo_msg.photo[-1].file_id
-        _set_menu(slug, title, menu_text, file_id)
-        await m.reply_text(f"✅ Saved menu for <b>{title}</b>.\nUse 💕 Menu → {title} to view.", disable_web_page_preview=True)
+        set_menu(model, text or "", photo_id, by_id=(m.from_user.id if m.from_user else None))
+        pretty = f"<b>{model}</b> menu saved"
+        if photo_id and text:
+            pretty += " (photo + text)."
+        elif photo_id:
+            pretty += " (photo-only)."
+        else:
+            pretty += " (text-only)."
+        return await m.reply_text(f"✅ {pretty}")
+
+    @app.on_message(filters.command("menus"))
+    async def menus_handler(client: Client, m: Message):
+        names = list_menus()
+        if not names:
+            return await m.reply_text("No menus saved yet. Use <code>/addmenu Roni ...</code> in DM.")
+        await m.reply_text("Available menus:\n• " + "\n• ".join(names))
+
+    @app.on_message(filters.command("deletemenu"))
+    async def deletemenu_handler(client: Client, m: Message):
+        parts = (m.text or "").split(None, 1)
+        if len(parts) < 2:
+            return await m.reply_text("Usage: <code>/deletemenu Roni</code>")
+        model = _norm_name(parts[1])
+        if not model:
+            return await m.reply_text("Pick one of: Roni, Ruby, Rin, Savy")
+        ok = delete_menu(model)
+        if ok:
+            await m.reply_text(f"🗑 Deleted <b>{model}</b> menu.")
+        else:
+            await m.reply_text(f"No menu found for <b>{model}</b>.")
+
+    @app.on_message(filters.command("menu"))
+    async def open_menu(client: Client, m: Message):
+        await m.reply_text("💕 <b>Model Menus</b>\nChoose a name:", reply_markup=_tabs_kb(), disable_web_page_preview=True)
+
+    @app.on_callback_query(filters.regex(r"^menu_back$"))
+    async def on_back(client: Client, cq: CallbackQuery):
+        try:
+            await cq.message.edit_text("💕 <b>Model Menus</b>\nChoose a name:", reply_markup=_tabs_kb(), disable_web_page_preview=True)
+        except Exception:
+            # if editing fails (e.g., message is not editable), just send a new one
+            await cq.message.reply_text("💕 <b>Model Menus</b>\nChoose a name:", reply_markup=_tabs_kb(), disable_web_page_preview=True)
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex(r"^menu_tab:(Roni|Ruby|Rin|Savy)$"))
+    async def on_tab(client: Client, cq: CallbackQuery):
+        model = cq.data.split(":", 1)[1]
+        doc = get_menu(model)
+        if not doc:
+            await cq.answer("No menu yet for " + model, show_alert=True)
+            return
+
+        kb = _back_kb()
+        if doc.get("photo_id"):
+            # Show photo + caption
+            try:
+                await cq.message.reply_photo(doc["photo_id"], caption=(doc.get("text") or ""), reply_markup=kb)
+            except Exception:
+                # fallback to text if photo not found anymore
+                await cq.message.reply_text(doc.get("text") or "(photo unavailable)", reply_markup=kb, disable_web_page_preview=True)
+        else:
+            await cq.message.reply_text(doc.get("text") or "(empty)", reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer()
