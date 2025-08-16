@@ -1,8 +1,8 @@
-# /menu view with four tabs (Roni, Ruby, Rin, Savy)
-# Buttons: 💌 Contact (menu-only, direct to all four), ‼️ Rules, ✨ Buyer Requirements, ❔ Help
-# Models add/update a photo menu via:
-#   send a PHOTO with caption:  /addmenu Roni  <menu text...>
-#   or reply to a PHOTO with:   /addmenu Roni  <menu text...>
+# /menu view with four tabs: Roni, Ruby, Rin, Savy
+# Buttons: 💌 Contact (menu-only direct), ‼️ Rules, ✨ Buyer Requirements, ❔ Help, ⬅️ Back
+# Add/update a photo menu via:
+#   send a PHOTO with caption:  /addmenu Roni  <menu text>
+#   or reply to a PHOTO with:   /addmenu Roni  <menu text>
 
 import os, json
 from typing import Dict, Any, Optional
@@ -60,6 +60,7 @@ def _tabs_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("✨ Buyer Requirements", callback_data="dmf_buyer"),
         ],
         [InlineKeyboardButton("❔ Help", callback_data="dmf_show_help")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="dmf_back_welcome")],
     ])
 
 def _deeplink_kb(username: str) -> InlineKeyboardMarkup:
@@ -87,7 +88,7 @@ def register(app: Client):
             return
         me = await client.get_me()
         if not me.username:
-            return await m.reply_text("I need a public @username to open the menu in DM. Ask an admin to set it.")
+            return await m.reply_text("I need a public @username to open the menu in DM.")
         await m.reply_text("Tap to DM and open the Menu:", reply_markup=_deeplink_kb(me.username))
 
     @app.on_callback_query(filters.regex("^dmf_open_menu$"))
@@ -107,10 +108,12 @@ def register(app: Client):
         photo = menu.get("photo")
         text  = f"<b>{menu.get('title') or title}</b>\n\n{menu.get('text','')}".strip()
         try:
-            if photo: await client.send_photo(cq.from_user.id, photo, caption=text)
-            else:     await cq.message.reply_text(text, disable_web_page_preview=True)
+            if photo:
+                await client.send_photo(cq.from_user.id, photo, caption=text, reply_markup=_tabs_kb())
+            else:
+                await cq.message.reply_text(text, reply_markup=_tabs_kb(), disable_web_page_preview=True)
         except Exception:
-            await cq.message.reply_text(text, disable_web_page_preview=True)
+            await cq.message.reply_text(text, reply_markup=_tabs_kb(), disable_web_page_preview=True)
         await cq.answer()
 
     @app.on_message(filters.command("addmenu"))
