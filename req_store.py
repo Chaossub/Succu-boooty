@@ -249,4 +249,3 @@ class ReqStore:
                 return True
             self.remove_exemption(user_id, None)
         return False
-
