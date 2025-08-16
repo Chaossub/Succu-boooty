@@ -1,173 +1,128 @@
-# handlers/help.py
-from __future__ import annotations
+# handlers/help_cmd.py
 import os
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# --- YOU: see everything everywhere ---
-SUPER_ADMIN_ID = 6964994611
-OWNER_ID = int(os.getenv("OWNER_ID", "0")) if os.getenv("OWNER_ID") else None
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))
 
-async def _is_admin(client: Client, chat_id: int, user_id: int) -> bool:
-    if user_id == SUPER_ADMIN_ID or (OWNER_ID and user_id == OWNER_ID):
+async def is_admin(client: Client, chat_id: int, user_id: int) -> bool:
+    if user_id == SUPER_ADMIN_ID:
         return True
     try:
-        cm = await client.get_chat_member(chat_id, user_id)
-        # v2 has privileges; v1 uses status
-        return (getattr(cm, "privileges", None) is not None) or (cm.status in ("administrator", "creator"))
+        m = await client.get_chat_member(chat_id, user_id)
+        return m.status in ("administrator", "creator")
     except Exception:
         return False
 
-def _lines_for(user_is_superadmin: bool, user_is_admin: bool) -> list[str]:
-    lines: list[str] = []
-    lines.append("<b>SuccuBot Commands</b>")
+def _build_help_text(admin: bool) -> str:
+    lines = ["<b>SuccuBot Commands</b>"]
 
-    # ===== General =====
-    lines += [
-        "\n🛠 <b>General</b>",
-        "/start — greet the bot",
-        "/help — show this menu",
-        "/hi — say hi",
-        "/ping — quick health check",
-        "/cancel — cancel current action",
-    ]
+    # General
+    lines.append("\n🛠 <b>General</b>")
+    lines.append("/help — show this menu")
+    lines.append("/hi — say hi")
+    lines.append("/ping — quick health check")
+    lines.append("/cancel — cancel current action")
 
-    # ===== DM Ready =====
-    if user_is_admin or user_is_superadmin:
-        lines.append("\n📩 <b>DM Ready (Foolproof)</b>")
-        lines.append("/dmsetup — post button to open DM & auto-opt in")
-        lines.append("/dmready — mark yourself ready (reply to set others)")
-        lines.append("/dmunready — remove ready (reply to set others)")
-        lines.append("/dmreadylist — list DM-ready users (global)")
-        lines.append("/dmnudge [@user|id] — DM a nudge (or reply)")
-    else:
-        lines += [
-            "\n📩 <b>DM Ready</b>",
-            "/dmready — mark yourself ready",
-            "/dmunready — remove ready",
-        ]
+    # DM Ready (Foolproof)
+    lines.append("\n💌 <b>DM Ready (Foolproof)</b>")
+    lines.append("/dmsetup — post button to open DM & auto-opt in")
+    lines.append("/dmready — mark yourself ready (reply to set others)")
+    lines.append("/dmunready — remove ready (reply to set others)")
+    lines.append("/dmreadylist — list DM-ready users (global)")
+    lines.append("/dmnudge [@user|id] — DM a nudge (or reply)")
 
-    # ===== Requirements =====
-    lines += [
-        "\n📋 <b>Requirements</b>",
-        "/reqhelp — show requirement commands",
-        "/reqstatus — your status (admins can /reqstatus <id> or reply)",
-    ]
-    if user_is_admin or user_is_superadmin:
-        lines += [
-            "/reqadd <amount> — add purchase (reply or self)",
-            "/reqgame — add one game (reply or self)",
-            "/reqnote <text> — set note (reply or text)",
-            "/reqexport — export this month CSV",
-            "/reqadmins — list/add/remove req admins",
-        ]
+    # Requirements
+    lines.append("\n📋 <b>Requirements</b>")
+    lines.append("/reqhelp — show requirement commands")
+    lines.append("/reqstatus — your status (admins can /reqstatus or reply)")
+    lines.append("/reqadd — add purchase (reply or self)")
+    lines.append("/reqgame — add one game (reply or self)")
+    lines.append("/reqnote — set note (reply or text)")
+    lines.append("/reqexport — export this month CSV")
+    lines.append("/reqadmins — list/add/remove req admins")
 
-    # ===== Exemptions =====
-    if user_is_admin or user_is_superadmin:
-        lines += [
-            "\n🛡 <b>Exemptions</b>",
-            "/reqexempt list — show group + global exemptions",
-            "/reqexempt add [72h|7d] [global] [; note] — add exemption (reply or id)",
-            "/reqexempt remove [global] — remove exemption (reply or id)",
-        ]
+    # Exemptions
+    lines.append("\n🛡 <b>Exemptions</b>")
+    lines.append("/reqexempt list — show group + global exemptions")
+    lines.append("/reqexempt add [72h|7d|global] [; note] — add exemption (reply or id)")
+    lines.append("/reqexempt remove [global] — remove exemption (reply or id)")
 
-    # ===== Enforcement =====
-    if user_is_admin or user_is_superadmin:
-        lines += [
-            "\n🚫 <b>Enforcement</b>",
-            "/reqscan — list failing users (respects exemptions)",
-            "/reqenforce — kick only non-exempt failing users",
-        ]
+    # Fun / XP
+    lines.append("\n🎉 <b>Fun</b>")
+    lines.append("/bite @user — playful bite & earn XP")
+    lines.append("/spank @user — playful spank & earn XP")
+    lines.append("/tease @user — playful tease & earn XP")
 
-    # ===== Summon =====
-    lines += [
-        "\n🔔 <b>Summon</b>",
-        "/summon @user — summon one",
-        "/summonall — summon all tracked",
-        "/flirtysummon @user — flirty summon",
-        "/flirtysummonall — flirty summon all",
-    ]
-    if user_is_admin or user_is_superadmin:
-        lines.append("/trackall — track all group members (admin)")
+    lines.append("\n📈 <b>XP & Leaderboard</b>")
+    lines.append("/naughtystats — show your XP")
+    lines.append("/leaderboard — show XP leaderboard")
 
-    # ===== Fun & XP =====
-    lines += [
-        "\n🎉 <b>Fun & XP</b>",
-        "/bite @user — playful bite & XP",
-        "/spank @user — playful spank & XP",
-        "/tease @user — playful tease & XP",
-        "/naughtystats — your XP",
-        "/leaderboard — XP leaderboard",
-    ]
+    if admin:
+        # Moderation
+        lines.append("\n⚒ <b>Moderation</b>")
+        lines.append("/warn <user> [reason] — issue a warning")
+        lines.append("/warns <user> — check warnings")
+        lines.append("/resetwarns <user> — reset warns")
+        lines.append("/flirtywarn <user> — flirty warning (no count)")
+        lines.append("/mute <user> [min] — mute a user")
+        lines.append("/unmute <user> — unmute a user")
+        lines.append("/kick <user> — kick a user")
+        lines.append("/ban <user> — ban a user")
+        lines.append("/unban <user> — unban a user")
+        lines.append("/userinfo <user> — view user info")
 
-    # ===== Moderation =====
-    if user_is_admin or user_is_superadmin:
-        lines += [
-            "\n⚒ <b>Moderation</b>",
-            "/warn <user> [reason] — warn",
-            "/warns <user> — show warns",
-            "/resetwarns <user> — reset warns",
-            "/flirtywarn <user> — flirty warn (no count)",
-            "/mute <user> [min] — mute",
-            "/unmute <user> — unmute",
-            "/kick <user> — kick",
-            "/ban <user> — ban",
-            "/unban <user> — unban",
-            "/userinfo <user> — user info",
-        ]
+        # Federation
+        lines.append("\n🛡 <b>Federation</b>")
+        lines.append("/createfed <name> — create a federation")
+        lines.append("/deletefed <fed_id> — delete federation")
+        lines.append("/purgefed <fed_id> — purge fed ban list")
+        lines.append("/renamefed <fed_id> <new_name> — rename federation")
+        lines.append("/addfedadmin <fed_id> <user> — add fed admin")
+        lines.append("/removefedadmin <fed_id> <user> — remove fed admin")
+        lines.append("/fedlist — list federations")
+        lines.append("/listfedgroups <fed_id> — list groups in federation")
+        lines.append("/fedadmins <fed_id> — list federation admins")
+        lines.append("/fedban <user> — federation ban")
+        lines.append("/fedunban <user> — federation unban")
+        lines.append("/fedcheck <user> — check federation bans")
+        lines.append("/togglefedaction <kick|mute|off> — toggle enforcement")
 
-    # ===== Federation =====
-    if user_is_admin or user_is_superadmin:
-        lines += [
-            "\n🏛 <b>Federation</b>",
-            "/createfed <name> — create federation",
-            "/deletefed <fed_id> — delete federation",
-            "/purgefed <fed_id> — purge fed bans",
-            "/renamefed <fed_id> <new_name> — rename federation",
-            "/addfedadmin <fed_id> <user> — add fed admin",
-            "/removefedadmin <fed_id> <user> — remove fed admin",
-            "/fedlist — list federations",
-            "/listfedgroups <fed_id> — list groups in federation",
-            "/fedadmins <fed_id> — list federation admins",
-            "/fedban <user> — federation ban",
-            "/fedunban <user> — federation unban",
-            "/fedcheck <user> — check federation bans",
-            "/togglefedaction <kick|mute|off> — toggle enforcement",
-        ]
+        # Flyers / scheduling
+        lines.append("\n📂 <b>Flyers</b>")
+        lines.append("/flyer <name> — retrieve a flyer")
+        lines.append("/listflyers — list all flyers")
+        lines.append("/addflyer <name> <caption> — add flyer (photo or text)")
+        lines.append("/changeflyer <name> — update flyer image (reply to new image)")
+        lines.append("/deleteflyer <name> — delete a flyer")
+        lines.append("/scheduleflyer <name> <HH:MM> <group> [daily|once] — schedule flyer")
+        lines.append("/scheduletext <HH:MM> <group> <text> [daily|once] — schedule text flyer")
+        lines.append("/listscheduled — view scheduled flyers")
+        lines.append("/cancelflyer <job_id> — cancel a scheduled post")
 
-    # ===== Flyers + Scheduling =====
-    if user_is_admin or user_is_superadmin:
-        lines += [
-            "\n📂 <b>Flyers</b>",
-            "/flyer <name> — get flyer",
-            "/listflyers — list flyers",
-            "/addflyer <name> <caption> — add flyer (photo/text)",
-            "/changeflyer <name> — update flyer image (reply to photo)",
-            "/deleteflyer <name> — delete flyer",
-            "\n⏰ <b>Scheduling</b>",
-            "/scheduleflyer <name> <HH:MM> <group> [daily|once] — schedule flyer",
-            "/scheduletext <HH:MM> <group> <text> [daily|once] — schedule text",
-            "/listscheduled — view scheduled flyers",
-            "/cancelflyer <job_id> — cancel scheduled flyer",
-        ]
+        # Tracking
+        lines.append("\n📡 <b>Tracking</b>")
+        lines.append("/trackall — track all members (admin only)")
 
-    return lines
+    return "\n".join(lines)
 
 def register(app: Client):
-    @app.on_message(filters.command(["start", "help"]) & ~filters.scheduled)
-    async def show_help(client: Client, m: Message):
-        user_id = m.from_user.id if m.from_user else 0
-        chat_id = m.chat.id if m.chat else 0
+    # /help everywhere
+    @app.on_message(filters.command("help") & ~filters.scheduled)
+    async def help_everywhere(client: Client, message: Message):
+        admin = False
+        try:
+            admin = await is_admin(client, message.chat.id, message.from_user.id)
+        except Exception:
+            admin = False
+        await message.reply(_build_help_text(admin), disable_web_page_preview=True)
 
-        superadmin = (user_id == SUPER_ADMIN_ID)
-        if chat_id < 0:  # group/supergroup
-            admin = await _is_admin(client, chat_id, user_id)
-        else:           # private chat: treat OWNER as admin
-            admin = superadmin or (OWNER_ID and user_id == OWNER_ID)
-
-        lines = _lines_for(superadmin, admin)
-
-        if chat_id < 0:
-            lines.append("\n<i>Tip: in groups with privacy mode ON, use /command@YourBotUsername.</i>")
-
-        await m.reply("\n".join(lines), disable_web_page_preview=True)
+    # /start in GROUPS ONLY (so /start in DMs is left to dm_foolproof)
+    @app.on_message(filters.command("start") & ~filters.private & ~filters.scheduled)
+    async def start_groups(client: Client, message: Message):
+        admin = False
+        try:
+            admin = await is_admin(client, message.chat.id, message.from_user.id)
+        except Exception:
+            admin = False
+        await message.reply(_build_help_text(admin), disable_web_page_preview=True)
