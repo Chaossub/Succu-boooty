@@ -40,47 +40,34 @@ def _try_wire(modpath: str, label: str, app: Client) -> None:
     except Exception as e:
         log.error("failed wiring %s: %s", label, e)
 
+async def run_http_health():
+    if os.getenv("USE_HTTP_HEALTH", "1") != "1":
+        return
+    port = int(os.getenv("PORT", "8000"))
+    try:
+        from fastapi import FastAPI
+        import uvicorn
+        app = FastAPI()
+        @app.get("/health")
+        def health():
+            return {"ok": True}
+        log.info("Starting FastAPI health server on :%d", port)
+        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
+        server = uvicorn.Server(config)
+        await server.serve()
+    except Exception as e:
+        log.warning("Health server unavailable: %s", e)
+
 def wire_handlers(app: Client) -> None:
-    # Always-on basic ping
     _try_wire("handlers.hi", "hi", app)
-
-    # Requirements tracker
     _try_wire("handlers.req_handlers", "requirements", app)
-
-    # DM foolproof helpers
+    _try_wire("handlers.enforce_requirements", "scan/enforce", app)
     try:
         import dm_foolproof as dmf
         dmf.register(app)
         log.info("wired: dm_foolproof")
     except Exception as e:
         log.error("failed wiring dm_foolproof: %s", e)
-
-async def run_http_health():
-    """Tiny HTTP health server; useful for hosts that expect a web port (Render/Railway)."""
-    from wsgiref.simple_server import make_server, WSGIRequestHandler
-
-    def app(environ, start_response):
-        start_response("200 OK", [("Content-Type", "text/plain")])
-        return [b"ok"]
-
-    class Silent(WSGIRequestHandler):
-        def log_message(self, *_args):  # quiet logs
-            pass
-
-    port = int(os.getenv("PORT", "8000"))
-    for _ in range(3):
-        try:
-            httpd = make_server("0.0.0.0", port, app, handler_class=Silent)
-            break
-        except OSError:
-            await asyncio.sleep(1)
-    else:
-        log.warning("health server not started (port busy?)")
-        return
-
-    log.info("HTTP health server on :%d", port)
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, httpd.serve_forever)
 
 async def main():
     app = build_app()
@@ -90,9 +77,7 @@ async def main():
     await app.start()
     log.info("🤖 Bot is online.")
 
-    health_task = None
-    if os.getenv("USE_HTTP_HEALTH", "1") == "1":
-        health_task = asyncio.create_task(run_http_health())
+    health_task = asyncio.create_task(run_http_health())
 
     try:
         while True:
@@ -101,10 +86,9 @@ async def main():
         pass
     finally:
         log.info("🛑 Stopping SuccuBot…")
-        if health_task:
-            health_task.cancel()
-            with contextlib.suppress(Exception):
-                await health_task
+        health_task.cancel()
+        with contextlib.suppress(Exception):
+            await health_task
         await app.stop()
         log.info("🧹 Clean shutdown complete.")
 
@@ -114,3 +98,4 @@ if __name__ == "__main__":
     except Exception:
         log.exception("❌ Fatal error during startup")
         raise
+
