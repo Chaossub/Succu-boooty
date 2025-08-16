@@ -1,6 +1,5 @@
-# main.py
 import os, asyncio, logging, contextlib, importlib, pkgutil
-from typing import Optional, List, Set
+from typing import Optional, Set, List
 from dotenv import load_dotenv
 from pyrogram import Client
 from pyrogram.enums import ParseMode
@@ -30,7 +29,6 @@ def build_app() -> Client:
         workdir=".",
     )
 
-# ---------- optional FastAPI health ----------
 async def run_http_health():
     if os.getenv("USE_HTTP_HEALTH", "1") != "1":
         return
@@ -48,12 +46,9 @@ async def run_http_health():
     except Exception as e:
         log.warning("Health server unavailable: %s", e)
 
-# ---------- wiring ----------
 WIRED: Set[str] = set()
-FOUND_NO_REGISTER: Set[str] = set()
 
 def _priority_key(modname: str) -> tuple:
-    # stable, sensible order (schedulers get loop early)
     prio = {
         "handlers.flyer_scheduler": 10,
         "handlers.schedulemsg": 10,
@@ -85,6 +80,7 @@ def _wire_handlers_package(app: Client, package_name: str = "handlers") -> None:
     mods: List[str] = []
     for _, modname, _ in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
         mods.append(modname)
+
     for modname in sorted(mods, key=_priority_key):
         try:
             mod = importlib.import_module(modname)
@@ -92,7 +88,6 @@ def _wire_handlers_package(app: Client, package_name: str = "handlers") -> None:
             log.exception("Failed import: %s (%s)", modname, e)
             continue
 
-        # Pass the main loop first, if module exposes set_main_loop(loop)
         if hasattr(mod, "set_main_loop"):
             try:
                 mod.set_main_loop(loop)
@@ -107,8 +102,6 @@ def _wire_handlers_package(app: Client, package_name: str = "handlers") -> None:
                 WIRED.add(modname)
             except Exception as e:
                 log.exception("Failed register: %s (%s)", modname, e)
-        else:
-            FOUND_NO_REGISTER.add(modname)
 
 def _wire_dm_foolproof(app: Client) -> None:
     try:
@@ -126,33 +119,8 @@ def _wire_dm_foolproof(app: Client) -> None:
 def wire_everything(app: Client) -> None:
     _wire_handlers_package(app, "handlers")
     _wire_dm_foolproof(app)
+    log.info("Handlers wired: %d module(s) with register(app).", len(WIRED))
 
-    # Summary (so you can verify every handler you expect is live)
-    expected = {
-        "handlers.enforce_requirements",
-        "handlers.federation",
-        "handlers.flyer",
-        "handlers.flyer_scheduler",
-        "handlers.fun",
-        "handlers.help_cmd",
-        "handlers.hi",
-        "handlers.menu",
-        "handlers.moderation",
-        "handlers.req_handlers",
-        "handlers.schedulemsg",
-        "handlers.summon",
-        "handlers.warmup",
-        "handlers.warnings",
-        "handlers.welcome",
-        "handlers.xp",
-    }
-    missing = sorted(list(expected - WIRED))
-    if missing:
-        log.warning("Some expected modules were not wired (no register() or import error): %s", ", ".join(missing))
-    else:
-        log.info("All expected handlers wired successfully.")
-
-# ---------- main ----------
 async def main():
     app = build_app()
     wire_everything(app)
