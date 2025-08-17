@@ -58,9 +58,8 @@ def _priority_key(modname: str) -> tuple:
         "handlers.flyer_scheduler": 10,
         "handlers.schedulemsg": 10,
 
-        # Make sure help/menus/DM portal bits are ready early
+        # core UX early
         "handlers.help_menu": 15,
-
         "handlers.welcome": 20,
         "handlers.hi": 25,
         "handlers.help_cmd": 30,
