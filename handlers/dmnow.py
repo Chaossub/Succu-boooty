@@ -1,43 +1,41 @@
 # handlers/dmnow.py
+# Group-only helper to append a "DM Now" deep-link button to your message.
+# Does NOT modify DM-ready state. Users become DM-ready when they press /start in DM.
+
 import os
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))
-
-def _build_dm_button(bot_username: str) -> InlineKeyboardMarkup:
-    deep_link = f"https://t.me/{bot_username}?start=dm"
-    return InlineKeyboardMarkup([[InlineKeyboardButton("💌 DM Now", url=deep_link)]])
-
-async def _is_group_admin(client: Client, chat_id: int, user_id: int) -> bool:
-    try:
-        member = await client.get_chat_member(chat_id, user_id)
-        return member.status in ("administrator", "owner", "creator") or bool(getattr(member, "privileges", None))
-    except Exception:
-        return False
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
 def register(app: Client):
-    # /dmnow — posts ONLY the button (no extra text)
     @app.on_message(filters.command("dmnow"))
-    async def dmnow(client: Client, message):
-        chat = message.chat
-        user = message.from_user
-
-        # In groups/supergroups: allow any admin to run it
-        if chat.type in ("group", "supergroup"):
-            if not user or not await _is_group_admin(client, chat.id, user.id):
-                await message.reply_text("Admins only.")
-                return
-        else:
-            # In private chats: restrict to OWNER_ID
-            if not user or user.id != OWNER_ID:
-                await message.reply_text("Only the owner can run this here.")
-                return
+    async def dmnow(client: Client, m: Message):
+        # Must be used in groups by admins
+        if not m.chat or m.chat.type == "private":
+            return await m.reply_text("Use /dmnow in the group.")
+        try:
+            member = await client.get_chat_member(m.chat.id, m.from_user.id)
+            if (member.privileges is None) and (member.status not in ("administrator", "creator")):
+                return await m.reply_text("Admins only.")
+        except Exception:
+            return await m.reply_text("Admins only.")
 
         me = await client.get_me()
-        await client.send_message(
-            chat_id=chat.id,
-            text="",  # no caption, just the inline keyboard
-            reply_markup=_build_dm_button(me.username),
-            disable_web_page_preview=True,
-        )
+        if not me.username:
+            return await m.reply_text("I need a @username to build the DM button.")
+
+        # Deep-link to /start — user must tap to DM the bot
+        url  = f"https://t.me/{me.username}?start=ready"
+
+        # Customizable via env (optional)
+        btn_text  = os.getenv("DMNOW_BTN", "💌 DM Now")
+        lead_text = os.getenv("DMNOW_TEXT", "Tap the button to DM the bot for menus, rules, games & support.")
+
+        # If the admin typed a caption with /dmnow, use that text instead of env
+        # Example: "Some message here" then add the button
+        # (/dmnow command can be on its own line after your message)
+        text = lead_text
+        if m.text and len(m.text.split(maxsplit=1)) > 1:
+            text = m.text.split(maxsplit=1)[1]
+
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=url)]])
+        await m.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
