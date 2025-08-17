@@ -1,42 +1,70 @@
 # handlers/dmnow.py
-# Group-only helper to append a "DM Now" deep-link button to your message.
-# Does NOT modify DM-ready state. Users become DM-ready when they press /start in DM.
+# /dmnow — post a deep-link button for members to open the bot DM.
+# - In groups: admins only
+# - In private: restricted to OWNER / SUPER_ADMINS (optional)
+# - Does NOT touch DM-ready. User must press /start in DM to become ready.
 
 import os
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "0"))
+SUPER_ADMINS = {
+    int(x) for x in os.getenv("SUPER_ADMINS", "").replace(";", ",").split(",") if x.strip().isdigit()
+}
+
+# Defaults (overridable by env)
+DMNOW_BTN  = os.getenv("DMNOW_BTN", "💌 DM Now")
+DMNOW_TEXT = os.getenv("DMNOW_TEXT", "Tap to DM the team.")
+
+async def _is_group_admin(app: Client, chat_id: int, user_id: int) -> bool:
+    try:
+        m = await app.get_chat_member(chat_id, user_id)
+        return (m.privileges is not None) or (m.status in ("administrator", "creator"))
+    except Exception:
+        return False
+
+def _is_high_priv(uid: int) -> bool:
+    return uid in SUPER_ADMINS or uid in {OWNER_ID, SUPER_ADMIN_ID}
 
 def register(app: Client):
+
     @app.on_message(filters.command("dmnow"))
     async def dmnow(client: Client, m: Message):
-        # Must be used in groups by admins
-        if not m.chat or m.chat.type == "private":
-            return await m.reply_text("Use /dmnow in the group.")
+        # Permission gate
+        if m.chat and m.chat.type != "private":
+            if not await _is_group_admin(client, m.chat.id, m.from_user.id):
+                return await m.reply_text("Admins only.")
+        else:
+            if not _is_high_priv(m.from_user.id):
+                return await m.reply_text("Only admins can use this here.")
 
-        try:
-            member = await client.get_chat_member(m.chat.id, m.from_user.id)
-            is_admin = (member.privileges is not None) or (member.status in ("administrator", "creator"))
-        except Exception:
-            is_admin = False
-
-        if not is_admin:
-            return await m.reply_text("Admins only.")
-
-        # Deep link to this bot's DM /start
         me = await client.get_me()
         if not me.username:
-            return await m.reply_text("I need a public @username to create the DM button.")
+            return await m.reply_text("I need a public @username to create a DM button.")
+
+        # Build deep-link to bot
+        # Use ?start=ready so the first message pre-fills a parameter (your /start already handles it gracefully)
         url = f"https://t.me/{me.username}?start=ready"
 
-        # Customizable via env (optional)
-        btn_text  = os.getenv("DMNOW_BTN", "💌 DM Now")
-        lead_text = os.getenv("DMNOW_TEXT", "Tap the button to DM the bot for menus, rules, games & support.")
+        # Allow optional custom label/text: /dmnow <label>|<text>
+        label, text = DMNOW_BTN, DMNOW_TEXT
+        if len(m.command) > 1:
+            arg = " ".join(m.command[1:]).strip()
+            if "|" in arg:
+                a, b = arg.split("|", 1)
+                if a.strip(): label = a.strip()
+                if b.strip(): text  = b.strip()
+            else:
+                # single token overrides label only
+                if arg: label = arg
 
-        # If the admin typed extra text after /dmnow, use that instead of env text
-        # Example: "/dmnow Hey boys — tap to message us" -> uses that caption
-        text = lead_text
-        if m.text and len(m.text.split(maxsplit=1)) > 1:
-            text = m.text.split(maxsplit=1)[1]
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(label, url=url)]])
 
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton(btn_text, url=url)]])
+        # If replying to a message, put the button as a short follow-up so you can place it "at the end".
+        if m.reply_to_message:
+            return await m.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
+
+        # Otherwise just post the button & text in chat.
         await m.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
