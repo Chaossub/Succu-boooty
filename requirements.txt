@@ -1,18 +1,21 @@
-# Telegram Bot Framework
-python-telegram-bot==20.7   # Use PTB v20 (ApplicationBuilder, async handlers)
+# Telegram Bot Framework (PTB v21 – no Updater)
+python-telegram-bot==21.6
 
-# Telegram Bot & Scheduling Core
-pyrogram==2.0.106
-tgcrypto==1.2.5
-python-dotenv==1.0.1
-pymongo==4.7.2
+# Scheduling / ENV / DB
 apscheduler==3.10.1
 python-dateutil==2.8.2
 pytz>=2023.3
+python-dotenv==1.0.1
+pymongo==4.7.2
+dnspython
 
-# FastAPI server
+# FastAPI (optional health endpoint etc.)
 fastapi==0.95.1
 uvicorn[standard]==0.23.2
+
+# (Optional) If you truly still need Pyrogram elsewhere, keep these; otherwise remove them.
+# pyrogram==2.0.106
+# tgcrypto==1.2.5
 
 # Packaging
 setuptools>=65.0.0
