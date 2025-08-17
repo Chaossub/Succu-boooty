@@ -3,32 +3,32 @@ import os
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     CallbackQueryHandler,
     ContextTypes,
 )
-import telegram
+import telegram  # to log version at boot
 
-# Load env
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# Logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-)
-log = logging.getLogger("SuccuBot")
+# Optional IDs for DM buttons (contact admins)
+OWNER_ID = os.getenv("OWNER_ID", "").strip()
+RUBY_ID  = os.getenv("RUBY_ID",  "").strip()
 
-# ---- Links from env (with safe defaults) ----
+# Links used in “Find Our Models Elsewhere”
 RONI_LINK = os.getenv("RONI_LINK", "https://allmylinks.com/chaossub283")
 RUBY_LINK = os.getenv("RUBY_LINK", "https://allmylinks.com/rubyransoms")
 RIN_LINK  = os.getenv("RIN_LINK",  "https://allmylinks.com/peachybunsrin")
 SAVY_LINK = os.getenv("SAVY_LINK", "https://allmylinks.com/savannahxsavage")
 
-OWNER_ID = os.getenv("OWNER_ID", "").strip()
-RUBY_ID  = os.getenv("RUBY_ID",  "").strip()
+# ---- Logging ----
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+)
+log = logging.getLogger("SuccuBot")
 
 # ---- Text blocks ----
 WELCOME_TEXT = (
@@ -171,11 +171,11 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "help":
         try:
-            await q.message.edit_text("❓ <b>Help</b>\nPick a topic:", reply_markup=kb_help_root(),
-                                      disable_web_page_preview=True)
+            await q.message.edit_text("❓ <b>Help</b>\nPick a topic:",
+                                      reply_markup=kb_help_root(), disable_web_page_preview=True)
         except Exception:
-            await q.message.reply_text("❓ <b>Help</b>\nPick a topic:", reply_markup=kb_help_root(),
-                                       disable_web_page_preview=True)
+            await q.message.reply_text("❓ <b>Help</b>\nPick a topic:",
+                                       reply_markup=kb_help_root(), disable_web_page_preview=True)
 
     elif data == "help_reqs":
         await q.message.edit_text(BUYER_REQUIREMENTS_TEXT, reply_markup=kb_back_to_help(), disable_web_page_preview=True)
@@ -221,42 +221,50 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif data == "find_models":
         try:
-            await q.message.edit_text(FIND_MODELS_TEXT, reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_home")]]),
-                disable_web_page_preview=False)
+            await q.message.edit_text(
+                FIND_MODELS_TEXT,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_home")]]
+                ),
+                disable_web_page_preview=False,
+            )
         except Exception:
-            await q.message.reply_text(FIND_MODELS_TEXT, reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_home")]]),
-                disable_web_page_preview=False)
+            await q.message.reply_text(
+                FIND_MODELS_TEXT,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_home")]]
+                ),
+                disable_web_page_preview=False,
+            )
 
-    # Placeholders for anon/suggest flows
     elif data == "anon":
-        await q.message.edit_text("You're anonymous. Type the message you want me to send to the admins.",
-                                  reply_markup=InlineKeyboardMarkup(
-                                      [[InlineKeyboardButton("✖️ Cancel", callback_data="back_home")]]))
+        await q.message.edit_text(
+            "You're anonymous. Type the message you want me to send to the admins.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Cancel", callback_data="back_home")]]),
+        )
     elif data == "suggest":
-        await q.message.edit_text("How would you like to send your suggestion?",
-                                  reply_markup=InlineKeyboardMarkup([
-                                      [InlineKeyboardButton("💡 With your @", callback_data="back_home")],
-                                      [InlineKeyboardButton("🙈 Anonymously", callback_data="back_home")],
-                                      [InlineKeyboardButton("✖️ Cancel", callback_data="back_home")],
-                                  ]))
+        await q.message.edit_text(
+            "How would you like to send your suggestion?",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("💡 With your @", callback_data="back_home")],
+                [InlineKeyboardButton("🙈 Anonymously", callback_data="back_home")],
+                [InlineKeyboardButton("✖️ Cancel", callback_data="back_home")],
+            ]),
+        )
 
-# ---- App bootstrap (PTB v20) ----
+# ---- Bootstrap (PTB 21) ----
 def main():
     if not BOT_TOKEN:
         log.error("Missing BOT_TOKEN in environment. Set BOT_TOKEN and redeploy.")
         raise SystemExit(1)
 
-    log.info("Booting SuccuBot with PTB %s", getattr(telegram, "__version__", "unknown"))
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    log.info("Starting SuccuBot… (PTB %s)", getattr(telegram, "__version__", "unknown"))
+    app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(on_button))
 
-    # This blocks the process so Render keeps it alive
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(close_loop=False, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
-
