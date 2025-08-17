@@ -1,15 +1,19 @@
 # handlers/menu.py
-# Model menus (Roni, Ruby, Rin, Savy)
-# - /addmenu <Name> <text...>   (DM recommended)  — supports text-only OR photo+caption OR reply-to-photo
+# Model menus (Roni, Ruby, Rin, Savy) with Back navigation and edit permissions.
+# - /addmenu <Name> <text...>   (DM recommended) — supports text-only OR photo+caption OR reply-to-photo
 # - /menu                        — show tabs & open a model's menu
 # - /menus                       — list which menus exist
 # - /deletemenu <Name>           — delete a menu
+#
+# Permissions:
+#   Admins: SUPER_ADMIN_ID / OWNER_ID / MENU_EDITORS (CSV) → can edit ANY menu
+#   Models: RONI_ID/RUBY_ID/RIN_ID/SAVY_ID → can edit ONLY their own menu
 #
 # Storage: MongoDB (MONGO_URI, MONGO_DBNAME). Collection: "model_menus".
 
 import os
 import time
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, Set
 
 from pyrogram import Client, filters
 from pyrogram.enums import ChatType
@@ -20,21 +24,38 @@ from pyrogram.types import (
     CallbackQuery,
 )
 
-from pymongo import MongoClient, UpdateOne
+from pymongo import MongoClient
 
 # -------------------- Config --------------------
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB = os.getenv("MONGO_DBNAME", "succubus")
 COLL = "model_menus"
 
-ALLOWED_MODELS = {
-    "roni": "Roni",
-    "ruby": "Ruby",
-    "rin": "Rin",
-    "savy": "Savy",
-}
+ALLOWED_MODELS = {"roni": "Roni", "ruby": "Ruby", "rin": "Rin", "savy": "Savy"}
 
-BTN_MENU = os.getenv("BTN_MENU", "💕 Menu")
+def _to_int(s: Optional[str]) -> Optional[int]:
+    try:
+        return int(str(s)) if s not in (None, "", "None") else None
+    except Exception:
+        return None
+
+SUPER_ADMIN_ID = _to_int(os.getenv("SUPER_ADMIN_ID"))
+OWNER_ID       = _to_int(os.getenv("OWNER_ID"))
+
+RONI_ID = _to_int(os.getenv("RONI_ID"))
+RUBY_ID = _to_int(os.getenv("RUBY_ID"))
+RIN_ID  = _to_int(os.getenv("RIN_ID"))
+SAVY_ID = _to_int(os.getenv("SAVY_ID"))
+
+_EXTRA_EDITORS: Set[int] = set()
+if os.getenv("MENU_EDITORS"):
+    for tok in os.getenv("MENU_EDITORS").split(","):
+        v = _to_int(tok.strip())
+        if v:
+            _EXTRA_EDITORS.add(v)
+
+ADMIN_IDS: Set[int] = set(i for i in (SUPER_ADMIN_ID, OWNER_ID) if i) | _EXTRA_EDITORS
+MODEL_OWNER_ID = {"Roni": RONI_ID, "Ruby": RUBY_ID, "Rin": RIN_ID, "Savy": SAVY_ID}
 
 # ----------------- DB Helpers -------------------
 _client: Optional[MongoClient] = None
@@ -70,13 +91,23 @@ def delete_menu(name: str) -> bool:
     res = _db().delete_one({"name": name})
     return res.deleted_count > 0
 
-# ----------------- Parse Helpers ----------------
+# ----------------- Permissions ------------------
 def _norm_name(raw: str) -> Optional[str]:
     if not raw:
         return None
-    key = raw.strip().lower()
-    return ALLOWED_MODELS.get(key)
+    return ALLOWED_MODELS.get(raw.strip().lower())
 
+def _is_admin(user_id: Optional[int]) -> bool:
+    return bool(user_id and user_id in ADMIN_IDS)
+
+def _is_model_owner(model: str, user_id: Optional[int]) -> bool:
+    return bool(user_id and MODEL_OWNER_ID.get(model) and MODEL_OWNER_ID[model] == user_id)
+
+def _can_edit(model: str, user_id: Optional[int]) -> bool:
+    # Admins can edit anything; models can edit their own only.
+    return _is_admin(user_id) or _is_model_owner(model, user_id)
+
+# ----------------- Parse Helpers ----------------
 def _extract_text_and_model(m: Message) -> Tuple[Optional[str], Optional[str]]:
     """
     Extract model name and menu text from message (DM-friendly).
@@ -89,7 +120,6 @@ def _extract_text_and_model(m: Message) -> Tuple[Optional[str], Optional[str]]:
     if not content:
         return None, None
 
-    # Split "/addmenu Name ..." with newlines preserved after the name
     parts = content.split(None, 2)  # [/addmenu, Name, rest...]
     if len(parts) < 2:
         return None, None
@@ -98,11 +128,9 @@ def _extract_text_and_model(m: Message) -> Tuple[Optional[str], Optional[str]]:
     if not model:
         return None, None
 
-    # Any remaining text is the menu body (may include newlines)
     if len(parts) >= 3 and parts[2].strip():
         return model, parts[2].strip()
 
-    # If user wrote on the next lines (e.g., they pressed Enter after name)
     lines = content.splitlines()
     if len(lines) > 1:
         rest = "\n".join(lines[1:]).strip()
@@ -119,7 +147,7 @@ def _photo_id_from(m: Message) -> Optional[str]:
     return None
 
 # ----------------- Keyboards --------------------
-def _tabs_kb() -> InlineKeyboardMarkup:
+def _tabs_kb(include_back_to_portal: bool = True) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton("Roni", callback_data="menu_tab:Roni"),
@@ -130,50 +158,67 @@ def _tabs_kb() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Savy", callback_data="menu_tab:Savy"),
         ],
     ]
+    if include_back_to_portal:
+        rows.append([InlineKeyboardButton("◀️ Back", callback_data="menu_home")])
     return InlineKeyboardMarkup(rows)
 
-def _back_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="menu_back")]])
+def _back_to_tabs_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="menu_back_tabs")]])
+
+def _portal_kb() -> InlineKeyboardMarkup:
+    # Should match your dm_foolproof portal callbacks
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💕 Menu", callback_data="dmf_open_menu")],
+        [InlineKeyboardButton("💌 Contact", callback_data="dmf_contact")],
+        [InlineKeyboardButton("🔗 Find our models elsewhere", callback_data="dmf_links")],
+        [InlineKeyboardButton("❔ Help", callback_data="dmf_help")],
+    ])
 
 # ----------------- Handlers ---------------------
 def register(app: Client):
 
     @app.on_message(filters.command("addmenu"))
     async def addmenu_handler(client: Client, m: Message):
-        # Recommend doing this in DM; we'll still allow admins in groups if you prefer.
+        # Recommend doing this in DM
         if m.chat.type != ChatType.PRIVATE:
             me = await client.get_me()
             return await m.reply_text(
-                "For safety, add menus in DM.\n"
-                f"Open: https://t.me/{me.username}",
+                "Add menus in DM.\nOpen: https://t.me/{u}".format(u=me.username),
                 disable_web_page_preview=True
             )
 
         model, text = _extract_text_and_model(m)
         photo_id = _photo_id_from(m)
+        uid = m.from_user.id if m.from_user else None
 
         if not model:
             return await m.reply_text(
                 "Which model? Use one of: <code>Roni</code>, <code>Ruby</code>, <code>Rin</code>, <code>Savy</code>\n\n"
                 "Examples:\n"
                 "<code>/addmenu Roni &lt;b&gt;Roni’s Menu&lt;/b&gt; • GFE $XX • Customs $XX</code>\n"
-                "or send a photo and put the same command in the caption.",
+                "or send a photo and put the command + text in the caption.",
                 disable_web_page_preview=True
+            )
+
+        # Permission check
+        if not _can_edit(model, uid):
+            return await m.reply_text(
+                f"Sorry, you don’t have permission to edit <b>{model}</b>’s menu.\n"
+                "If you are that model, ask an admin to set your user ID in the environment (e.g., RONI_ID/RUBY_ID/RIN_ID/SAVY_ID)."
             )
 
         if not text and not photo_id:
-            # They sent only "/addmenu Name" with no body/photo
             return await m.reply_text(
                 "I need the menu text.\n\n"
                 "Send one message like:\n"
-                "<code>/addmenu {name}\n"
+                f"<code>/addmenu {model}\n"
                 "&lt;b&gt;Title&lt;/b&gt;\\n• line\\n• line</code>\n"
                 "Or send a photo and put the command + text in the caption.\n"
-                "You can also reply to a photo with: <code>/addmenu {name} Your text…</code>".format(name=model),
+                f"You can also reply to a photo with: <code>/addmenu {model} Your text…</code>",
                 disable_web_page_preview=True
             )
 
-        set_menu(model, text or "", photo_id, by_id=(m.from_user.id if m.from_user else None))
+        set_menu(model, text or "", photo_id, by_id=uid)
         pretty = f"<b>{model}</b> menu saved"
         if photo_id and text:
             pretty += " (photo + text)."
@@ -196,8 +241,16 @@ def register(app: Client):
         if len(parts) < 2:
             return await m.reply_text("Usage: <code>/deletemenu Roni</code>")
         model = _norm_name(parts[1])
+        uid = m.from_user.id if m.from_user else None
         if not model:
             return await m.reply_text("Pick one of: Roni, Ruby, Rin, Savy")
+
+        # Permission check
+        if not _can_edit(model, uid):
+            return await m.reply_text(
+                f"Sorry, you don’t have permission to delete <b>{model}</b>’s menu."
+            )
+
         ok = delete_menu(model)
         if ok:
             await m.reply_text(f"🗑 Deleted <b>{model}</b> menu.")
@@ -206,15 +259,44 @@ def register(app: Client):
 
     @app.on_message(filters.command("menu"))
     async def open_menu(client: Client, m: Message):
-        await m.reply_text("💕 <b>Model Menus</b>\nChoose a name:", reply_markup=_tabs_kb(), disable_web_page_preview=True)
+        await m.reply_text(
+            "💕 <b>Model Menus</b>\nChoose a name:",
+            reply_markup=_tabs_kb(include_back_to_portal=True),
+            disable_web_page_preview=True
+        )
 
-    @app.on_callback_query(filters.regex(r"^menu_back$"))
-    async def on_back(client: Client, cq: CallbackQuery):
+    # ---- Callbacks ----
+
+    @app.on_callback_query(filters.regex(r"^menu_back_tabs$"))
+    async def on_back_tabs(client: Client, cq: CallbackQuery):
         try:
-            await cq.message.edit_text("💕 <b>Model Menus</b>\nChoose a name:", reply_markup=_tabs_kb(), disable_web_page_preview=True)
+            await cq.message.edit_text(
+                "💕 <b>Model Menus</b>\nChoose a name:",
+                reply_markup=_tabs_kb(include_back_to_portal=True),
+                disable_web_page_preview=True
+            )
         except Exception:
-            # if editing fails (e.g., message is not editable), just send a new one
-            await cq.message.reply_text("💕 <b>Model Menus</b>\nChoose a name:", reply_markup=_tabs_kb(), disable_web_page_preview=True)
+            await cq.message.reply_text(
+                "💕 <b>Model Menus</b>\nChoose a name:",
+                reply_markup=_tabs_kb(include_back_to_portal=True),
+                disable_web_page_preview=True
+            )
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex(r"^menu_home$"))
+    async def on_menu_home(client: Client, cq: CallbackQuery):
+        try:
+            await cq.message.edit_text(
+                "Welcome to the Sanctuary portal 💋 Choose an option:",
+                reply_markup=_portal_kb(),
+                disable_web_page_preview=True
+            )
+        except Exception:
+            await cq.message.reply_text(
+                "Welcome to the Sanctuary portal 💋 Choose an option:",
+                reply_markup=_portal_kb(),
+                disable_web_page_preview=True
+            )
         await cq.answer()
 
     @app.on_callback_query(filters.regex(r"^menu_tab:(Roni|Ruby|Rin|Savy)$"))
@@ -225,13 +307,11 @@ def register(app: Client):
             await cq.answer("No menu yet for " + model, show_alert=True)
             return
 
-        kb = _back_kb()
+        kb = _back_to_tabs_kb()
         if doc.get("photo_id"):
-            # Show photo + caption
             try:
                 await cq.message.reply_photo(doc["photo_id"], caption=(doc.get("text") or ""), reply_markup=kb)
             except Exception:
-                # fallback to text if photo not found anymore
                 await cq.message.reply_text(doc.get("text") or "(photo unavailable)", reply_markup=kb, disable_web_page_preview=True)
         else:
             await cq.message.reply_text(doc.get("text") or "(empty)", reply_markup=kb, disable_web_page_preview=True)
