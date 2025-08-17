@@ -1,5 +1,6 @@
 import os
 import logging
+import importlib
 from pyrogram import Client
 
 logging.basicConfig(
@@ -8,15 +9,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("SuccuBot")
 
-# --- Required creds ---
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 if not API_ID or not API_HASH or not BOT_TOKEN:
-    raise SystemExit("Please set API_ID, API_HASH, and BOT_TOKEN in environment variables.")
+    raise SystemExit("Please set API_ID, API_HASH, and BOT_TOKEN in env.")
 
-# --- Create client ---
 app = Client(
     "succubot",
     api_id=API_ID,
@@ -25,49 +24,61 @@ app = Client(
     workdir="."
 )
 
+def _load_and_register(modname: str) -> bool:
+    """Import handlers.<modname> and call register(app) if present."""
+    fq = f"handlers.{modname}"
+    try:
+        mod = importlib.import_module(fq)
+    except Exception as e:
+        log.warning("skip: %s (import error: %s)", fq, e)
+        return False
+    if hasattr(mod, "register") and callable(mod.register):
+        try:
+            mod.register(app)
+            log.info("wired: %s", fq)
+            return True
+        except Exception as e:
+            log.exception("Failed register() in %s: %s", fq, e)
+            return False
+    else:
+        log.warning("skip: %s (no register(app))", fq)
+        return False
+
 def _wire_handlers():
-    """
-    Register handlers explicitly so only the intended /start (dm_foolproof) is active.
-    Add/remove modules here as you grow, but keep /start only in dm_foolproof.
-    """
+    """Explicit order. Keep /start ONLY in the foolproof DM module."""
     wired = 0
 
-    # Import order is explicit; nothing here should register /start except dm_foolproof.
-    from handlers import fun
-    fun.register(app); log.info("wired: handlers.fun"); wired += 1
+    for name in [
+        "fun",
+        "xp",
+        "flyer",
+        "menu",
+        "warmup",
+        "membership_watch",
+        "exemptions",
+        "help_panel",
+    ]:
+        wired += 1 if _load_and_register(name) else 0
 
-    from handlers import xp
-    xp.register(app); log.info("wired: handlers.xp"); wired += 1
+    # ✅ Try multiple possible filenames for your foolproof DM /start module
+    foolproof_candidates = ["dm_foolproof", "foolproofdm", "dm_foolproof_start"]
+    fp_wired = False
+    for cand in foolproof_candidates:
+        if _load_and_register(cand):
+            log.info("✅ /start is provided by: handlers.%s", cand)
+            fp_wired = True
+            wired += 1
+            break
+    if not fp_wired:
+        log.error("❌ Could not find a handlers.dm_foolproof-style module for /start. "
+                  "Ensure the file exists (e.g., handlers/dm_foolproof.py) and defines register(app).")
 
-    from handlers import flyer
-    flyer.register(app); log.info("wired: handlers.flyer"); wired += 1
+    # DM Now button helper (NO /start here)
+    if _load_and_register("dmnow"):
+        wired += 1
 
-    from handlers import menu
-    menu.register(app); log.info("wired: handlers.menu"); wired += 1
+    log.info("Handlers wired: %d module(s) with register(app).", wired)
 
-    from handlers import warmup
-    warmup.register(app); log.info("wired: handlers.warmup"); wired += 1
-
-    from handlers import membership_watch
-    membership_watch.register(app); log.info("wired: handlers.membership_watch"); wired += 1
-
-    from handlers import exemptions
-    exemptions.register(app); log.info("wired: handlers.exemptions"); wired += 1
-
-    from handlers import help_panel
-    help_panel.register(app); log.info("wired: handlers.help_panel"); wired += 1
-
-    # ✅ Only file that should define /start
-    from handlers import dm_foolproof
-    dm_foolproof.register(app); log.info("wired: handlers.dm_foolproof (/start)"); wired += 1
-
-    # The DM button helper (NO /start here)
-    from handlers import dmnow
-    dmnow.register(app); log.info("wired: handlers.dmnow (/dmnow)"); wired += 1
-
-    log.info("Handlers wired: %s module(s) with register(app).", wired)
-
-# Optional: tiny ping/health route if you run a FastAPI or uptime check elsewhere
 @app.on_message()
 async def _noop(_, __):
     return
