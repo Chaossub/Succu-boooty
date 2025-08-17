@@ -31,23 +31,10 @@ except Exception:
 
 # ==== ENV ====
 OWNER_ID       = int(os.getenv("OWNER_ID", "0"))
-SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))  # kept for compatibility if other code uses it
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))  # legacy compatibility
 
-# Super admins & models via env (string ids -> ints handled below)
-SUPER_ADMINS_STR = os.getenv("SUPER_ADMINS", "6964994611,8087941938")
-MODEL_IDS_STR    = os.getenv("MODEL_IDS", "5650388514,6307783399")
-
-def _to_id_set(s: str) -> set[int]:
-    out: set[int] = set()
-    for tok in (s or "").replace(";", ",").split(","):
-        tok = tok.strip()
-        if tok and tok.lstrip("-").isdigit():
-            try: out.add(int(tok))
-            except: pass
-    return out
-
-SUPER_ADMINS: set[int] = _to_id_set(SUPER_ADMINS_STR)
-MODEL_IDS: set[int]    = _to_id_set(MODEL_IDS_STR)
+SUPER_ADMINS   = {int(x) for x in os.getenv("SUPER_ADMINS", "6964994611,8087941938").replace(";", ",").split(",") if x.strip().isdigit()}
+MODEL_IDS      = {int(x) for x in os.getenv("MODEL_IDS", "5650388514,6307783399").replace(";", ",").split(",") if x.strip().isdigit()}
 
 RONI_NAME = os.getenv("RONI_NAME", "Roni")
 RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
@@ -90,39 +77,15 @@ _anon_threads: Dict[str, int] = {}         # token -> user_id
 _admin_pending_reply: Dict[int, str] = {}  # admin_id -> token
 
 # ==== ROLE HELPERS ====
-def _parse_id_list_env(var_name: str) -> set[int]:
-    return _to_id_set(os.getenv(var_name, "") or "")
-
-_MODELS: set[int] = set()
-_MENU_EDITORS: set[int] = set()
-
-def _init_role_caches():
-    """Build once from env and known IDs."""
-    global _MODELS, _MENU_EDITORS
-    if _MODELS or _MENU_EDITORS:
-        return
-    # primary list from env
-    _MODELS = set(MODEL_IDS)
-    # include named model IDs if present
-    for v in (RUBY_ID, RIN_ID, SAVY_ID):
-        if v and isinstance(v, int) and v > 0:
-            _MODELS.add(v)
-    # menu editors via env + owner allowed
-    _MENU_EDITORS = _parse_id_list_env("MENU_EDITORS")
-    if OWNER_ID and OWNER_ID > 0:
-        _MENU_EDITORS.add(OWNER_ID)
-
 def _is_admin_user(user_id: int) -> bool:
     return (user_id in SUPER_ADMINS) or (user_id == OWNER_ID) or (user_id == SUPER_ADMIN_ID) \
            or (user_id in getattr(_store, "list_admins", lambda: [])())
 
 def _is_model_user(user_id: int) -> bool:
-    _init_role_caches()
-    return user_id in _MODELS
-
-def _is_menu_editor(user_id: int) -> bool:
-    _init_role_caches()
-    return user_id in _MENU_EDITORS
+    ids = set(MODEL_IDS)
+    for v in (RUBY_ID, RIN_ID, SAVY_ID):
+        if isinstance(v, int) and v > 0: ids.add(v)
+    return user_id in ids
 
 # ==== HELPERS ====
 def _targets_owner_only() -> List[int]:
@@ -174,7 +137,6 @@ def _back_to_home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")]])
 
 def _help_nav_kb(user_id: int) -> InlineKeyboardMarkup:
-    # Back to Help (previous), plus Start/Menu
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("⬅️ Back to Help", callback_data="dmf_show_help")],
         [InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome"),
@@ -183,7 +145,6 @@ def _help_nav_kb(user_id: int) -> InlineKeyboardMarkup:
 
 # ==== UI BUILDERS ====
 def _welcome_kb() -> InlineKeyboardMarkup:
-    # Start layout: Menu (top) → Contact Admins → Models Elsewhere → Help (bottom)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💕 Menu", callback_data="dmf_open_menu")],
         [InlineKeyboardButton("Contact Admins 👑", callback_data="dmf_open_direct")],
@@ -276,13 +237,10 @@ def _help_root_kb_for_user(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🛠️ Member Commands",    callback_data="dmf_help_cmds")],
         [InlineKeyboardButton("🎮 Game Rules",          callback_data="dmf_help_games")],
     ]
-    # Models see Model Commands: either listed in MODELS_IDS or MENU_EDITORS
-    if _is_model_user(user_id) or _is_menu_editor(user_id):
+    if _is_model_user(user_id):
         rows.append([InlineKeyboardButton("🧾 Model Commands", callback_data="dmf_help_models")])
-    # Admins see Admin Commands
     if _is_admin_user(user_id):
         rows.append([InlineKeyboardButton("🛡️ Admin Commands", callback_data="dmf_help_admin")])
-
     rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")])
     rows.append([InlineKeyboardButton("⬅️ Back to Menu",  callback_data="dmf_open_menu")])
     return InlineKeyboardMarkup(rows)
@@ -419,7 +377,6 @@ def register(app: Client):
     # Group helper to drop a DM button
     @app.on_message(filters.command("dmsetup"))
     async def dmsetup(client: Client, m: Message):
-        # allow only admins in groups; in DMs owner/super
         if m.chat and m.chat.type != "private":
             if not await _is_admin(client, m.chat.id, m.from_user.id):
                 return await m.reply_text("Admins only.")
@@ -463,9 +420,9 @@ def register(app: Client):
             try:
                 await client.send_message(target_uid, f"📮 Message from {RONI_NAME}:")
                 await client.copy_message(chat_id=target_uid, from_chat_id=m.chat.id, message_id=m.id)
-                await m.reply_text("Sent anonymously ✅")
+                await m.reply_text("Sent anonymously ✅", reply_markup=_back_to_home_kb())
             except RPCError:
-                await m.reply_text("Could not deliver message.")
+                await m.reply_text("Could not deliver message.", reply_markup=_back_to_home_kb())
             return
 
         # Pending flows (started from welcome contact)
@@ -475,7 +432,7 @@ def register(app: Client):
             anon = spec.get("anon", False)
             targets = _targets_owner_only()
             if not targets:
-                return await m.reply_text("Owner is not configured. Try later.")
+                return await m.reply_text("Owner is not configured. Try later.", reply_markup=_back_to_home_kb())
 
             if kind == "anon":
                 token = secrets.token_urlsafe(8)
@@ -517,21 +474,31 @@ def register(app: Client):
     # Back to Welcome
     @app.on_callback_query(filters.regex("^dmf_back_welcome$"))
     async def cb_back_welcome(client: Client, cq: CallbackQuery):
-        await cq.message.reply_text(
-            _spicy_intro(cq.from_user.first_name if cq.from_user else None),
-            reply_markup=_welcome_kb()
-        )
+        # edit if we can, else send
+        try:
+            await cq.message.edit_text(_spicy_intro(cq.from_user.first_name if cq.from_user else None),
+                                       reply_markup=_welcome_kb())
+        except Exception:
+            await cq.message.reply_text(_spicy_intro(cq.from_user.first_name if cq.from_user else None),
+                                        reply_markup=_welcome_kb())
         _mark_kb_shown(cq.from_user.id)
         await cq.answer()
 
     # Help (submenu)
     @app.on_callback_query(filters.regex("^dmf_show_help$"))
     async def cb_show_help(client: Client, cq: CallbackQuery):
-        await cq.message.reply_text(
-            "❓ <b>Help</b>\nPick a topic:",
-            reply_markup=_help_root_kb_for_user(cq.from_user.id),
-            disable_web_page_preview=True
-        )
+        try:
+            await cq.message.edit_text(
+                "❓ <b>Help</b>\nPick a topic:",
+                reply_markup=_help_root_kb_for_user(cq.from_user.id),
+                disable_web_page_preview=True
+            )
+        except Exception:
+            await cq.message.reply_text(
+                "❓ <b>Help</b>\nPick a topic:",
+                reply_markup=_help_root_kb_for_user(cq.from_user.id),
+                disable_web_page_preview=True
+            )
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_help_reqs$"))
@@ -540,9 +507,12 @@ def register(app: Client):
             try:
                 await client.send_photo(cq.from_user.id, BUYER_REQ_PHOTO, caption=BUYER_REQ_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id))
             except Exception:
-                await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
+                await cq.message.edit_text(BUYER_REQ_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
         else:
-            await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
+            try:
+                await cq.message.edit_text(BUYER_REQ_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
+            except Exception:
+                await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_help_rules$"))
@@ -551,85 +521,127 @@ def register(app: Client):
             try:
                 await client.send_photo(cq.from_user.id, RULES_PHOTO, caption=RULES_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id))
             except Exception:
-                await cq.message.reply_text(RULES_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
+                await cq.message.edit_text(RULES_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
         else:
-            await cq.message.reply_text(RULES_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
+            try:
+                await cq.message.edit_text(RULES_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
+            except Exception:
+                await cq.message.reply_text(RULES_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_help_cmds$"))
     async def cb_help_cmds(client: Client, cq: CallbackQuery):
-        await cq.message.reply_text(
-            _build_member_commands_text(),
-            reply_markup=_help_nav_kb(cq.from_user.id),
-            disable_web_page_preview=True
-        )
+        try:
+            await cq.message.edit_text(
+                _build_member_commands_text(),
+                reply_markup=_help_nav_kb(cq.from_user.id),
+                disable_web_page_preview=True
+            )
+        except Exception:
+            await cq.message.reply_text(
+                _build_member_commands_text(),
+                reply_markup=_help_nav_kb(cq.from_user.id),
+                disable_web_page_preview=True
+            )
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_help_games$"))
     async def cb_help_games(client: Client, cq: CallbackQuery):
-        await cq.message.reply_text(
-            _games_text(),
-            reply_markup=_help_nav_kb(cq.from_user.id),
-            disable_web_page_preview=True
-        )
+        try:
+            await cq.message.edit_text(
+                _games_text(),
+                reply_markup=_help_nav_kb(cq.from_user.id),
+                disable_web_page_preview=True
+            )
+        except Exception:
+            await cq.message.reply_text(
+                _games_text(),
+                reply_markup=_help_nav_kb(cq.from_user.id),
+                disable_web_page_preview=True
+            )
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_help_models$"))
     async def cb_help_models(client: Client, cq: CallbackQuery):
-        if not (_is_model_user(cq.from_user.id) or _is_menu_editor(cq.from_user.id)):
+        if not _is_model_user(cq.from_user.id):
             return await cq.answer("Models only.", show_alert=True)
-        await cq.message.reply_text(
-            _build_model_commands_text(),
-            reply_markup=_help_nav_kb(cq.from_user.id),
-            disable_web_page_preview=True
-        )
+        try:
+            await cq.message.edit_text(
+                _build_model_commands_text(),
+                reply_markup=_help_nav_kb(cq.from_user.id),
+                disable_web_page_preview=True
+            )
+        except Exception:
+            await cq.message.reply_text(
+                _build_model_commands_text(),
+                reply_markup=_help_nav_kb(cq.from_user.id),
+                disable_web_page_preview=True
+            )
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_help_admin$"))
     async def cb_help_admin(client: Client, cq: CallbackQuery):
         if not _is_admin_user(cq.from_user.id):
             return await cq.answer("Admins only.", show_alert=True)
-        await cq.message.reply_text(
-            _build_admin_commands_text(),
-            reply_markup=_help_nav_kb(cq.from_user.id),
-            disable_web_page_preview=True
-        )
+        try:
+            await cq.message.edit_text(
+                _build_admin_commands_text(),
+                reply_markup=_help_nav_kb(cq.from_user.id),
+                disable_web_page_preview=True
+            )
+        except Exception:
+            await cq.message.reply_text(
+                _build_admin_commands_text(),
+                reply_markup=_help_nav_kb(cq.from_user.id),
+                disable_web_page_preview=True
+            )
         await cq.answer()
 
     # Contact (welcome)
     @app.on_callback_query(filters.regex("^dmf_open_direct$"))
     async def cb_open_direct_welcome(client: Client, cq: CallbackQuery):
-        await cq.message.reply_text("Contact Admins 👑 — how would you like to reach us?",
-                                    reply_markup=_contact_welcome_kb())
+        try:
+            await cq.message.edit_text("Contact Admins 👑 — how would you like to reach us?",
+                                       reply_markup=_contact_welcome_kb())
+        except Exception:
+            await cq.message.reply_text("Contact Admins 👑 — how would you like to reach us?",
+                                        reply_markup=_contact_welcome_kb())
         await cq.answer()
 
     # Contact (menu) — no anon here
     @app.on_callback_query(filters.regex("^dmf_open_direct_menu$"))
     async def cb_open_direct_menu(client: Client, cq: CallbackQuery):
-        await cq.message.reply_text("Contact a model directly:", reply_markup=_contact_menu_kb())
+        try:
+            await cq.message.edit_text("Contact a model directly:", reply_markup=_contact_menu_kb())
+        except Exception:
+            await cq.message.reply_text("Contact a model directly:", reply_markup=_contact_menu_kb())
         await cq.answer()
 
-    # Open Menu tabs
+    # Open Menu tabs (EDIT the current message to prevent duplicates)
     @app.on_callback_query(filters.regex("^dmf_open_menu$"))
     async def cb_open_menu(client: Client, cq: CallbackQuery):
         try:
-            from handlers.menu import _tabs_kb  # reuse your existing tabs
-            await cq.message.reply_text("Pick a menu:", reply_markup=_tabs_kb())
-            # Provide an extra nav to return easily
-            await cq.message.reply_text("Navigation:", reply_markup=_back_to_home_kb())
+            from handlers.menu import menu_tabs_text, menu_tabs_kb
+            try:
+                await cq.message.edit_text(menu_tabs_text(), reply_markup=menu_tabs_kb())
+            except Exception:
+                await cq.message.reply_text(menu_tabs_text(), reply_markup=menu_tabs_kb())
         except Exception:
-            await cq.message.reply_text("Menu is unavailable right now.", reply_markup=_back_to_home_kb())
+            try:
+                await cq.message.edit_text("Menu is unavailable right now.", reply_markup=_back_to_home_kb())
+            except Exception:
+                await cq.message.reply_text("Menu is unavailable right now.", reply_markup=_back_to_home_kb())
         await cq.answer()
 
     # Links (welcome)
     @app.on_callback_query(filters.regex("^dmf_models_links$"))
     async def cb_models_links(client: Client, cq: CallbackQuery):
-        kb = _build_links_kb()  # already includes "Back to Start"
+        kb = _build_links_kb()  # includes "Back to Start"
         try:
             if MODELS_LINKS_PHOTO:
                 await client.send_photo(cq.from_user.id, MODELS_LINKS_PHOTO, caption=MODELS_LINKS_TEXT, reply_markup=kb)
             else:
-                await cq.message.reply_text(MODELS_LINKS_TEXT, reply_markup=kb, disable_web_page_preview=False)
+                await cq.message.edit_text(MODELS_LINKS_TEXT, reply_markup=kb, disable_web_page_preview=False)
         except Exception:
             await cq.message.reply_text(MODELS_LINKS_TEXT, reply_markup=kb, disable_web_page_preview=False)
         await cq.answer()
@@ -641,28 +653,44 @@ def register(app: Client):
         if not _targets_owner_only():
             return await cq.answer("Owner is not configured.", show_alert=True)
         _pending[uid] = {"kind": "anon", "anon": True}
-        await cq.message.reply_text("You're anonymous. Type the message you want me to send to the admins.",
-                                    reply_markup=_cancel_kb())
+        try:
+            await cq.message.edit_text("You're anonymous. Type the message you want me to send to the admins.",
+                                       reply_markup=_cancel_kb())
+        except Exception:
+            await cq.message.reply_text("You're anonymous. Type the message you want me to send to the admins.",
+                                        reply_markup=_cancel_kb())
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_open_suggest$"))
     async def cb_open_suggest(client: Client, cq: CallbackQuery):
-        await cq.message.reply_text("How would you like to send your suggestion?",
-                                    reply_markup=_suggest_kb())
+        try:
+            await cq.message.edit_text("How would you like to send your suggestion?",
+                                       reply_markup=_suggest_kb())
+        except Exception:
+            await cq.message.reply_text("How would you like to send your suggestion?",
+                                        reply_markup=_suggest_kb())
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_suggest_ident$"))
     async def cb_suggest_ident(client: Client, cq: CallbackQuery):
         _pending[cq.from_user.id] = {"kind": "suggest", "anon": False}
-        await cq.message.reply_text("Great! Type your suggestion and I’ll send it to the admins.",
-                                    reply_markup=_cancel_kb())
+        try:
+            await cq.message.edit_text("Great! Type your suggestion and I’ll send it to the admins.",
+                                       reply_markup=_cancel_kb())
+        except Exception:
+            await cq.message.reply_text("Great! Type your suggestion and I’ll send it to the admins.",
+                                        reply_markup=_cancel_kb())
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_suggest_anon$"))
     async def cb_suggest_anon(client: Client, cq: CallbackQuery):
         _pending[cq.from_user.id] = {"kind": "suggest", "anon": True}
-        await cq.message.reply_text("You're anonymous. Type your suggestion for the admins.",
-                                    reply_markup=_cancel_kb())
+        try:
+            await cq.message.edit_text("You're anonymous. Type your suggestion for the admins.",
+                                       reply_markup=_cancel_kb())
+        except Exception:
+            await cq.message.reply_text("You're anonymous. Type your suggestion for the admins.",
+                                        reply_markup=_cancel_kb())
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_anon_reply:"))
@@ -674,8 +702,12 @@ def register(app: Client):
         if token not in _anon_threads:
             return await cq.answer("That anonymous thread has expired.", show_alert=True)
         _admin_pending_reply[admin_id] = token
-        await cq.message.reply_text("Reply mode enabled. Type your reply now — it will be sent anonymously. Use /cancel to exit.",
-                                    reply_markup=_back_to_home_kb())
+        try:
+            await cq.message.edit_text("Reply mode enabled. Type your reply now — it will be sent anonymously. Use /cancel to exit.",
+                                       reply_markup=_back_to_home_kb())
+        except Exception:
+            await cq.message.reply_text("Reply mode enabled. Type your reply now — it will be sent anonymously. Use /cancel to exit.",
+                                        reply_markup=_back_to_home_kb())
         await cq.answer("Reply to this message to send anonymously.")
 
     @app.on_callback_query(filters.regex("^dmf_cancel$"))
@@ -687,7 +719,7 @@ def register(app: Client):
         try: await client.send_message(cq.from_user.id, "Canceled.", reply_markup=_back_to_home_kb())
         except Exception: pass
 
-    # Rules / Buyer (legacy callbacks kept for compatibility)
+    # Legacy Rules / Buyer callbacks (kept for compatibility)
     @app.on_callback_query(filters.regex("^dmf_rules$"))
     async def cb_rules(client: Client, cq: CallbackQuery):
         nav = InlineKeyboardMarkup([
@@ -696,9 +728,10 @@ def register(app: Client):
         ])
         if RULES_PHOTO:
             try: await client.send_photo(cq.from_user.id, RULES_PHOTO, caption=RULES_TEXT or " ", reply_markup=nav)
-            except Exception: await cq.message.reply_text(RULES_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+            except Exception: await cq.message.edit_text(RULES_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
         else:
-            await cq.message.reply_text(RULES_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+            try: await cq.message.edit_text(RULES_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+            except Exception: await cq.message.reply_text(RULES_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_buyer$"))
@@ -709,10 +742,10 @@ def register(app: Client):
         ])
         if BUYER_REQ_PHOTO:
             try: await client.send_photo(cq.from_user.id, BUYER_REQ_PHOTO, caption=BUYER_REQ_TEXT or " ", reply_markup=nav)
-            except Exception: await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+            except Exception: await cq.message.edit_text(BUYER_REQ_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
         else:
-            await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
-        # Optional quick /reqstatus button
+            try: await cq.message.edit_text(BUYER_REQ_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+            except Exception: await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
         kb = ReplyKeyboardMarkup([["/reqstatus"]], resize_keyboard=True, one_time_keyboard=True, selective=True)
         await client.send_message(cq.from_user.id, "Tap to check your status:", reply_markup=kb)
         await cq.answer()
@@ -725,7 +758,7 @@ def register(app: Client):
         if m.reply_to_message and m.reply_to_message.from_user:
             if m.chat and m.chat.type != "private":
                 if not await _is_admin(client, m.chat.id, m.from_user.id):
-                    return await m.reply_text("Admins only for toggling others.")
+                    return await m.reply_text("Admins only for toggling others.", reply_markup=_back_to_home_kb())
             target_id = m.reply_to_message.from_user.id
         try: _store.set_dm_ready_global(target_id, ready, by_admin=(target_id != m.from_user.id))
         except Exception: pass
