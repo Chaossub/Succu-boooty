@@ -1,166 +1,60 @@
-import os, asyncio, logging, contextlib, importlib, pkgutil
-from typing import Optional, Set, List
-from dotenv import load_dotenv
+# main.py
+import os
+import logging
+import pkgutil
+import importlib
 from pyrogram import Client
-from pyrogram.enums import ParseMode
-
-load_dotenv()
 
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s"
 )
 log = logging.getLogger("SuccuBot")
 
-def need(name: str) -> str:
-    v = os.getenv(name)
-    if not v:
-        raise RuntimeError(f"Missing required env var: {name}")
-    return v
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-def build_app() -> Client:
-    return Client(
-        name=os.getenv("SESSION_NAME", "SuccuBot"),
-        api_id=int(need("API_ID")),
-        api_hash=need("API_HASH"),
-        bot_token=need("BOT_TOKEN"),
-        parse_mode=ParseMode.HTML,
-        in_memory=True,
-        workdir=".",
-    )
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    raise SystemExit("Please set API_ID, API_HASH, and BOT_TOKEN in environment variables.")
 
-# Optional tiny health server (USE_HTTP_HEALTH=1)
-async def run_http_health():
-    if os.getenv("USE_HTTP_HEALTH", "1") != "1":
-        return
-    port = int(os.getenv("PORT", "8000"))
+app = Client(
+    "succubot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workdir="."
+)
+
+def _wire_handlers_package():
+    """Auto-import handlers.* and call register(app) if available."""
+    wired = 0
     try:
-        from fastapi import FastAPI
-        import uvicorn
-        app = FastAPI()
-
-        @app.get("/health")
-        def health():
-            return {"ok": True}
-
-        log.info("Starting FastAPI health server on :%d", port)
-        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
-        server = uvicorn.Server(config)
-        await server.serve()
+        import handlers  # ensure package exists
     except Exception as e:
-        log.warning("Health server unavailable: %s", e)
-
-WIRED: Set[str] = set()
-
-def _priority_key(modname: str) -> tuple:
-    # Lower = earlier wiring. Keep your original order so cross-calls are safe.
-    prio = {
-        "handlers.flyer_scheduler": 10,
-        "handlers.schedulemsg": 10,
-
-        # core UX early
-        "handlers.help_menu": 15,
-        "handlers.welcome": 20,
-        "handlers.hi": 25,
-        "handlers.help_cmd": 30,
-        "handlers.anon": 32,
-
-        "handlers.req_handlers": 40,
-        "handlers.enforce_requirements": 45,
-        "handlers.moderation": 50,
-        "handlers.federation": 55,
-        "handlers.warnings": 60,
-        "handlers.summon": 65,
-        "handlers.fun": 70,
-        "handlers.xp": 75,
-        "handlers.flyer": 80,
-        "handlers.menu": 85,
-        "handlers.warmup": 90,
-        "handlers.membership_watch": 95,
-    }
-    return (prio.get(modname, 100), modname)
-
-def _wire_handlers_package(app: Client, package_name: str = "handlers") -> None:
-    try:
-        pkg = importlib.import_module(package_name)
-    except ModuleNotFoundError:
-        log.warning("Package '%s' not found. Skipping.", package_name)
+        log.error("No 'handlers' package found: %s", e)
         return
 
-    loop = asyncio.get_event_loop()
-    mods: List[str] = []
-    for _, modname, _ in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
-        mods.append(modname)
-
-    for modname in sorted(mods, key=_priority_key):
+    for modinfo in pkgutil.iter_modules(handlers.__path__, prefix="handlers."):
+        modname = modinfo.name
         try:
             mod = importlib.import_module(modname)
-        except Exception as e:
-            log.exception("Failed import: %s (%s)", modname, e)
-            continue
-
-        if hasattr(mod, "set_main_loop"):
-            try:
-                mod.set_main_loop(loop)
-                log.info("set_main_loop: %s", modname)
-            except Exception as e:
-                log.exception("Error set_main_loop on %s: %s", modname, e)
-
-        if hasattr(mod, "register") and callable(mod.register):
-            try:
+            if hasattr(mod, "register") and callable(mod.register):
                 mod.register(app)
                 log.info("wired: %s", modname)
-                WIRED.add(modname)
-            except Exception as e:
-                log.exception("Failed register: %s (%s)", modname, e)
+                wired += 1
+        except Exception as e:
+            log.exception("Failed import: %s (%s)", modname, e)
 
-def _wire_dm_foolproof(app: Client) -> None:
-    try:
-        mod = importlib.import_module("dm_foolproof")
-        if hasattr(mod, "register") and callable(mod.register):
-            mod.register(app)
-            log.info("wired: dm_foolproof")
-        else:
-            log.warning("dm_foolproof found but no register(app).")
-    except ModuleNotFoundError:
-        log.info("dm_foolproof not found (skipping).")
-    except Exception as e:
-        log.exception("failed wiring dm_foolproof: %s", e)
+    log.info("Handlers wired: %s module(s) with register(app).", wired)
 
-def wire_everything(app: Client) -> None:
-    _wire_handlers_package(app, "handlers")
-    _wire_dm_foolproof(app)
-    log.info("Handlers wired: %d module(s) with register(app).", len(WIRED))
-
-async def main():
-    app = build_app()
-    wire_everything(app)
-
-    log.info("✅ Starting SuccuBot… (Pyrogram)")
-    await app.start()
-    log.info("🤖 Bot is online.")
-
-    health_task: Optional[asyncio.Task] = None
-    if os.getenv("USE_HTTP_HEALTH", "1") == "1":
-        health_task = asyncio.create_task(run_http_health())
-
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        pass
-    finally:
-        log.info("🛑 Stopping SuccuBot…")
-        if health_task:
-            health_task.cancel()
-            with contextlib.suppress(Exception):
-                await health_task
-        await app.stop()
-        log.info("🧹 Clean shutdown complete.")
+@app.on_message()
+async def _warmup(_, __):
+    # noop placeholder; ensures client is alive for early messages
+    return
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception:
-        log.exception("❌ Fatal error during startup")
-        raise
+    log.info("✅ Starting SuccuBot… (Pyrogram)")
+    _wire_handlers_package()
+    app.run()
+
