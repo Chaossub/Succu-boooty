@@ -1,297 +1,167 @@
-import logging
-import os
+import os, asyncio, logging, contextlib, importlib, pkgutil
+from typing import Optional, Set, List
 from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import Conflict
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
-import telegram  # for logging version
+from pyrogram import Client
+from pyrogram.enums import ParseMode
 
-# -------- ENV --------
 load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 
-# For "Contact Admins" buttons
-OWNER_ID = os.getenv("OWNER_ID", "").strip()   # e.g., 6964994611 (Roni)
-RUBY_ID  = os.getenv("RUBY_ID",  "").strip()   # e.g., 8087941938 (Ruby)
-
-# Links for "Find Our Models Elsewhere"
-RONI_LINK = os.getenv("RONI_LINK", "https://allmylinks.com/chaossub283")
-RUBY_LINK = os.getenv("RUBY_LINK", "https://allmylinks.com/rubyransoms")
-RIN_LINK  = os.getenv("RIN_LINK",  "https://allmylinks.com/peachybunsrin")
-SAVY_LINK = os.getenv("SAVY_LINK", "https://allmylinks.com/savannahxsavage")
-
-# -------- LOGGING --------
 logging.basicConfig(
-    level=logging.INFO,
+    level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 log = logging.getLogger("SuccuBot")
 
-# -------- TEXT --------
-WELCOME_TEXT = (
-    "🔥 Welcome to SuccuBot 🔥\n"
-    "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
-    "Use the buttons below to explore what I can do for you 😏"
-)
+def need(name: str) -> str:
+    v = os.getenv(name)
+    if not v:
+        raise RuntimeError(f"Missing required env var: {name}")
+    return v
 
-FIND_MODELS_TEXT = (
-    "🔥 Find Our Models Elsewhere 🔥\n\n"
-    "👑 Roni Jane (Owner)\n"
-    f"{RONI_LINK}\n\n"
-    "💎 Ruby Ransom (Co-Owner)\n"
-    f"{RUBY_LINK}\n\n"
-    "🍑 Peachy Rin\n"
-    f"{RIN_LINK}\n\n"
-    "⚡ Savage Savy\n"
-    f"{SAVY_LINK}"
-)
-
-BUYER_RULES_TEXT = (
-    "📜 <b>Buyer Rules</b>\n\n"
-    "1) Respect the models — no harassment or guilt-tripping.\n"
-    "2) No freeloading / begging for free content.\n"
-    "3) Follow payment & delivery instructions posted by the team.\n"
-)
-
-BUYER_REQUIREMENTS_TEXT = (
-    "💸 <b>Buyer Requirements</b>\n\n"
-    "To stay in the group each month, complete at least ONE:\n"
-    "• Spend $20+ (tips/games/content), or\n"
-    "• Join 4+ games.\n"
-)
-
-GAME_RULES_TEXT = """🎲 <b>Succubus Sanctuary Game Rules</b>
-
-⸻
-
-🕯️ <b>Candle Temptation Game</b>
-• $5 lights a random candle. 3 candles for a model = her spicy surprise.
-• All 12 candles by end = special group reward.
-
-⸻
-
-🍑 <b>Pick a Peach</b>
-• Pick 1–12 and tip $5. Each number hides a model’s surprise.
-• No repeats per model; spread the love.
-
-⸻
-
-💃 <b>Flash Frenzy</b>
-• $5 triggers a flash by the chosen girl. Stacks for back-to-back flashes.
-
-⸻
-
-🎰 <b>Dirty Wheel Spins</b>
-• $10 per spin. Whatever it lands on is the prize. Add jackpots like “double prize”.
-
-⸻
-
-🎲 <b>Dice Roll Game</b>
-• $5 per roll (1–6). Number = prize. Two dice variant for bigger pools.
-
-⸻
-
-🔥 <b>Forbidden Folder Friday</b>
-• $80 premium folder (photos + clips), limited-time each Friday.
-• Pay Ruby; Roni delivers the Dropbox link. Closes at midnight.
-"""
-
-# -------- KEYBOARDS --------
-def kb_main() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💕 Menu", callback_data="menu")],
-        [InlineKeyboardButton("Contact Admins 👑", callback_data="contact_admins")],
-        [InlineKeyboardButton("Find Our Models Elsewhere 🔥", callback_data="find_models")],
-        [InlineKeyboardButton("❓ Help", callback_data="help")],
-    ])
-
-def kb_help_root() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💸 Buyer Requirements", callback_data="help_reqs")],
-        [InlineKeyboardButton("📜 Buyer Rules", callback_data="help_rules")],
-        [InlineKeyboardButton("🎮 Game Rules", callback_data="help_games")],
-        [InlineKeyboardButton("⬅️ Back to Start", callback_data="back_home")],
-        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")],
-    ])
-
-def kb_back_to_help() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Back to Help", callback_data="help")],
-        [InlineKeyboardButton("⬅️ Back to Start", callback_data="back_home")],
-        [InlineKeyboardButton("⬅️ Back to Menu", callback_data="menu")],
-    ])
-
-def kb_menu_tabs() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Roni", callback_data="menu_open:roni"),
-         InlineKeyboardButton("Ruby", callback_data="menu_open:ruby")],
-        [InlineKeyboardButton("Rin", callback_data="menu_open:rin"),
-         InlineKeyboardButton("Savy", callback_data="menu_open:savy")],
-        [InlineKeyboardButton("⬅️ Back to Start", callback_data="back_home")],
-    ])
-
-def kb_model_back() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Back", callback_data="menu_tabs")],
-        [InlineKeyboardButton("🏠 Start", callback_data="back_home")],
-    ])
-
-def kb_contact_admins() -> InlineKeyboardMarkup:
-    rows = []
-    row = []
-    if OWNER_ID.isdigit():
-        row.append(InlineKeyboardButton("💌 Message Roni", url=f"tg://user?id={OWNER_ID}"))
-    if RUBY_ID.isdigit():
-        row.append(InlineKeyboardButton("💌 Message Ruby", url=f"tg://user?id={RUBY_ID}"))
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("🙈 Send anonymous message", callback_data="anon")])
-    rows.append([InlineKeyboardButton("💡 Send a suggestion", callback_data="suggest")])
-    rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="back_home")])
-    return InlineKeyboardMarkup(rows)
-
-# -------- HANDLERS --------
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        WELCOME_TEXT, reply_markup=kb_main(), disable_web_page_preview=True
+def build_app() -> Client:
+    return Client(
+        name=os.getenv("SESSION_NAME", "SuccuBot"),
+        api_id=int(need("API_ID")),
+        api_hash=need("API_HASH"),
+        bot_token=need("BOT_TOKEN"),
+        parse_mode=ParseMode.HTML,
+        in_memory=True,
+        workdir=".",
     )
-    log.info("PTB version: %s", getattr(telegram, "__version__", "unknown"))
 
-async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    data = q.data
+# Optional tiny health server (USE_HTTP_HEALTH=1)
+async def run_http_health():
+    if os.getenv("USE_HTTP_HEALTH", "1") != "1":
+        return
+    port = int(os.getenv("PORT", "8000"))
+    try:
+        from fastapi import FastAPI
+        import uvicorn
+        app = FastAPI()
 
-    if data == "back_home":
+        @app.get("/health")
+        def health():
+            return {"ok": True}
+
+        log.info("Starting FastAPI health server on :%d", port)
+        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
+        server = uvicorn.Server(config)
+        await server.serve()
+    except Exception as e:
+        log.warning("Health server unavailable: %s", e)
+
+WIRED: Set[str] = set()
+
+def _priority_key(modname: str) -> tuple:
+    # Lower = earlier wiring. Keep your original order so cross-calls are safe.
+    prio = {
+        "handlers.flyer_scheduler": 10,
+        "handlers.schedulemsg": 10,
+
+        # Make sure help/menus/DM portal bits are ready early
+        "handlers.help_menu": 15,
+
+        "handlers.welcome": 20,
+        "handlers.hi": 25,
+        "handlers.help_cmd": 30,
+        "handlers.anon": 32,
+
+        "handlers.req_handlers": 40,
+        "handlers.enforce_requirements": 45,
+        "handlers.moderation": 50,
+        "handlers.federation": 55,
+        "handlers.warnings": 60,
+        "handlers.summon": 65,
+        "handlers.fun": 70,
+        "handlers.xp": 75,
+        "handlers.flyer": 80,
+        "handlers.menu": 85,
+        "handlers.warmup": 90,
+        "handlers.membership_watch": 95,
+    }
+    return (prio.get(modname, 100), modname)
+
+def _wire_handlers_package(app: Client, package_name: str = "handlers") -> None:
+    try:
+        pkg = importlib.import_module(package_name)
+    except ModuleNotFoundError:
+        log.warning("Package '%s' not found. Skipping.", package_name)
+        return
+
+    loop = asyncio.get_event_loop()
+    mods: List[str] = []
+    for _, modname, _ in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
+        mods.append(modname)
+
+    for modname in sorted(mods, key=_priority_key):
         try:
-            await q.message.edit_text(WELCOME_TEXT, reply_markup=kb_main(), disable_web_page_preview=True)
-        except Exception:
-            await q.message.reply_text(WELCOME_TEXT, reply_markup=kb_main(), disable_web_page_preview=True)
+            mod = importlib.import_module(modname)
+        except Exception as e:
+            log.exception("Failed import: %s (%s)", modname, e)
+            continue
 
-    elif data == "help":
-        try:
-            await q.message.edit_text("❓ <b>Help</b>\nPick a topic:",
-                                      reply_markup=kb_help_root(), disable_web_page_preview=True)
-        except Exception:
-            await q.message.reply_text("❓ <b>Help</b>\nPick a topic:",
-                                       reply_markup=kb_help_root(), disable_web_page_preview=True)
+        if hasattr(mod, "set_main_loop"):
+            try:
+                mod.set_main_loop(loop)
+                log.info("set_main_loop: %s", modname)
+            except Exception as e:
+                log.exception("Error set_main_loop on %s: %s", modname, e)
 
-    elif data == "help_reqs":
-        await q.message.edit_text(BUYER_REQUIREMENTS_TEXT, reply_markup=kb_back_to_help(), disable_web_page_preview=True)
+        if hasattr(mod, "register") and callable(mod.register):
+            try:
+                mod.register(app)
+                log.info("wired: %s", modname)
+                WIRED.add(modname)
+            except Exception as e:
+                log.exception("Failed register: %s (%s)", modname, e)
 
-    elif data == "help_rules":
-        await q.message.edit_text(BUYER_RULES_TEXT, reply_markup=kb_back_to_help(), disable_web_page_preview=True)
+def _wire_dm_foolproof(app: Client) -> None:
+    try:
+        mod = importlib.import_module("dm_foolproof")
+        if hasattr(mod, "register") and callable(mod.register):
+            mod.register(app)
+            log.info("wired: dm_foolproof")
+        else:
+            log.warning("dm_foolproof found but no register(app).")
+    except ModuleNotFoundError:
+        log.info("dm_foolproof not found (skipping).")
+    except Exception as e:
+        log.exception("failed wiring dm_foolproof: %s", e)
 
-    elif data == "help_games":
-        await q.message.edit_text(GAME_RULES_TEXT, reply_markup=kb_back_to_help(), disable_web_page_preview=True)
+def wire_everything(app: Client) -> None:
+    _wire_handlers_package(app, "handlers")
+    _wire_dm_foolproof(app)
+    log.info("Handlers wired: %d module(s) with register(app).", len(WIRED))
 
-    elif data == "menu":
-        try:
-            await q.message.edit_text("💕 <b>Model Menus</b>\nChoose a name:",
-                                      reply_markup=kb_menu_tabs(), disable_web_page_preview=True)
-        except Exception:
-            await q.message.reply_text("💕 <b>Model Menus</b>\nChoose a name:",
-                                       reply_markup=kb_menu_tabs(), disable_web_page_preview=True)
+async def main():
+    app = build_app()
+    wire_everything(app)
 
-    elif data == "menu_tabs":
-        try:
-            await q.message.edit_text("💕 <b>Model Menus</b>\nChoose a name:",
-                                      reply_markup=kb_menu_tabs(), disable_web_page_preview=True)
-        except Exception:
-            await q.message.reply_text("💕 <b>Model Menus</b>\nChoose a name:",
-                                       reply_markup=kb_menu_tabs(), disable_web_page_preview=True)
+    log.info("✅ Starting SuccuBot… (Pyrogram)")
+    await app.start()
+    log.info("🤖 Bot is online.")
 
-    elif data.startswith("menu_open:"):
-        model = data.split(":", 1)[1].strip().lower()
-        title = model.capitalize()
-        text = f"💖 <b>{title} Menu</b>\n(Your {title} menu content goes here)"
-        try:
-            await q.message.edit_text(text, reply_markup=kb_model_back(), disable_web_page_preview=True)
-        except Exception:
-            await q.message.reply_text(text, reply_markup=kb_model_back(), disable_web_page_preview=True)
+    health_task: Optional[asyncio.Task] = None
+    if os.getenv("USE_HTTP_HEALTH", "1") == "1":
+        health_task = asyncio.create_task(run_http_health())
 
-    elif data == "contact_admins":
-        try:
-            await q.message.edit_text("Contact Admins 👑 — how would you like to reach us?",
-                                      reply_markup=kb_contact_admins(), disable_web_page_preview=True)
-        except Exception:
-            await q.message.reply_text("Contact Admins 👑 — how would you like to reach us?",
-                                       reply_markup=kb_contact_admins(), disable_web_page_preview=True)
-
-    elif data == "find_models":
-        try:
-            await q.message.edit_text(
-                FIND_MODELS_TEXT,
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_home")]]
-                ),
-                disable_web_page_preview=False,
-            )
-        except Exception:
-            await q.message.reply_text(
-                FIND_MODELS_TEXT,
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("⬅️ Back to Start", callback_data="back_home")]]
-                ),
-                disable_web_page_preview=False,
-            )
-
-    elif data == "anon":
-        await q.message.edit_text(
-            "You're anonymous. Type the message you want me to send to the admins.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Cancel", callback_data="back_home")]]),
-        )
-
-    elif data == "suggest":
-        await q.message.edit_text(
-            "How would you like to send your suggestion?",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("💡 With your @", callback_data="back_home")],
-                [InlineKeyboardButton("🙈 Anonymously", callback_data="back_home")],
-                [InlineKeyboardButton("✖️ Cancel", callback_data="back_home")],
-            ]),
-        )
-
-# -------- LIFECYCLE & ERRORS --------
-async def post_init(app: Application):
-    # Make sure webhook is cleared before polling (saves confusion if it was set earlier).
-    await app.bot.delete_webhook(drop_pending_updates=True)
-    log.info("Webhook cleared; starting long polling.")
-
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    err = context.error
-    if isinstance(err, Conflict):
-        log.error(
-            "Another process is polling this bot token (telegram.error.Conflict). "
-            "Stop other instances or rotate BOT_TOKEN via @BotFather."
-        )
-    else:
-        log.exception("Unhandled error: %s", err)
-
-# -------- BOOTSTRAP --------
-def main():
-    if not BOT_TOKEN:
-        log.error("Missing BOT_TOKEN in environment. Set BOT_TOKEN and redeploy.")
-        raise SystemExit(1)
-
-    log.info("Starting SuccuBot… (PTB %s)", getattr(telegram, "__version__", "unknown"))
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    # handlers
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CallbackQueryHandler(on_button))
-
-    # lifecycle & errors
-    app.post_init = post_init
-    app.add_error_handler(on_error)
-
-    # block forever
-    app.run_polling(close_loop=False, allowed_updates=Update.ALL_TYPES)
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        pass
+    finally:
+        log.info("🛑 Stopping SuccuBot…")
+        if health_task:
+            health_task.cancel()
+            with contextlib.suppress(Exception):
+                await health_task
+        await app.stop()
+        log.info("🧹 Clean shutdown complete.")
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except Exception:
+        log.exception("❌ Fatal error during startup")
+        raise
