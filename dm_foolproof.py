@@ -356,7 +356,7 @@ def _games_text() -> str:
 # ==== REGISTER ====
 def register(app: Client):
 
-    # /start → Welcome UI
+    # /start → Welcome UI (also sets DM-ready on first DM)
     @app.on_message(filters.private & filters.command("start"))
     async def dmf_start(client: Client, m: Message):
         uid = m.from_user.id if m.from_user else 0
@@ -374,7 +374,7 @@ def register(app: Client):
         )
         _mark_kb_shown(uid)
 
-    # Group helper to drop a DM button
+    # Group helper to drop a DM button (deep-link only)
     @app.on_message(filters.command("dmsetup"))
     async def dmsetup(client: Client, m: Message):
         if m.chat and m.chat.type != "private":
@@ -388,7 +388,7 @@ def register(app: Client):
             return await m.reply_text("I need a @username to create a DM button.")
         url = f"https://t.me/{me.username}?start=ready"
         btn = os.getenv("DMSETUP_BTN", "💌 DM Now")
-        text = os.getenv("DMSETUP_TEXT", "Tap to DM for quick support—Contact Admins, Help, and anonymous relay in one click.")
+        text = os.getenv("DMSETUP_TEXT", "Tap to DM the bot for menus, rules, and support.")
         await m.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn, url=url)]]))
 
     # /message — menu-style contact (no anon)
@@ -474,7 +474,6 @@ def register(app: Client):
     # Back to Welcome
     @app.on_callback_query(filters.regex("^dmf_back_welcome$"))
     async def cb_back_welcome(client: Client, cq: CallbackQuery):
-        # edit if we can, else send
         try:
             await cq.message.edit_text(_spicy_intro(cq.from_user.first_name if cq.from_user else None),
                                        reply_markup=_welcome_kb())
