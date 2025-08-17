@@ -1,3 +1,4 @@
+# dm_foolproof.py
 # DM entry & messaging helper with Back buttons and links panel.
 # Welcome (DM /start): [💕 Menu] [💌 Contact] [🔗 Find our models elsewhere] [❔ Help]
 # Welcome Contact: direct (Roni/Ruby) + Anonymous to admins + Suggestions + Back
@@ -5,6 +6,7 @@
 # /message -> Menu Contact (no anon)
 # Anonymous reply bridge for OWNER
 # Rules / Buyer buttons with Back to Menu/Welcome
+# Help submenu: Buyer Requirements, Buyer Rules, Member Commands (+ Model/Admin sections shown by role)
 
 import os, time, asyncio, secrets, json
 from typing import Optional, List, Dict
@@ -31,7 +33,7 @@ except Exception:
 
 # ==== ENV ====
 OWNER_ID       = int(os.getenv("OWNER_ID", "0"))
-SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))  # You can set this to Ruby's ID.
 
 RONI_NAME = os.getenv("RONI_NAME", "Roni")
 RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
@@ -68,6 +70,52 @@ _pending: Dict[int, Dict[str, bool]] = {}
 _kb_last_shown: Dict[int, float] = {}
 _anon_threads: Dict[str, int] = {}         # token -> user_id
 _admin_pending_reply: Dict[int, str] = {}  # admin_id -> token
+
+# ==== ROLE HELPERS ====
+def _parse_id_list_env(var_name: str) -> set[int]:
+    raw = os.getenv(var_name, "") or ""
+    ids: set[int] = set()
+    for tok in raw.replace(";", ",").split(","):
+        tok = tok.strip()
+        if tok and tok.lstrip("-").isdigit():
+            try:
+                ids.add(int(tok))
+            except Exception:
+                pass
+    return ids
+
+_MODELS: set[int] = set()       # people who get Model Commands (and ofc Member Commands)
+_MENU_EDITORS: set[int] = set() # extra editors for menus/flyers
+
+def _init_role_caches():
+    """Build once from env and known IDs."""
+    global _MODELS, _MENU_EDITORS
+    if _MODELS or _MENU_EDITORS:
+        return
+    _MODELS = _parse_id_list_env("MODELS_IDS")
+    # include named model IDs if present
+    for v in (RUBY_ID, RIN_ID, SAVY_ID):
+        if v and isinstance(v, int) and v > 0:
+            _MODELS.add(v)
+    _MENU_EDITORS = _parse_id_list_env("MENU_EDITORS")
+    if OWNER_ID and OWNER_ID > 0:
+        _MENU_EDITORS.add(OWNER_ID)
+
+def _is_admin_user(user_id: int) -> bool:
+    if user_id in (OWNER_ID, SUPER_ADMIN_ID):
+        return True
+    try:
+        return user_id in getattr(_store, "list_admins", lambda: [])()
+    except Exception:
+        return False
+
+def _is_model_user(user_id: int) -> bool:
+    _init_role_caches()
+    return user_id in _MODELS
+
+def _is_menu_editor(user_id: int) -> bool:
+    _init_role_caches()
+    return user_id in _MENU_EDITORS
 
 # ==== HELPERS ====
 def _targets_owner_only() -> List[int]:
@@ -218,6 +266,66 @@ def _build_full_help_text(is_admin: bool) -> str:
     except Exception:
         return _fallback_full_help(is_admin)
 
+# --- HELP SUBMENU (dynamic by role) ---
+def _help_root_kb_for_user(user_id: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("🔥 Buyer Requirements", callback_data="dmf_help_reqs")],
+        [InlineKeyboardButton("📜 Buyer Rules",        callback_data="dmf_help_rules")],
+        [InlineKeyboardButton("🛠️ Member Commands",    callback_data="dmf_help_cmds")],
+    ]
+    # Models see Model Commands: either listed in MODELS_IDS or MENU_EDITORS
+    if _is_model_user(user_id) or _is_menu_editor(user_id):
+        rows.append([InlineKeyboardButton("🧾 Model Commands", callback_data="dmf_help_models")])
+    # Admins see Admin Commands
+    if _is_admin_user(user_id):
+        rows.append([InlineKeyboardButton("🛡️ Admin Commands", callback_data="dmf_help_admin")])
+
+    rows.append([InlineKeyboardButton("⬅️ Back to Welcome", callback_data="dmf_back_welcome")])
+    rows.append([InlineKeyboardButton("⬅️ Back to Menu",    callback_data="dmf_open_menu")])
+    return InlineKeyboardMarkup(rows)
+
+def _build_member_commands_text() -> str:
+    return (
+        "🛠️ <b>Member Commands</b>\n\n"
+        "/menu — browse model menus\n"
+        "/anon — send an anonymous message to the admins\n"
+        "/reqstatus — check if you’ve met buyer requirements\n"
+        "/help — open this Help menu\n"
+        "/naughty — check your naughty XP meter\n"
+        "/leaderboard — see top naughty members\n"
+        "/bite, /spank, /tease — fun XP commands\n"
+    )
+
+def _build_model_commands_text() -> str:
+    return (
+        "🧾 <b>Model Commands</b>\n\n"
+        "• <b>Menus</b>\n"
+        "/addmenu &lt;model&gt; &lt;caption&gt; — run while sending photo\n"
+        "/changemenu &lt;model&gt; — reply to a new photo to replace\n"
+        "/deletemenu &lt;model&gt;\n"
+        "/listmenus — list all menus\n\n"
+        "• <b>Flyers</b>\n"
+        "/addflyer &lt;name&gt; &lt;caption&gt; — run while sending photo\n"
+        "/changeflyer &lt;name&gt; — reply to a new image\n"
+        "/deleteflyer &lt;name&gt;\n"
+        "/listflyers — list all flyers\n"
+    )
+
+def _build_admin_commands_text() -> str:
+    return (
+        "🛡️ <b>Admin Commands</b>\n\n"
+        "• <b>Moderation</b>\n"
+        "/warn, /warns, /resetwarns, /flirtywarn\n"
+        "/mute, /unmute, /kick, /ban, /unban\n\n"
+        "• <b>Federation</b>\n"
+        "/fedban, /fedunban, /fedcheck\n"
+        "/togglefedaction, /renamefed, /deletefed, /purgefed\n"
+        "/addfedadmin, /removefedadmin\n\n"
+        "• <b>Utilities</b>\n"
+        "/userinfo (admin-only), /cancel\n"
+        "/schedulemsg (scheduler), flyer rotation tools\n"
+    )
+
 # ==== REGISTER ====
 def register(app: Client):
 
@@ -343,16 +451,68 @@ def register(app: Client):
         _mark_kb_shown(cq.from_user.id)
         await cq.answer()
 
-    # Help
+    # Help (now a submenu)
     @app.on_callback_query(filters.regex("^dmf_show_help$"))
     async def cb_show_help(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id
-        is_admin = (uid in (OWNER_ID, SUPER_ADMIN_ID)) or (uid in getattr(_store, "list_admins", lambda: [])())
-        nav = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Back to Welcome", callback_data="dmf_back_welcome")],
-            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="dmf_open_menu")],
-        ])
-        await cq.message.reply_text(_build_full_help_text(is_admin), reply_markup=nav)
+        await cq.message.reply_text(
+            "❓ <b>Help</b>\nPick a topic:",
+            reply_markup=_help_root_kb_for_user(cq.from_user.id)
+        )
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex("^dmf_help_reqs$"))
+    async def cb_help_requirements(client: Client, cq: CallbackQuery):
+        nav = _help_root_kb_for_user(cq.from_user.id)
+        if BUYER_REQ_PHOTO:
+            try:
+                await client.send_photo(cq.from_user.id, BUYER_REQ_PHOTO, caption=BUYER_REQ_TEXT or " ", reply_markup=nav)
+            except Exception:
+                await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+        else:
+            await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex("^dmf_help_rules$"))
+    async def cb_help_rules(client: Client, cq: CallbackQuery):
+        nav = _help_root_kb_for_user(cq.from_user.id)
+        if RULES_PHOTO:
+            try:
+                await client.send_photo(cq.from_user.id, RULES_PHOTO, caption=RULES_TEXT or " ", reply_markup=nav)
+            except Exception:
+                await cq.message.reply_text(RULES_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+        else:
+            await cq.message.reply_text(RULES_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex("^dmf_help_cmds$"))
+    async def cb_help_cmds(client: Client, cq: CallbackQuery):
+        await cq.message.reply_text(
+            _build_member_commands_text(),
+            reply_markup=_help_root_kb_for_user(cq.from_user.id),
+            disable_web_page_preview=True
+        )
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex("^dmf_help_models$"))
+    async def cb_help_models(client: Client, cq: CallbackQuery):
+        if not (_is_model_user(cq.from_user.id) or _is_menu_editor(cq.from_user.id)):
+            return await cq.answer("Models only.", show_alert=True)
+        await cq.message.reply_text(
+            _build_model_commands_text(),
+            reply_markup=_help_root_kb_for_user(cq.from_user.id),
+            disable_web_page_preview=True
+        )
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex("^dmf_help_admin$"))
+    async def cb_help_admin(client: Client, cq: CallbackQuery):
+        if not _is_admin_user(cq.from_user.id):
+            return await cq.answer("Admins only.", show_alert=True)
+        await cq.message.reply_text(
+            _build_admin_commands_text(),
+            reply_markup=_help_root_kb_for_user(cq.from_user.id),
+            disable_web_page_preview=True
+        )
         await cq.answer()
 
     # Contact (welcome)
@@ -532,3 +692,4 @@ def register(app: Client):
             await client.send_message(target, text); await m.reply_text("Nudge sent ✅")
         except UserIsBlocked: await m.reply_text("User blocked the bot ❌")
         except (PeerIdInvalid, FloodWait, RPCError): await m.reply_text("Could not DM user (privacy/flood).")
+
