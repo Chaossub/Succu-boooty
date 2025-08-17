@@ -1,5 +1,9 @@
+# Telegram Bot Framework
+python-telegram-bot==20.7   # Use PTB v20 (ApplicationBuilder, async handlers)
+
 # Telegram Bot & Scheduling Core
-python-telegram-bot==20.7
+pyrogram==2.0.106
+tgcrypto==1.2.5
 python-dotenv==1.0.1
 pymongo==4.7.2
 apscheduler==3.10.1
