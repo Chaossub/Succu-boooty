@@ -31,7 +31,7 @@ except Exception:
 
 # ==== ENV ====
 OWNER_ID       = int(os.getenv("OWNER_ID", "0"))
-SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))  # You can still keep this if other code relies on it.
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))  # kept for compatibility if other code uses it
 
 # Super admins & models via env (string ids -> ints handled below)
 SUPER_ADMINS_STR = os.getenv("SUPER_ADMINS", "6964994611,8087941938")
@@ -129,7 +129,6 @@ def _targets_owner_only() -> List[int]:
     return [OWNER_ID] if OWNER_ID > 0 else []
 
 def _targets_any() -> List[int]:
-    # You can expand this to include other admins if you like
     return [OWNER_ID] if OWNER_ID > 0 else getattr(_store, "list_admins", lambda: [])()
 
 async def _is_admin(app: Client, chat_id: int, user_id: int) -> bool:
@@ -170,6 +169,18 @@ def _append_back(kb: Optional[InlineKeyboardMarkup], back_cb: str = "dmf_back_we
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data=back_cb)])
     return InlineKeyboardMarkup(rows)
 
+# Universal nav blocks
+def _back_to_home_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")]])
+
+def _help_nav_kb(user_id: int) -> InlineKeyboardMarkup:
+    # Back to Help (previous), plus Start/Menu
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Help", callback_data="dmf_show_help")],
+        [InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome"),
+         InlineKeyboardButton("⬅️ Back to Menu",  callback_data="dmf_open_menu")],
+    ])
+
 # ==== UI BUILDERS ====
 def _welcome_kb() -> InlineKeyboardMarkup:
     # Start layout: Menu (top) → Contact Admins → Models Elsewhere → Help (bottom)
@@ -190,7 +201,7 @@ def _contact_welcome_kb() -> InlineKeyboardMarkup:
     if row_direct: rows.append(row_direct)
     rows.append([InlineKeyboardButton("🙈 Send anonymous message to the admins", callback_data="dmf_anon_admins")])
     rows.append([InlineKeyboardButton("💡 Send a suggestion", callback_data="dmf_open_suggest")])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="dmf_back_welcome")])
+    rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")])
     return InlineKeyboardMarkup(rows)
 
 def _contact_menu_kb() -> InlineKeyboardMarkup:
@@ -207,13 +218,15 @@ def _contact_menu_kb() -> InlineKeyboardMarkup:
     if SAVY_ID > 0:
         row2.append(InlineKeyboardButton(f"💌 {SAVY_NAME}", url=f"tg://user?id={SAVY_ID}"))
     if row2: rows.append(row2)
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="dmf_open_menu")])
+    rows.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="dmf_open_menu")])
+    rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")])
     return InlineKeyboardMarkup(rows)
 
 def _suggest_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💡 Send suggestion (with your @)", callback_data="dmf_suggest_ident")],
         [InlineKeyboardButton("🙈 Send suggestion anonymously", callback_data="dmf_suggest_anon")],
+        [InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")],
         [InlineKeyboardButton("✖️ Cancel", callback_data="dmf_cancel")],
     ])
 
@@ -223,7 +236,7 @@ def _cancel_kb() -> InlineKeyboardMarkup:
 def _build_links_kb() -> Optional[InlineKeyboardMarkup]:
     raw = MODELS_LINKS_BUTTONS_JSON
     if not raw:
-        return None
+        return _back_to_home_kb()
     try:
         data = json.loads(raw)
         rows: List[List[InlineKeyboardButton]] = []
@@ -246,11 +259,10 @@ def _build_links_kb() -> Optional[InlineKeyboardMarkup]:
                     if t and u:
                         row.append(InlineKeyboardButton(t, url=u))
                 if row: rows.append(row)
-        if rows:
-            return InlineKeyboardMarkup(rows)
+        rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")])
+        return InlineKeyboardMarkup(rows) if rows else _back_to_home_kb()
     except Exception:
-        pass
-    return None
+        return _back_to_home_kb()
 
 def _spicy_intro(name: Optional[str]) -> str:
     name = name or "there"
@@ -271,8 +283,8 @@ def _help_root_kb_for_user(user_id: int) -> InlineKeyboardMarkup:
     if _is_admin_user(user_id):
         rows.append([InlineKeyboardButton("🛡️ Admin Commands", callback_data="dmf_help_admin")])
 
-    rows.append([InlineKeyboardButton("⬅️ Back to Welcome", callback_data="dmf_back_welcome")])
-    rows.append([InlineKeyboardButton("⬅️ Back to Menu",    callback_data="dmf_open_menu")])
+    rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")])
+    rows.append([InlineKeyboardButton("⬅️ Back to Menu",  callback_data="dmf_open_menu")])
     return InlineKeyboardMarkup(rows)
 
 def _build_member_commands_text() -> str:
@@ -470,7 +482,7 @@ def register(app: Client):
                 _anon_threads[token] = uid
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Reply anonymously", callback_data=f"dmf_anon_reply:{token}")]])
                 await _copy_to(client, targets, m, header="📨 Anonymous message", reply_markup=kb)
-                return await m.reply_text("Sent anonymously ✅")
+                return await m.reply_text("Sent anonymously ✅", reply_markup=_back_to_home_kb())
 
             if kind == "suggest":
                 if anon:
@@ -478,11 +490,11 @@ def register(app: Client):
                     _anon_threads[token] = uid
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("↩️ Reply anonymously", callback_data=f"dmf_anon_reply:{token}")]])
                     await _copy_to(client, targets, m, header="💡 Anonymous suggestion", reply_markup=kb)
-                    return await m.reply_text("Suggestion sent anonymously ✅")
+                    return await m.reply_text("Suggestion sent anonymously ✅", reply_markup=_back_to_home_kb())
                 else:
                     header = f"💡 Suggestion from {m.from_user.mention} (<code>{uid}</code>)"
                     await _copy_to(client, targets, m, header=header)
-                    return await m.reply_text("Thanks! Your suggestion was sent ✅")
+                    return await m.reply_text("Thanks! Your suggestion was sent ✅", reply_markup=_back_to_home_kb())
 
         # First DM & notify
         first_time = not _store.is_dm_ready_global(uid)
@@ -524,33 +536,31 @@ def register(app: Client):
 
     @app.on_callback_query(filters.regex("^dmf_help_reqs$"))
     async def cb_help_requirements(client: Client, cq: CallbackQuery):
-        nav = _help_root_kb_for_user(cq.from_user.id)
         if BUYER_REQ_PHOTO:
             try:
-                await client.send_photo(cq.from_user.id, BUYER_REQ_PHOTO, caption=BUYER_REQ_TEXT or " ", reply_markup=nav)
+                await client.send_photo(cq.from_user.id, BUYER_REQ_PHOTO, caption=BUYER_REQ_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id))
             except Exception:
-                await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+                await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
         else:
-            await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+            await cq.message.reply_text(BUYER_REQ_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_help_rules$"))
     async def cb_help_rules(client: Client, cq: CallbackQuery):
-        nav = _help_root_kb_for_user(cq.from_user.id)
         if RULES_PHOTO:
             try:
-                await client.send_photo(cq.from_user.id, RULES_PHOTO, caption=RULES_TEXT or " ", reply_markup=nav)
+                await client.send_photo(cq.from_user.id, RULES_PHOTO, caption=RULES_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id))
             except Exception:
-                await cq.message.reply_text(RULES_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+                await cq.message.reply_text(RULES_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
         else:
-            await cq.message.reply_text(RULES_TEXT or " ", reply_markup=nav, disable_web_page_preview=True)
+            await cq.message.reply_text(RULES_TEXT or " ", reply_markup=_help_nav_kb(cq.from_user.id), disable_web_page_preview=True)
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_help_cmds$"))
     async def cb_help_cmds(client: Client, cq: CallbackQuery):
         await cq.message.reply_text(
             _build_member_commands_text(),
-            reply_markup=_help_root_kb_for_user(cq.from_user.id),
+            reply_markup=_help_nav_kb(cq.from_user.id),
             disable_web_page_preview=True
         )
         await cq.answer()
@@ -559,7 +569,7 @@ def register(app: Client):
     async def cb_help_games(client: Client, cq: CallbackQuery):
         await cq.message.reply_text(
             _games_text(),
-            reply_markup=_help_root_kb_for_user(cq.from_user.id),
+            reply_markup=_help_nav_kb(cq.from_user.id),
             disable_web_page_preview=True
         )
         await cq.answer()
@@ -570,7 +580,7 @@ def register(app: Client):
             return await cq.answer("Models only.", show_alert=True)
         await cq.message.reply_text(
             _build_model_commands_text(),
-            reply_markup=_help_root_kb_for_user(cq.from_user.id),
+            reply_markup=_help_nav_kb(cq.from_user.id),
             disable_web_page_preview=True
         )
         await cq.answer()
@@ -581,7 +591,7 @@ def register(app: Client):
             return await cq.answer("Admins only.", show_alert=True)
         await cq.message.reply_text(
             _build_admin_commands_text(),
-            reply_markup=_help_root_kb_for_user(cq.from_user.id),
+            reply_markup=_help_nav_kb(cq.from_user.id),
             disable_web_page_preview=True
         )
         await cq.answer()
@@ -605,14 +615,16 @@ def register(app: Client):
         try:
             from handlers.menu import _tabs_kb  # reuse your existing tabs
             await cq.message.reply_text("Pick a menu:", reply_markup=_tabs_kb())
+            # Provide an extra nav to return easily
+            await cq.message.reply_text("Navigation:", reply_markup=_back_to_home_kb())
         except Exception:
-            await cq.message.reply_text("Menu is unavailable right now.")
+            await cq.message.reply_text("Menu is unavailable right now.", reply_markup=_back_to_home_kb())
         await cq.answer()
 
     # Links (welcome)
     @app.on_callback_query(filters.regex("^dmf_models_links$"))
     async def cb_models_links(client: Client, cq: CallbackQuery):
-        kb = _append_back(_build_links_kb(), "dmf_back_welcome")
+        kb = _build_links_kb()  # already includes "Back to Start"
         try:
             if MODELS_LINKS_PHOTO:
                 await client.send_photo(cq.from_user.id, MODELS_LINKS_PHOTO, caption=MODELS_LINKS_TEXT, reply_markup=kb)
@@ -629,24 +641,28 @@ def register(app: Client):
         if not _targets_owner_only():
             return await cq.answer("Owner is not configured.", show_alert=True)
         _pending[uid] = {"kind": "anon", "anon": True}
-        await cq.message.reply_text("You're anonymous. Type the message you want me to send to the admins.", reply_markup=_cancel_kb())
+        await cq.message.reply_text("You're anonymous. Type the message you want me to send to the admins.",
+                                    reply_markup=_cancel_kb())
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_open_suggest$"))
     async def cb_open_suggest(client: Client, cq: CallbackQuery):
-        await cq.message.reply_text("How would you like to send your suggestion?", reply_markup=_suggest_kb())
+        await cq.message.reply_text("How would you like to send your suggestion?",
+                                    reply_markup=_suggest_kb())
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_suggest_ident$"))
     async def cb_suggest_ident(client: Client, cq: CallbackQuery):
         _pending[cq.from_user.id] = {"kind": "suggest", "anon": False}
-        await cq.message.reply_text("Great! Type your suggestion and I’ll send it to the admins.", reply_markup=_cancel_kb())
+        await cq.message.reply_text("Great! Type your suggestion and I’ll send it to the admins.",
+                                    reply_markup=_cancel_kb())
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_suggest_anon$"))
     async def cb_suggest_anon(client: Client, cq: CallbackQuery):
         _pending[cq.from_user.id] = {"kind": "suggest", "anon": True}
-        await cq.message.reply_text("You're anonymous. Type your suggestion for the admins.", reply_markup=_cancel_kb())
+        await cq.message.reply_text("You're anonymous. Type your suggestion for the admins.",
+                                    reply_markup=_cancel_kb())
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^dmf_anon_reply:"))
@@ -658,7 +674,8 @@ def register(app: Client):
         if token not in _anon_threads:
             return await cq.answer("That anonymous thread has expired.", show_alert=True)
         _admin_pending_reply[admin_id] = token
-        await cq.message.reply_text("Reply mode enabled. Type your reply now — it will be sent anonymously. Use /cancel to exit.")
+        await cq.message.reply_text("Reply mode enabled. Type your reply now — it will be sent anonymously. Use /cancel to exit.",
+                                    reply_markup=_back_to_home_kb())
         await cq.answer("Reply to this message to send anonymously.")
 
     @app.on_callback_query(filters.regex("^dmf_cancel$"))
@@ -667,15 +684,15 @@ def register(app: Client):
         await cq.answer("Canceled.")
         try: await cq.message.edit_reply_markup(reply_markup=None)
         except Exception: pass
-        try: await client.send_message(cq.from_user.id, "Canceled.", reply_markup=ReplyKeyboardRemove())
+        try: await client.send_message(cq.from_user.id, "Canceled.", reply_markup=_back_to_home_kb())
         except Exception: pass
 
-    # Rules / Buyer with Back (legacy callbacks kept for compatibility)
+    # Rules / Buyer (legacy callbacks kept for compatibility)
     @app.on_callback_query(filters.regex("^dmf_rules$"))
     async def cb_rules(client: Client, cq: CallbackQuery):
         nav = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="dmf_open_menu")],
-            [InlineKeyboardButton("⬅️ Back to Welcome", callback_data="dmf_back_welcome")],
+            [InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")],
+            [InlineKeyboardButton("⬅️ Back to Menu",  callback_data="dmf_open_menu")],
         ])
         if RULES_PHOTO:
             try: await client.send_photo(cq.from_user.id, RULES_PHOTO, caption=RULES_TEXT or " ", reply_markup=nav)
@@ -687,8 +704,8 @@ def register(app: Client):
     @app.on_callback_query(filters.regex("^dmf_buyer$"))
     async def cb_buyer(client: Client, cq: CallbackQuery):
         nav = InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Back to Menu", callback_data="dmf_open_menu")],
-            [InlineKeyboardButton("⬅️ Back to Welcome", callback_data="dmf_back_welcome")],
+            [InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")],
+            [InlineKeyboardButton("⬅️ Back to Menu",  callback_data="dmf_open_menu")],
         ])
         if BUYER_REQ_PHOTO:
             try: await client.send_photo(cq.from_user.id, BUYER_REQ_PHOTO, caption=BUYER_REQ_TEXT or " ", reply_markup=nav)
@@ -714,7 +731,7 @@ def register(app: Client):
         except Exception: pass
         status = "✅ DM-ready (global)" if ready else "❌ Not DM-ready"
         who = "you" if target_id == m.from_user.id else f"<code>{target_id}</code>"
-        await m.reply_text(f"{status} set for {who}.")
+        await m.reply_text(f"{status} set for {who}.", reply_markup=_back_to_home_kb())
         if ready and _targets_any():
             try:
                 u = await client.get_users(target_id)
@@ -726,7 +743,7 @@ def register(app: Client):
     async def dmreadylist(client: Client, m: Message):
         try: dm = _store.list_dm_ready_global()
         except Exception: dm = {}
-        if not dm: return await m.reply_text("No one is marked DM-ready (global) yet.")
+        if not dm: return await m.reply_text("No one is marked DM-ready (global) yet.", reply_markup=_back_to_home_kb())
         lines = []
         for uid_str in list(dm.keys())[:200]:
             uid = int(uid_str)
@@ -735,16 +752,16 @@ def register(app: Client):
                 lines.append(f"• {u.mention} (<code>{uid}</code>)")
             except Exception:
                 lines.append(f"• <code>{uid}</code>")
-        await m.reply_text("<b>DM-ready (global):</b>\n" + "\n".join(lines))
+        await m.reply_text("<b>DM-ready (global):</b>\n" + "\n".join(lines), reply_markup=_back_to_home_kb())
 
     @app.on_message(filters.command("dmnudge"))
     async def dmnudge(client: Client, m: Message):
         if m.chat and m.chat.type != "private":
             if not await _is_admin(client, m.chat.id, m.from_user.id):
-                return await m.reply_text("Admins only.")
+                return await m.reply_text("Admins only.", reply_markup=_back_to_home_kb())
         else:
             if m.from_user.id not in SUPER_ADMINS and m.from_user.id not in (OWNER_ID, SUPER_ADMIN_ID):
-                return await m.reply_text("Admins only.")
+                return await m.reply_text("Admins only.", reply_markup=_back_to_home_kb())
         target: Optional[int] = None
         if m.reply_to_message and m.reply_to_message.from_user:
             target = m.reply_to_message.from_user.id
@@ -755,13 +772,12 @@ def register(app: Client):
                 try: target = (await client.get_users(arg)).id
                 except Exception: pass
         if not target:
-            return await m.reply_text("Reply to a user or pass @username/user_id.")
+            return await m.reply_text("Reply to a user or pass @username/user_id.", reply_markup=_back_to_home_kb())
         text = ("Hey! Quick nudge from the Sanctuary 💋\n\n"
                 "Please keep your DMs open to receive content you purchase and game rewards. "
                 "If you’d rather not, just let us know and we’ll arrange an alternative.\n\n"
                 "Thanks for helping things run smoothly! 😇")
         try:
-            await client.send_message(target, text); await m.reply_text("Nudge sent ✅")
-        except UserIsBlocked: await m.reply_text("User blocked the bot ❌")
-        except (PeerIdInvalid, FloodWait, RPCError): await m.reply_text("Could not DM user (privacy/flood).")
-
+            await client.send_message(target, text); await m.reply_text("Nudge sent ✅", reply_markup=_back_to_home_kb())
+        except UserIsBlocked: await m.reply_text("User blocked the bot ❌", reply_markup=_back_to_home_kb())
+        except (PeerIdInvalid, FloodWait, RPCError): await m.reply_text("Could not DM user (privacy/flood).", reply_markup=_back_to_home_kb())
