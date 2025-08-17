@@ -1,168 +1,139 @@
-import os
+
 import logging
-from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup
-)
+import os
+from dotenv import load_dotenv
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler,
-    CallbackQueryHandler, ContextTypes
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
 )
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# --- ENV CONFIG ---
+# Load ENV
+load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-SUPER_ADMINS = list(map(int, os.getenv("SUPER_ADMINS", "8087941938,6964994611").split(",")))
-MODELS = list(map(int, os.getenv("MODELS", "5650388514,6307783399").split(",")))
+# Logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
 
-# --- Role helpers ---
-def is_super(user_id: int) -> bool:
-    return user_id in SUPER_ADMINS
+# -----------------------
+# MENU TEXTS
+# -----------------------
+WELCOME_TEXT = """🔥 Welcome to SuccuBot 🔥
+I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.
 
-def is_model(user_id: int) -> bool:
-    return user_id in MODELS
+Use the buttons below to explore what I can do for you 😏
+"""
 
-# --- Menus ---
-def main_menu(user_id: int) -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton("Help", callback_data="help")],
-        [InlineKeyboardButton("Portal", callback_data="portal")],
-        [InlineKeyboardButton("Find Models Elsewhere", callback_data="links")],
-    ]
-    return InlineKeyboardMarkup(buttons)
+FIND_MODELS_TEXT = """💋 Want to find our models elsewhere?
 
-def help_menu(user_id: int) -> InlineKeyboardMarkup:
-    buttons = []
+👉 Ruby: https://allmylinks.com/rubyransoms
+👉 Roni: (add link if needed)
+👉 Others: (add links)
 
-    # Member commands
-    buttons.append([InlineKeyboardButton("📜 Member Commands", callback_data="member_cmds")])
-    # Model commands
-    if is_model(user_id) or is_super(user_id):
-        buttons.append([InlineKeyboardButton("💃 Model Commands", callback_data="model_cmds")])
-    # Admin commands
-    if is_super(user_id):
-        buttons.append([InlineKeyboardButton("🛠 Admin Commands", callback_data="admin_cmds")])
+Support them directly outside the group too 💕
+"""
 
-    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="back_main")])
-    return InlineKeyboardMarkup(buttons)
+BUYER_RULES_TEXT = """🔥 Succubus Sanctuary Buyer Rules 🔥
+1. Respect the models — no guilt-tripping, no free demands.
+2. Minimum: $20/month OR 4+ games.
+3. Exemptions may be used once every 6 months."""
 
-def member_cmds_menu() -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton("Buyer Requirements", callback_data="buyer_reqs")],
-        [InlineKeyboardButton("Buyer Rules", callback_data="buyer_rules")],
-        [InlineKeyboardButton("Game Rules", callback_data="game_rules")],
-        [InlineKeyboardButton("Menus", callback_data="menus")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="help")],
-    ]
-    return InlineKeyboardMarkup(buttons)
+BUYER_REQUIREMENTS_TEXT = """💸 Buyer Requirements
+To stay in the group, you must do at least ONE of the following each month:
+- Spend $20+ (tips, games, content).
+- OR join 4+ games.
+"""
 
-def model_cmds_menu() -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton("Flyers", callback_data="flyers")],
-        [InlineKeyboardButton("Manage Menus", callback_data="manage_menus")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="help")],
-    ]
-    return InlineKeyboardMarkup(buttons)
+GAME_RULES_TEXT = """🎲 Succubus Sanctuary Game Rules
 
-def admin_cmds_menu() -> InlineKeyboardMarkup:
-    buttons = [
-        [InlineKeyboardButton("Exemption List", callback_data="exemptions")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="help")],
-    ]
-    return InlineKeyboardMarkup(buttons)
+🕯️ Candle Temptation Game
+ - Tip $5 to light candles. 3 candles = model reward.
 
-# --- Handlers ---
+🍑 Pick a Peach
+ - Pick 1–12. Tip $5. Each number = surprise.
+
+💃 Flash Frenzy
+ - $5 tip = flash. Stacks for more.
+
+🎰 Dirty Wheel Spins
+ - $10 per spin. Random prize.
+
+🎲 Dice Roll Game
+ - $5 per roll. 1–6 = prize.
+
+🔥 Forbidden Folder Friday
+ - Premium folder. $80 flat. Limited-time only.
+"""
+
+# -----------------------
+# KEYBOARDS
+# -----------------------
+def main_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 Help", callback_data="help_menu")],
+        [InlineKeyboardButton("💋 Find Models", callback_data="find_models")]
+    ])
+
+def help_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📜 Buyer Rules", callback_data="buyer_rules")],
+        [InlineKeyboardButton("💸 Buyer Requirements", callback_data="buyer_requirements")],
+        [InlineKeyboardButton("🎲 Game Rules", callback_data="game_rules")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="back_main")]
+    ])
+
+def back_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back", callback_data="help_menu")]
+    ])
+
+def back_to_main_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back to Main", callback_data="back_main")]
+    ])
+
+# -----------------------
+# HANDLERS
+# -----------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    await update.message.reply_text(
-        "🔥 Welcome to SuccuBot 🔥\n"
-        "I’m your naughty little helper inside the Sanctuary — "
-        "here to keep things fun, flirty, and flowing.\n\n"
-        "Use the buttons below to explore.",
-        reply_markup=main_menu(user_id),
-    )
+    await update.message.reply_text(WELCOME_TEXT, reply_markup=main_menu_keyboard())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
-    data = query.data
 
-    if data == "help":
-        await query.edit_message_text(
-            "ℹ️ Help Menu", reply_markup=help_menu(user_id)
-        )
-    elif data == "portal":
-        await query.edit_message_text(
-            "🚪 The portal connects you to everything inside the Sanctuary."
-        )
-    elif data == "links":
-        await query.edit_message_text(
-            "✨ Find our models elsewhere:\n"
-            "• Ruby Ransoms: https://allmylinks.com/rubyransoms\n"
-            "• Roni: Coming soon!"
-        )
-    elif data == "back_main":
-        await query.edit_message_text(
-            "Back to main menu:", reply_markup=main_menu(user_id)
-        )
-    elif data == "member_cmds":
-        await query.edit_message_text(
-            "📜 Member Commands", reply_markup=member_cmds_menu()
-        )
-    elif data == "model_cmds":
-        await query.edit_message_text(
-            "💃 Model Commands", reply_markup=model_cmds_menu()
-        )
-    elif data == "admin_cmds":
-        await query.edit_message_text(
-            "🛠 Admin Commands", reply_markup=admin_cmds_menu()
-        )
-    elif data == "buyer_reqs":
-        await query.edit_message_text(
-            "🔥 Buyer Requirements 🔥\n\n"
-            "To stay in the group, you must:\n"
-            "• Spend $20+ each month OR\n"
-            "• Join 4+ games."
-        )
-    elif data == "buyer_rules":
-        await query.edit_message_text(
-            "📜 Buyer Rules 📜\n\n"
-            "1. Respect the models.\n"
-            "2. No freeloading — support at least two models.\n"
-            "3. No harassment or guilt-tripping."
-        )
-    elif data == "game_rules":
-        await query.edit_message_text(
-            "🎮 Game Rules 🎮\n\n"
-            "Each tip gets you into a game.\n"
-            "Minimum tip: $5.\n"
-            "Prizes include content from our models!"
-        )
-    elif data == "menus":
-        await query.edit_message_text("🍽 Menus — choose a model’s menu from the list.")
-    elif data == "flyers":
-        await query.edit_message_text("📢 Flyers — manage and post flyers here.")
-    elif data == "manage_menus":
-        await query.edit_message_text("📋 Manage Menus — update or add your menu.")
-    elif data == "exemptions":
-        await query.edit_message_text("🛡 Exemption List — view who is exempt and why.")
-    else:
-        await query.edit_message_text("⚠️ Unknown option.")
+    if query.data == "help_menu":
+        await query.edit_message_text("📖 Help Menu", reply_markup=help_menu_keyboard())
 
-# --- Main ---
+    elif query.data == "buyer_rules":
+        await query.edit_message_text(BUYER_RULES_TEXT, reply_markup=back_keyboard())
+
+    elif query.data == "buyer_requirements":
+        await query.edit_message_text(BUYER_REQUIREMENTS_TEXT, reply_markup=back_keyboard())
+
+    elif query.data == "game_rules":
+        await query.edit_message_text(GAME_RULES_TEXT, reply_markup=back_keyboard())
+
+    elif query.data == "find_models":
+        await query.edit_message_text(FIND_MODELS_TEXT, reply_markup=back_to_main_keyboard())
+
+    elif query.data == "back_main":
+        await query.edit_message_text(WELCOME_TEXT, reply_markup=main_menu_keyboard())
+
+# -----------------------
+# MAIN ENTRY
+# -----------------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
 
-    logger.info("Bot started...")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
