@@ -1,6 +1,5 @@
 # Telegram Bot & Scheduling Core
-pyrogram==2.0.106  # OR: git+https://github.com/pyrogram/pyrogram.git@master#egg=pyrogram
-tgcrypto==1.2.5
+python-telegram-bot==20.7
 python-dotenv==1.0.1
 pymongo==4.7.2
 apscheduler==3.10.1
