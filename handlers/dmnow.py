@@ -12,27 +12,28 @@ def register(app: Client):
         # Must be used in groups by admins
         if not m.chat or m.chat.type == "private":
             return await m.reply_text("Use /dmnow in the group.")
+
         try:
             member = await client.get_chat_member(m.chat.id, m.from_user.id)
-            if (member.privileges is None) and (member.status not in ("administrator", "creator")):
-                return await m.reply_text("Admins only.")
+            is_admin = (member.privileges is not None) or (member.status in ("administrator", "creator"))
         except Exception:
+            is_admin = False
+
+        if not is_admin:
             return await m.reply_text("Admins only.")
 
+        # Deep link to this bot's DM /start
         me = await client.get_me()
         if not me.username:
-            return await m.reply_text("I need a @username to build the DM button.")
-
-        # Deep-link to /start — user must tap to DM the bot
-        url  = f"https://t.me/{me.username}?start=ready"
+            return await m.reply_text("I need a public @username to create the DM button.")
+        url = f"https://t.me/{me.username}?start=ready"
 
         # Customizable via env (optional)
         btn_text  = os.getenv("DMNOW_BTN", "💌 DM Now")
         lead_text = os.getenv("DMNOW_TEXT", "Tap the button to DM the bot for menus, rules, games & support.")
 
-        # If the admin typed a caption with /dmnow, use that text instead of env
-        # Example: "Some message here" then add the button
-        # (/dmnow command can be on its own line after your message)
+        # If the admin typed extra text after /dmnow, use that instead of env text
+        # Example: "/dmnow Hey boys — tap to message us" -> uses that caption
         text = lead_text
         if m.text and len(m.text.split(maxsplit=1)) > 1:
             text = m.text.split(maxsplit=1)[1]
