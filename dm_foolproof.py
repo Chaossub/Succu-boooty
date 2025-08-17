@@ -9,6 +9,7 @@
 import os, time, asyncio, secrets, json
 from typing import Optional, List, Dict
 from pyrogram import Client, filters
+from pyrogram.enums import ChatType
 from pyrogram.types import (
     Message, InlineKeyboardMarkup, InlineKeyboardButton,
     CallbackQuery, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -261,14 +262,14 @@ def _build_model_commands_text() -> str:
     return (
         "🧾 <b>Model Commands</b>\n\n"
         "• <b>Menus</b>\n"
-        "/addmenu &lt;model&gt; &lt;caption&gt; — run while sending photo\n"
-        "/changemenu &lt;model&gt; — reply to a new photo to replace\n"
-        "/deletemenu &lt;model&gt;\n"
+        "/addmenu <model> <caption> — run while sending photo\n"
+        "/changemenu <model> — reply to a new photo to replace\n"
+        "/deletemenu <model>\n"
         "/listmenus — list all menus\n\n"
         "• <b>Flyers</b>\n"
-        "/addflyer &lt;name&gt; &lt;caption&gt; — run while sending photo\n"
-        "/changeflyer &lt;name&gt; — reply to a new image\n"
-        "/deleteflyer &lt;name&gt;\n"
+        "/addflyer <name> <caption> — run while sending photo\n"
+        "/changeflyer <name> — reply to a new image\n"
+        "/deleteflyer <name>\n"
         "/listflyers — list all flyers\n"
     )
 
@@ -356,25 +357,28 @@ def _games_text() -> str:
 # ==== REGISTER ====
 def register(app: Client):
 
-    # /start → Welcome UI (also sets DM-ready on first DM)
-    @app.on_message(filters.private & filters.command("start"))
+    # ---- Hardened /start: matches /start, /start@Bot, and /start <payload> ----
+    @app.on_message(filters.private & (filters.command(["start"]) | filters.regex(r"^/start(?:@\w+)?(?:\s+\S+)?$")))
     async def dmf_start(client: Client, m: Message):
+        if m.chat.type != ChatType.PRIVATE:
+            return
         uid = m.from_user.id if m.from_user else 0
         first_time = not _store.is_dm_ready_global(uid)
         if first_time:
             _store.set_dm_ready_global(uid, True, by_admin=False)
             if DM_READY_NOTIFY_MODE in ("always", "first_time") and _targets_any():
+                try_name = m.from_user.mention if m.from_user else f"<code>{uid}</code>"
                 await _notify(client, _targets_any(),
-                              f"🔔 DM-ready: {m.from_user.mention} (<code>{uid}</code>) — via /start")
+                              f"🔔 DM-ready: {try_name} (<code>{uid}</code>) — via /start")
         await m.reply_text(
-            f"🔥 <b>Welcome to SuccuBot</b> 🔥\n"
-            f"I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.",
+            "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
+            "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.",
             reply_markup=_welcome_kb(),
             disable_web_page_preview=True
         )
         _mark_kb_shown(uid)
 
-    # Group helper to drop a DM button (deep-link only)
+    # Group helper to drop a DM button (does NOT mark dm-ready)
     @app.on_message(filters.command("dmsetup"))
     async def dmsetup(client: Client, m: Message):
         if m.chat and m.chat.type != "private":
@@ -388,7 +392,7 @@ def register(app: Client):
             return await m.reply_text("I need a @username to create a DM button.")
         url = f"https://t.me/{me.username}?start=ready"
         btn = os.getenv("DMSETUP_BTN", "💌 DM Now")
-        text = os.getenv("DMSETUP_TEXT", "Tap to DM the bot for menus, rules, and support.")
+        text = os.getenv("DMSETUP_TEXT", "Tap to DM for quick support—Contact Admins, Help, and anonymous relay in one click.")
         await m.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn, url=url)]]))
 
     # /message — menu-style contact (no anon)
