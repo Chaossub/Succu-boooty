@@ -53,12 +53,17 @@ async def run_http_health():
 WIRED: Set[str] = set()
 
 def _priority_key(modname: str) -> tuple:
+    # Lower = earlier wiring. Add new modules here to control setup order.
     prio = {
         "handlers.flyer_scheduler": 10,
+        # NEW: Help submenu early so its callbacks exist before others reference it
+        "handlers.help_menu": 15,
         "handlers.schedulemsg": 10,
         "handlers.welcome": 20,
         "handlers.hi": 25,
         "handlers.help_cmd": 30,
+        # NEW: Anon messaging near other core UX
+        "handlers.anon": 32,
         "handlers.req_handlers": 40,
         "handlers.enforce_requirements": 45,
         "handlers.moderation": 50,
