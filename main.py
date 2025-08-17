@@ -1,15 +1,8 @@
-# main.py — runs Pyrogram in the main thread (app.run()) and FastAPI in a background thread.
-# Also wires a highest-priority (/start) failsafe that replies in DMs.
+# main.py — Pyrogram main thread; FastAPI health server in background.
+# Wires the root-level dm_foolproof.py and every handlers/*.py that exposes register(app).
 
-import logging
-import os
-import importlib
-import pkgutil
-import threading
-
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-
+import logging, os, importlib, pkgutil, threading
+from pyrogram import Client
 from fastapi import FastAPI
 import uvicorn
 
@@ -20,64 +13,19 @@ API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-OWNER_ID  = int(os.getenv("OWNER_ID", "0"))
+bot = Client("succubot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# --- Pyrogram client ---
-app = Client(
-    "succubot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    # DO NOT use in_memory=True here; keep a normal session so Pyrogram can idle properly.
-)
-
-# --- Small helpers for the welcome UI ---
-def _welcome_text(_: str | None) -> str:
-    return (
-        "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
-        "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
-        "😈 If you ever need to know exactly what I can do, just press the Help button and I’ll spill all my secrets… 💋"
-    )
-
-def _welcome_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💕 Menu", callback_data="dmf_open_menu")],
-        [InlineKeyboardButton("Contact Admins 👑", callback_data="dmf_open_direct")],
-        [InlineKeyboardButton("Find Our Models Elsewhere 🔥", callback_data="dmf_models_links")],
-        [InlineKeyboardButton("❓ Help", callback_data="dmf_show_help")],
-    ])
-
-# --- Highest priority /start (DM only) ---
-def _wire_failsafe_start():
-    @app.on_message(filters.command("start"), group=-1)
-    async def _failsafe_start(client: Client, m: Message):
-        # Reply ONLY in private chats
-        if getattr(m.chat, "type", "") != "private":
-            return
-        try:
-            await m.reply_text(
-                _welcome_text(m.from_user.first_name if m.from_user else None),
-                reply_markup=_welcome_kb(),
-                disable_web_page_preview=True,
-            )
-        except Exception as e:
-            if OWNER_ID:
-                try:
-                    await client.send_message(OWNER_ID, f"❌ /start error: <code>{e}</code>")
-                except Exception:
-                    pass
-
-# --- Root DM module (your dm_foolproof.py in project root) ---
 def _wire_root_dm():
+    """Load the root-level dm_foolproof.py (owns /start)."""
     try:
         from dm_foolproof import register as register_dm
-        register_dm(app)
+        register_dm(bot)
         log.info("wired: dm_foolproof (root)")
     except Exception as e:
         log.exception("Failed wiring dm_foolproof: %s", e)
 
-# --- Handlers package (e.g., handlers/dmnow.py, etc.) ---
 def _wire_handlers_pkg():
+    """Import every handlers.* module and call register(app) if present."""
     try:
         import handlers
     except Exception as e:
@@ -88,14 +36,13 @@ def _wire_handlers_pkg():
         try:
             mod = importlib.import_module(name)
             if hasattr(mod, "register"):
-                mod.register(app)
+                mod.register(bot)
                 log.info("wired: %s", name)
         except Exception as e:
             log.exception("Failed import: %s (%s)", name, e)
 
-# --- FastAPI (health/Render ping) in a background thread ---
+# --- tiny FastAPI for uptime/health ---
 api = FastAPI()
-
 @api.get("/")
 async def root():
     return {"ok": True, "bot": "SuccuBot"}
@@ -106,15 +53,10 @@ def _run_web():
 
 def main():
     log.info("✅ Starting SuccuBot… (Pyrogram)")
-    _wire_failsafe_start()
-    _wire_root_dm()
-    _wire_handlers_pkg()
-
-    # Start web server in the background
+    _wire_root_dm()        # <- /start lives in dm_foolproof.py ONLY
+    _wire_handlers_pkg()   # <- dmnow and others
     threading.Thread(target=_run_web, daemon=True).start()
-
-    # BLOCK here so Pyrogram keeps its dispatcher/handlers alive
-    app.run()
+    bot.run()
 
 if __name__ == "__main__":
     main()
