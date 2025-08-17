@@ -1,72 +1,75 @@
-# main.py — discover handlers/* and also wire root-level dm_foolproof.py
 import os
-import logging
-import pkgutil
 import importlib
+import pkgutil
+import logging
+import asyncio
+from dotenv import load_dotenv
 from pyrogram import Client
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-)
 log = logging.getLogger("SuccuBot")
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+)
 
-API_ID    = int(os.getenv("API_ID", "0"))
-API_HASH  = os.getenv("API_HASH", "")
+load_dotenv()
+
+API_ID   = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-if not API_ID or not API_HASH or not BOT_TOKEN:
-    raise SystemExit("Please set API_ID, API_HASH, BOT_TOKEN in env.")
 
-app = Client("succubot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workdir=".")
+app = Client(
+    "succubot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workdir=".",
+    plugins=None,  # we wire manually
+)
 
-def _wire_handlers_package() -> None:
-    wired = 0
-
-    # 1) Try to wire the root-level dm_foolproof.py (this contains /start)
+def _wire_root():
+    # dm_foolproof is in the project root (not in handlers)
     try:
-        spec = importlib.util.find_spec("dm_foolproof")
-        if spec is not None:
-            mod = importlib.import_module("dm_foolproof")
-            if hasattr(mod, "register"):
-                mod.register(app)
-                wired += 1
-                log.info("wired: dm_foolproof (root)")
-            else:
-                log.warning("skip: dm_foolproof (no register(app))")
-        else:
-            log.warning("skip: dm_foolproof (not found at repo root)")
+        import dm_foolproof
+        dm_foolproof.register(app)
+        log.info("wired: dm_foolproof (root)")
     except Exception as e:
-        log.exception("Failed import: dm_foolproof (%s)", e)
+        log.exception("Failed to wire dm_foolproof: %s", e)
 
-    # 2) Auto-discover handlers/*
+def _wire_handlers_package():
     try:
-        pkg = importlib.import_module("handlers")
-        pkg_path = pkg.__path__
-    except Exception as e:
-        log.warning("No handlers package found (handlers/). (%s)", e)
-        pkg_path = []
+        import handlers
+    except ImportError:
+        log.warning("No handlers package found; skipping.")
+        return
 
-    for m in pkgutil.iter_modules(pkg_path):
-        name = m.name
-        modname = f"handlers.{name}"
+    for modinfo in pkgutil.walk_packages(handlers.__path__, handlers.__name__ + "."):
+        modname = modinfo.name
+        # Skip any accidental duplicates of dm_foolproof
+        if modname.endswith(".dm_foolproof") or modname.endswith(".foolproofdm") or modname.endswith(".dm_foolproof_start"):
+            continue
         try:
             mod = importlib.import_module(modname)
-            if hasattr(mod, "register"):
-                mod.register(app)
-                wired += 1
-                log.info("wired: %s", modname)
-            else:
-                log.info("skip: %s (no register(app))", modname)
         except Exception as e:
-            log.exception("Failed import: %s (%s)", modname, e)
+            log.warning("skip: %s (import error: %s)", modname, e)
+            continue
+        if hasattr(mod, "register"):
+            try:
+                mod.register(app)
+                log.info("wired: %s", modname)
+            except Exception as e:
+                log.exception("Failed wiring %s: %s", modname, e)
 
-    log.info("Handlers wired: %s module(s) with register(app).", wired)
-
-@app.on_message()
-async def _noop(_, __):
-    return  # health/no-op
+async def _who_am_i():
+    async with app:
+        me = await app.get_me()
+        log.info("🤖 Running as @%s (id=%s)", me.username, me.id)
 
 if __name__ == "__main__":
     log.info("✅ Starting SuccuBot… (Pyrogram)")
+    _wire_root()
     _wire_handlers_package()
+    # Log which bot handle is live so you can DM the correct one
+    asyncio.get_event_loop().run_until_complete(_who_am_i())
     app.run()
+
