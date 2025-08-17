@@ -1,5 +1,5 @@
 # handlers/menu.py
-# Model menus (Roni, Ruby, Rin, Savy) with Back navigation and edit permissions.
+# Model menus (Roni, Ruby, Rin, Savy) with Back navigation and clean edit-in-place behavior.
 # - /addmenu <Name> <text...>   (DM recommended) — supports text-only OR photo+caption OR reply-to-photo
 # - /menu                        — show tabs & open a model's menu
 # - /menus                       — list which menus exist
@@ -163,16 +163,26 @@ def _tabs_kb(include_back_to_portal: bool = True) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def _back_to_tabs_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="menu_back_tabs")]])
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("◀️ Back", callback_data="menu_back_tabs")],
+        [InlineKeyboardButton("🏠 Start", callback_data="dmf_back_welcome")],
+    ])
 
 def _portal_kb() -> InlineKeyboardMarkup:
-    # Should match your dm_foolproof portal callbacks
+    # Match dm_foolproof callbacks
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💕 Menu", callback_data="dmf_open_menu")],
-        [InlineKeyboardButton("💌 Contact", callback_data="dmf_contact")],
-        [InlineKeyboardButton("🔗 Find our models elsewhere", callback_data="dmf_links")],
-        [InlineKeyboardButton("❔ Help", callback_data="dmf_help")],
+        [InlineKeyboardButton("Contact Admins 👑", callback_data="dmf_open_direct")],
+        [InlineKeyboardButton("Find Our Models Elsewhere 🔥", callback_data="dmf_models_links")],
+        [InlineKeyboardButton("❓ Help", callback_data="dmf_show_help")],
     ])
+
+# ---- Public API expected by dm_foolproof.py ----
+def menu_tabs_text() -> str:
+    return "💕 <b>Model Menus</b>\nChoose a name:"
+
+def menu_tabs_kb() -> InlineKeyboardMarkup:
+    return _tabs_kb(include_back_to_portal=True)
 
 # ----------------- Handlers ---------------------
 def register(app: Client):
@@ -260,8 +270,8 @@ def register(app: Client):
     @app.on_message(filters.command("menu"))
     async def open_menu(client: Client, m: Message):
         await m.reply_text(
-            "💕 <b>Model Menus</b>\nChoose a name:",
-            reply_markup=_tabs_kb(include_back_to_portal=True),
+            menu_tabs_text(),
+            reply_markup=menu_tabs_kb(),
             disable_web_page_preview=True
         )
 
@@ -269,22 +279,24 @@ def register(app: Client):
 
     @app.on_callback_query(filters.regex(r"^menu_back_tabs$"))
     async def on_back_tabs(client: Client, cq: CallbackQuery):
+        # Always EDIT back to tabs (prevents duplicates)
         try:
             await cq.message.edit_text(
-                "💕 <b>Model Menus</b>\nChoose a name:",
-                reply_markup=_tabs_kb(include_back_to_portal=True),
+                menu_tabs_text(),
+                reply_markup=menu_tabs_kb(),
                 disable_web_page_preview=True
             )
         except Exception:
             await cq.message.reply_text(
-                "💕 <b>Model Menus</b>\nChoose a name:",
-                reply_markup=_tabs_kb(include_back_to_portal=True),
+                menu_tabs_text(),
+                reply_markup=menu_tabs_kb(),
                 disable_web_page_preview=True
             )
         await cq.answer()
 
     @app.on_callback_query(filters.regex(r"^menu_home$"))
     async def on_menu_home(client: Client, cq: CallbackQuery):
+        # Edit back to your portal (dm_foolproof callbacks)
         try:
             await cq.message.edit_text(
                 "Welcome to the Sanctuary portal 💋 Choose an option:",
@@ -307,12 +319,42 @@ def register(app: Client):
             await cq.answer("No menu yet for " + model, show_alert=True)
             return
 
-        kb = _back_to_tabs_kb()
-        if doc.get("photo_id"):
+        text = (doc.get("text") or "").strip()
+        photo_id = doc.get("photo_id")
+
+        if photo_id:
+            # To avoid duplicate stacks: delete the old message and send the photo once.
             try:
-                await cq.message.reply_photo(doc["photo_id"], caption=(doc.get("text") or ""), reply_markup=kb)
+                await cq.message.delete()
             except Exception:
-                await cq.message.reply_text(doc.get("text") or "(photo unavailable)", reply_markup=kb, disable_web_page_preview=True)
+                pass
+            try:
+                await client.send_photo(
+                    cq.from_user.id,
+                    photo_id,
+                    caption=text or "",
+                    reply_markup=_back_to_tabs_kb()
+                )
+            except Exception:
+                # If photo retrieve fails, at least show text
+                await client.send_message(
+                    cq.from_user.id,
+                    text or "(photo unavailable)",
+                    reply_markup=_back_to_tabs_kb(),
+                    disable_web_page_preview=True
+                )
         else:
-            await cq.message.reply_text(doc.get("text") or "(empty)", reply_markup=kb, disable_web_page_preview=True)
+            # Text-only: edit in place (no new messages)
+            try:
+                await cq.message.edit_text(
+                    text or "(empty)",
+                    reply_markup=_back_to_tabs_kb(),
+                    disable_web_page_preview=True
+                )
+            except Exception:
+                await cq.message.reply_text(
+                    text or "(empty)",
+                    reply_markup=_back_to_tabs_kb(),
+                    disable_web_page_preview=True
+                )
         await cq.answer()
