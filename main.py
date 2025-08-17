@@ -1,89 +1,55 @@
-import os
-import logging
-import importlib
+# main.py
+import os, logging, pkgutil, importlib
 from pyrogram import Client
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 log = logging.getLogger("SuccuBot")
 
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-
 if not API_ID or not API_HASH or not BOT_TOKEN:
-    raise SystemExit("Please set API_ID, API_HASH, and BOT_TOKEN in env.")
+    raise SystemExit("Please set API_ID, API_HASH, BOT_TOKEN in env.")
 
 app = Client(
     "succubot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workdir="."
+    workdir=".",
 )
 
-def _load_and_register(modname: str) -> bool:
-    """Import handlers.<modname> and call register(app) if present."""
-    fq = f"handlers.{modname}"
-    try:
-        mod = importlib.import_module(fq)
-    except Exception as e:
-        log.warning("skip: %s (import error: %s)", fq, e)
-        return False
-    if hasattr(mod, "register") and callable(mod.register):
-        try:
-            mod.register(app)
-            log.info("wired: %s", fq)
-            return True
-        except Exception as e:
-            log.exception("Failed register() in %s: %s", fq, e)
-            return False
-    else:
-        log.warning("skip: %s (no register(app))", fq)
-        return False
-
-def _wire_handlers():
-    """Explicit order. Keep /start ONLY in the foolproof DM module."""
+def _wire_handlers_package():
+    """Auto-load handlers.* and call register(app) if present."""
     wired = 0
+    try:
+        import handlers  # package must exist and have __init__.py
+    except Exception as e:
+        log.error("No 'handlers' package: %s", e)
+        return
 
-    for name in [
-        "fun",
-        "xp",
-        "flyer",
-        "menu",
-        "warmup",
-        "membership_watch",
-        "exemptions",
-        "help_panel",
-    ]:
-        wired += 1 if _load_and_register(name) else 0
+    for modinfo in pkgutil.iter_modules(handlers.__path__, prefix="handlers."):
+        modname = modinfo.name
+        try:
+            mod = importlib.import_module(modname)
+            reg = getattr(mod, "register", None)
+            if callable(reg):
+                reg(app)
+                log.info("wired: %s", modname)
+                wired += 1
+            else:
+                log.info("skip: %s (no register(app))", modname)
+        except Exception as e:
+            log.exception("Failed import: %s (%s)", modname, e)
 
-    # ✅ Try multiple possible filenames for your foolproof DM /start module
-    foolproof_candidates = ["dm_foolproof", "foolproofdm", "dm_foolproof_start"]
-    fp_wired = False
-    for cand in foolproof_candidates:
-        if _load_and_register(cand):
-            log.info("✅ /start is provided by: handlers.%s", cand)
-            fp_wired = True
-            wired += 1
-            break
-    if not fp_wired:
-        log.error("❌ Could not find a handlers.dm_foolproof-style module for /start. "
-                  "Ensure the file exists (e.g., handlers/dm_foolproof.py) and defines register(app).")
-
-    # DM Now button helper (NO /start here)
-    if _load_and_register("dmnow"):
-        wired += 1
-
-    log.info("Handlers wired: %d module(s) with register(app).", wired)
+    log.info("Handlers wired: %s module(s) with register(app).", wired)
 
 @app.on_message()
-async def _noop(_, __):
+async def _noop(_, __):  # health/no-op
     return
 
 if __name__ == "__main__":
     log.info("✅ Starting SuccuBot… (Pyrogram)")
-    _wire_handlers()
+    _wire_handlers_package()
     app.run()
