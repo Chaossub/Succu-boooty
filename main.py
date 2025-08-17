@@ -1,8 +1,15 @@
-# main.py — start the bot, wire a failsafe /start with highest priority,
-# then load root dm_foolproof + the rest of handlers.
-import logging, os, importlib, pkgutil
+# main.py — runs Pyrogram in the main thread (app.run()) and FastAPI in a background thread.
+# Also wires a highest-priority (/start) failsafe that replies in DMs.
+
+import logging
+import os
+import importlib
+import pkgutil
+import threading
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+
 from fastapi import FastAPI
 import uvicorn
 
@@ -13,18 +20,19 @@ API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-RONI_NAME = os.getenv("RONI_NAME", "Roni")
-RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
-RUBY_ID   = int(os.getenv("RUBY_ID", "0"))
-RIN_NAME  = os.getenv("RIN_NAME",  "Rin")
-RIN_ID    = int(os.getenv("RIN_ID",  "0"))
-SAVY_NAME = os.getenv("SAVY_NAME", "Savy")
-SAVY_ID   = int(os.getenv("SAVY_ID", "0"))
+OWNER_ID  = int(os.getenv("OWNER_ID", "0"))
 
-app = Client("succubot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, in_memory=True)
+# --- Pyrogram client ---
+app = Client(
+    "succubot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    # DO NOT use in_memory=True here; keep a normal session so Pyrogram can idle properly.
+)
 
-def _welcome_text(first_name: str | None) -> str:
+# --- Small helpers for the welcome UI ---
+def _welcome_text(_: str | None) -> str:
     return (
         "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
         "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
@@ -39,12 +47,12 @@ def _welcome_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❓ Help", callback_data="dmf_show_help")],
     ])
 
+# --- Highest priority /start (DM only) ---
 def _wire_failsafe_start():
-    # Highest-priority /start. Replies even if other modules register /start.
     @app.on_message(filters.command("start"), group=-1)
     async def _failsafe_start(client: Client, m: Message):
-        if not m.chat or m.chat.type != "private":
-            # ignore /start in groups; DM-only welcome
+        # Reply ONLY in private chats
+        if getattr(m.chat, "type", "") != "private":
             return
         try:
             await m.reply_text(
@@ -59,8 +67,8 @@ def _wire_failsafe_start():
                 except Exception:
                     pass
 
+# --- Root DM module (your dm_foolproof.py in project root) ---
 def _wire_root_dm():
-    # Your root DM module handles DM-ready flagging, help callbacks, etc.
     try:
         from dm_foolproof import register as register_dm
         register_dm(app)
@@ -68,6 +76,7 @@ def _wire_root_dm():
     except Exception as e:
         log.exception("Failed wiring dm_foolproof: %s", e)
 
+# --- Handlers package (e.g., handlers/dmnow.py, etc.) ---
 def _wire_handlers_pkg():
     try:
         import handlers
@@ -84,24 +93,28 @@ def _wire_handlers_pkg():
         except Exception as e:
             log.exception("Failed import: %s (%s)", name, e)
 
-def main():
-    _wire_failsafe_start()  # <- guarantees /start works
-    _wire_root_dm()         # <- your DM logic (dm-ready, callbacks)
-    _wire_handlers_pkg()    # <- /dmnow and others
-    log.info("✅ Starting SuccuBot… (Pyrogram)")
-    app.start()
+# --- FastAPI (health/Render ping) in a background thread ---
+api = FastAPI()
 
-    api = FastAPI()
+@api.get("/")
+async def root():
+    return {"ok": True, "bot": "SuccuBot"}
 
-    @api.get("/")
-    async def root():
-        return {"ok": True, "bot": "SuccuBot"}
-
+def _run_web():
     port = int(os.getenv("PORT", "8000"))
-    try:
-        uvicorn.run(api, host="0.0.0.0", port=port)
-    finally:
-        app.stop()
+    uvicorn.run(api, host="0.0.0.0", port=port, log_level="info")
+
+def main():
+    log.info("✅ Starting SuccuBot… (Pyrogram)")
+    _wire_failsafe_start()
+    _wire_root_dm()
+    _wire_handlers_pkg()
+
+    # Start web server in the background
+    threading.Thread(target=_run_web, daemon=True).start()
+
+    # BLOCK here so Pyrogram keeps its dispatcher/handlers alive
+    app.run()
 
 if __name__ == "__main__":
     main()
