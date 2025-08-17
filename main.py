@@ -1,4 +1,4 @@
-# main.py
+# main.py — auto-discover handlers/*
 import os, logging, pkgutil, importlib
 from pyrogram import Client
 
@@ -6,25 +6,19 @@ logging.basicConfig(level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 log = logging.getLogger("SuccuBot")
 
-API_ID = int(os.getenv("API_ID", "0"))
+API_ID   = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN= os.getenv("BOT_TOKEN", "")
 if not API_ID or not API_HASH or not BOT_TOKEN:
     raise SystemExit("Please set API_ID, API_HASH, BOT_TOKEN in env.")
 
-app = Client(
-    "succubot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workdir=".",
-)
+app = Client("succubot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workdir=".")
 
 def _wire_handlers_package():
-    """Auto-load handlers.* and call register(app) if present."""
+    """Import handlers.* and call register(app) if present."""
     wired = 0
     try:
-        import handlers  # package must exist and have __init__.py
+        import handlers  # must exist and contain __init__.py
     except Exception as e:
         log.error("No 'handlers' package: %s", e)
         return
@@ -42,7 +36,6 @@ def _wire_handlers_package():
                 log.info("skip: %s (no register(app))", modname)
         except Exception as e:
             log.exception("Failed import: %s (%s)", modname, e)
-
     log.info("Handlers wired: %s module(s) with register(app).", wired)
 
 @app.on_message()
