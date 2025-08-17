@@ -1,12 +1,10 @@
 # dm_foolproof.py
-# DM entry & messaging helper with Back buttons and links panel.
-# Welcome (DM /start): [💕 Menu] [💌 Contact] [🔗 Find our models elsewhere] [❔ Help]
-# Welcome Contact: direct (Roni/Ruby) + Anonymous to admins + Suggestions + Back
-# Menu Contact: direct (Roni/Ruby/Rin/Savy) only + Back
-# /message -> Menu Contact (no anon)
+# DM entry & messaging helper with Back buttons, links panel, and a role-based Help submenu.
+# Start (DM /start): [💕 Menu] [Contact Admins 👑] [Find Our Models Elsewhere 🔥] [❓ Help]
+# Help submenu: Buyer Requirements, Buyer Rules, Member Commands, 🎮 Game Rules
+# Extra sections: Model Commands (only for MODELS/MENU_EDITORS), Admin Commands (only for admins)
+# Contact: direct DM, Anonymous message, Suggestions + Back
 # Anonymous reply bridge for OWNER
-# Rules / Buyer buttons with Back to Menu/Welcome
-# Help submenu: Buyer Requirements, Buyer Rules, Member Commands (+ Model/Admin sections shown by role)
 
 import os, time, asyncio, secrets, json
 from typing import Optional, List, Dict
@@ -33,14 +31,30 @@ except Exception:
 
 # ==== ENV ====
 OWNER_ID       = int(os.getenv("OWNER_ID", "0"))
-SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))  # You can set this to Ruby's ID.
+SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))  # You can still keep this if other code relies on it.
+
+# Super admins & models via env (string ids -> ints handled below)
+SUPER_ADMINS_STR = os.getenv("SUPER_ADMINS", "6964994611,8087941938")
+MODEL_IDS_STR    = os.getenv("MODEL_IDS", "5650388514,6307783399")
+
+def _to_id_set(s: str) -> set[int]:
+    out: set[int] = set()
+    for tok in (s or "").replace(";", ",").split(","):
+        tok = tok.strip()
+        if tok and tok.lstrip("-").isdigit():
+            try: out.add(int(tok))
+            except: pass
+    return out
+
+SUPER_ADMINS: set[int] = _to_id_set(SUPER_ADMINS_STR)
+MODEL_IDS: set[int]    = _to_id_set(MODEL_IDS_STR)
 
 RONI_NAME = os.getenv("RONI_NAME", "Roni")
 RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
 RIN_NAME  = os.getenv("RIN_NAME",  "Rin")
 SAVY_NAME = os.getenv("SAVY_NAME", "Savy")
 
-RUBY_ID = int(os.getenv("RUBY_ID", "0"))
+RUBY_ID = int(os.getenv("RUBY_ID", "8087941938"))  # optional: for DM buttons
 RIN_ID  = int(os.getenv("RIN_ID",  "0"))
 SAVY_ID = int(os.getenv("SAVY_ID", "0"))
 
@@ -56,11 +70,15 @@ BUYER_REQ_PHOTO = os.getenv("BUYER_REQ_PHOTO")
 # Links panel (welcome)
 MODELS_LINKS_TEXT = os.getenv(
     "MODELS_LINKS_TEXT",
-    "Here are our verified links 💖\n\n"
-    "• Roni — <a href='https://example.com/roni'>Profile</a>\n"
-    "• Ruby — <a href='https://example.com/ruby'>Profile</a>\n"
-    "• Rin — <a href='https://example.com/rin'>Profile</a>\n"
-    "• Savy — <a href='https://example.com/savy'>Profile</a>\n"
+    "🔥 Find Our Models Elsewhere 🔥\n\n"
+    "👑 Roni Jane (Owner)\n"
+    "https://allmylinks.com/chaossub283\n\n"
+    "💎 Ruby Ransom (Co-Owner)\n"
+    "(Link coming soon)\n\n"
+    "🍑 Peachy Rin\n"
+    "https://allmylinks.com/peachybunsrin\n\n"
+    "⚡ Savage Savy\n"
+    "https://allmylinks.com/savannahxsavage"
 )
 MODELS_LINKS_PHOTO = os.getenv("MODELS_LINKS_PHOTO")
 MODELS_LINKS_BUTTONS_JSON = os.getenv("MODELS_LINKS_BUTTONS_JSON")
@@ -73,41 +91,30 @@ _admin_pending_reply: Dict[int, str] = {}  # admin_id -> token
 
 # ==== ROLE HELPERS ====
 def _parse_id_list_env(var_name: str) -> set[int]:
-    raw = os.getenv(var_name, "") or ""
-    ids: set[int] = set()
-    for tok in raw.replace(";", ",").split(","):
-        tok = tok.strip()
-        if tok and tok.lstrip("-").isdigit():
-            try:
-                ids.add(int(tok))
-            except Exception:
-                pass
-    return ids
+    return _to_id_set(os.getenv(var_name, "") or "")
 
-_MODELS: set[int] = set()       # people who get Model Commands (and ofc Member Commands)
-_MENU_EDITORS: set[int] = set() # extra editors for menus/flyers
+_MODELS: set[int] = set()
+_MENU_EDITORS: set[int] = set()
 
 def _init_role_caches():
     """Build once from env and known IDs."""
     global _MODELS, _MENU_EDITORS
     if _MODELS or _MENU_EDITORS:
         return
-    _MODELS = _parse_id_list_env("MODELS_IDS")
+    # primary list from env
+    _MODELS = set(MODEL_IDS)
     # include named model IDs if present
     for v in (RUBY_ID, RIN_ID, SAVY_ID):
         if v and isinstance(v, int) and v > 0:
             _MODELS.add(v)
+    # menu editors via env + owner allowed
     _MENU_EDITORS = _parse_id_list_env("MENU_EDITORS")
     if OWNER_ID and OWNER_ID > 0:
         _MENU_EDITORS.add(OWNER_ID)
 
 def _is_admin_user(user_id: int) -> bool:
-    if user_id in (OWNER_ID, SUPER_ADMIN_ID):
-        return True
-    try:
-        return user_id in getattr(_store, "list_admins", lambda: [])()
-    except Exception:
-        return False
+    return (user_id in SUPER_ADMINS) or (user_id == OWNER_ID) or (user_id == SUPER_ADMIN_ID) \
+           or (user_id in getattr(_store, "list_admins", lambda: [])())
 
 def _is_model_user(user_id: int) -> bool:
     _init_role_caches()
@@ -122,10 +129,11 @@ def _targets_owner_only() -> List[int]:
     return [OWNER_ID] if OWNER_ID > 0 else []
 
 def _targets_any() -> List[int]:
+    # You can expand this to include other admins if you like
     return [OWNER_ID] if OWNER_ID > 0 else getattr(_store, "list_admins", lambda: [])()
 
 async def _is_admin(app: Client, chat_id: int, user_id: int) -> bool:
-    if user_id in (OWNER_ID, SUPER_ADMIN_ID) or user_id in getattr(_store, "list_admins", lambda: [])():
+    if _is_admin_user(user_id):
         return True
     try:
         m = await app.get_chat_member(chat_id, user_id)
@@ -164,11 +172,12 @@ def _append_back(kb: Optional[InlineKeyboardMarkup], back_cb: str = "dmf_back_we
 
 # ==== UI BUILDERS ====
 def _welcome_kb() -> InlineKeyboardMarkup:
+    # Start layout: Menu (top) → Contact Admins → Models Elsewhere → Help (bottom)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💕 Menu", callback_data="dmf_open_menu")],
-        [InlineKeyboardButton("💌 Contact", callback_data="dmf_open_direct")],
-        [InlineKeyboardButton("🔗 Find our models elsewhere", callback_data="dmf_models_links")],
-        [InlineKeyboardButton("❔ Help", callback_data="dmf_show_help")],
+        [InlineKeyboardButton("Contact Admins 👑", callback_data="dmf_open_direct")],
+        [InlineKeyboardButton("Find Our Models Elsewhere 🔥", callback_data="dmf_models_links")],
+        [InlineKeyboardButton("❓ Help", callback_data="dmf_show_help")],
     ])
 
 def _contact_welcome_kb() -> InlineKeyboardMarkup:
@@ -247,31 +256,13 @@ def _spicy_intro(name: Optional[str]) -> str:
     name = name or "there"
     return f"Welcome to the Sanctuary, {name} 😈\nYou’re all set — tap Menu to see your options 👇"
 
-def _fallback_full_help(is_admin: bool) -> str:
-    lines = ["<b>SuccuBot Commands</b>",
-             "\n🛠 <b>General</b>",
-             "/help — show this menu",
-             "/menu — open the model menus",
-             "/message — contact options (no anon)",
-             "/cancel — cancel current action",
-             "/ping — bot check",
-             "\n💌 <b>DM Ready</b>",
-             "/dmready, /dmunready, /dmreadylist, /dmnudge"]
-    return "\n".join(lines)
-
-def _build_full_help_text(is_admin: bool) -> str:
-    try:
-        from handlers.help_cmd import _build_help_text as _central
-        return _central(is_admin)
-    except Exception:
-        return _fallback_full_help(is_admin)
-
 # --- HELP SUBMENU (dynamic by role) ---
 def _help_root_kb_for_user(user_id: int) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton("🔥 Buyer Requirements", callback_data="dmf_help_reqs")],
         [InlineKeyboardButton("📜 Buyer Rules",        callback_data="dmf_help_rules")],
         [InlineKeyboardButton("🛠️ Member Commands",    callback_data="dmf_help_cmds")],
+        [InlineKeyboardButton("🎮 Game Rules",          callback_data="dmf_help_games")],
     ]
     # Models see Model Commands: either listed in MODELS_IDS or MENU_EDITORS
     if _is_model_user(user_id) or _is_menu_editor(user_id):
@@ -326,10 +317,76 @@ def _build_admin_commands_text() -> str:
         "/schedulemsg (scheduler), flyer rotation tools\n"
     )
 
+def _games_text() -> str:
+    return """🎲 Succubus Sanctuary Game Rules
+
+⸻
+
+🕯️ Candle Temptation Game
+    • Setup: 12 candles total, 3 hidden candles per model.
+    • How to Play:
+      • Buyers tip $5 to light a random candle.
+      • They don’t know which model it belongs to until it’s revealed.
+      • When all 3 candles for a model are lit, she drops a spicy surprise in chat.
+    • Bonus: If all 12 candles are lit by the end of the game, a special group reward is unlocked.
+
+⸻
+
+🍑 Pick a Peach
+    • Setup: A peach tree graphic numbered 1–12. Each number hides a different model’s reward.
+    • How to Play:
+      • Buyers pick a number (1–12) and tip $5.
+      • Behind each number is a surprise from Roni, Ruby, Rin, or Savy.
+      • Every number corresponds to one model, no repeats.
+    • Goal: Collect rewards while making sure all girls get love.
+
+⸻
+
+💃 Flash Frenzy
+    • Setup: Timed flash rounds. Each girl has 1–2 spicy flashes ready.
+    • How to Play:
+      • Buyers tip $5 to trigger a flash frenzy.
+      • The chosen girl drops her flash (photo or clip) in chat.
+      • Every tip = another flash.
+    • Twist: Frenzy tips can stack for back-to-back flashes.
+
+⸻
+
+🎰 Dirty Wheel Spins
+    • Setup: A spinning wheel with naughty prizes (photos, clips, custom teases, etc.).
+    • How to Play:
+      • Buyers tip $10 to spin.
+      • Whatever the wheel lands on is the prize — no do-overs.
+      • Prizes range from small teases to premium surprises.
+    • Optional: Add jackpot slots like “double prize” or “custom mini-video.”
+
+⸻
+
+🎲 Dice Roll Game
+    • Setup: A dice chart with prizes 1–6.
+    • How to Play:
+      • Buyers tip $5 to roll.
+      • Roll is done live in chat or by bot command.
+      • Number rolled = prize revealed.
+    • Variation: Use 2 dice for bigger pools (doubles = bonus).
+
+⸻
+
+🔥 Forbidden Folder Friday
+    • What It Is: Not exactly a game, but a special premium option we run every Friday in the Sanctuary.
+    • Setup: A premium folder featuring mixed content from all active models (photos + clips).
+    • How It Works:
+      • Released every Friday.
+      • Buyers can unlock it for $80 flat.
+      • Content changes each week — always limited-time and exclusive.
+      • Payment goes to Ruby, and Roni delivers the Dropbox link.
+    • Note: Once the folder closes at midnight, it’s gone.
+"""
+
 # ==== REGISTER ====
 def register(app: Client):
 
-    # --- Force the welcome UI on /start in DM ---
+    # /start → Welcome UI
     @app.on_message(filters.private & filters.command("start"))
     async def dmf_start(client: Client, m: Message):
         uid = m.from_user.id if m.from_user else 0
@@ -339,8 +396,12 @@ def register(app: Client):
             if DM_READY_NOTIFY_MODE in ("always", "first_time") and _targets_any():
                 await _notify(client, _targets_any(),
                               f"🔔 DM-ready: {m.from_user.mention} (<code>{uid}</code>) — via /start")
-        await m.reply_text(_spicy_intro(m.from_user.first_name if m.from_user else None),
-                           reply_markup=_welcome_kb())
+        await m.reply_text(
+            f"🔥 <b>Welcome to SuccuBot</b> 🔥\n"
+            f"I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.",
+            reply_markup=_welcome_kb(),
+            disable_web_page_preview=True
+        )
         _mark_kb_shown(uid)
 
     # Group helper to drop a DM button
@@ -351,14 +412,14 @@ def register(app: Client):
             if not await _is_admin(client, m.chat.id, m.from_user.id):
                 return await m.reply_text("Admins only.")
         else:
-            if m.from_user.id not in (OWNER_ID, SUPER_ADMIN_ID):
+            if m.from_user.id not in (OWNER_ID, SUPER_ADMIN_ID) and (m.from_user.id not in SUPER_ADMINS):
                 return await m.reply_text("Admins only.")
         me = await client.get_me()
         if not me.username:
             return await m.reply_text("I need a @username to create a DM button.")
         url = f"https://t.me/{me.username}?start=ready"
         btn = os.getenv("DMSETUP_BTN", "💌 DM Now")
-        text = os.getenv("DMSETUP_TEXT", "Tap to DM for quick support—Contact menu, Help, and anonymous relay in one click.")
+        text = os.getenv("DMSETUP_TEXT", "Tap to DM for quick support—Contact Admins, Help, and anonymous relay in one click.")
         await m.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(btn, url=url)]]))
 
     # /message — menu-style contact (no anon)
@@ -451,12 +512,13 @@ def register(app: Client):
         _mark_kb_shown(cq.from_user.id)
         await cq.answer()
 
-    # Help (now a submenu)
+    # Help (submenu)
     @app.on_callback_query(filters.regex("^dmf_show_help$"))
     async def cb_show_help(client: Client, cq: CallbackQuery):
         await cq.message.reply_text(
             "❓ <b>Help</b>\nPick a topic:",
-            reply_markup=_help_root_kb_for_user(cq.from_user.id)
+            reply_markup=_help_root_kb_for_user(cq.from_user.id),
+            disable_web_page_preview=True
         )
         await cq.answer()
 
@@ -493,6 +555,15 @@ def register(app: Client):
         )
         await cq.answer()
 
+    @app.on_callback_query(filters.regex("^dmf_help_games$"))
+    async def cb_help_games(client: Client, cq: CallbackQuery):
+        await cq.message.reply_text(
+            _games_text(),
+            reply_markup=_help_root_kb_for_user(cq.from_user.id),
+            disable_web_page_preview=True
+        )
+        await cq.answer()
+
     @app.on_callback_query(filters.regex("^dmf_help_models$"))
     async def cb_help_models(client: Client, cq: CallbackQuery):
         if not (_is_model_user(cq.from_user.id) or _is_menu_editor(cq.from_user.id)):
@@ -518,7 +589,8 @@ def register(app: Client):
     # Contact (welcome)
     @app.on_callback_query(filters.regex("^dmf_open_direct$"))
     async def cb_open_direct_welcome(client: Client, cq: CallbackQuery):
-        await cq.message.reply_text("How would you like to reach us?", reply_markup=_contact_welcome_kb())
+        await cq.message.reply_text("Contact Admins 👑 — how would you like to reach us?",
+                                    reply_markup=_contact_welcome_kb())
         await cq.answer()
 
     # Contact (menu) — no anon here
@@ -531,7 +603,7 @@ def register(app: Client):
     @app.on_callback_query(filters.regex("^dmf_open_menu$"))
     async def cb_open_menu(client: Client, cq: CallbackQuery):
         try:
-            from handlers.menu import _tabs_kb  # reuse the same tabs
+            from handlers.menu import _tabs_kb  # reuse your existing tabs
             await cq.message.reply_text("Pick a menu:", reply_markup=_tabs_kb())
         except Exception:
             await cq.message.reply_text("Menu is unavailable right now.")
@@ -598,7 +670,7 @@ def register(app: Client):
         try: await client.send_message(cq.from_user.id, "Canceled.", reply_markup=ReplyKeyboardRemove())
         except Exception: pass
 
-    # Rules / Buyer with Back
+    # Rules / Buyer with Back (legacy callbacks kept for compatibility)
     @app.on_callback_query(filters.regex("^dmf_rules$"))
     async def cb_rules(client: Client, cq: CallbackQuery):
         nav = InlineKeyboardMarkup([
@@ -671,7 +743,7 @@ def register(app: Client):
             if not await _is_admin(client, m.chat.id, m.from_user.id):
                 return await m.reply_text("Admins only.")
         else:
-            if m.from_user.id not in (OWNER_ID, SUPER_ADMIN_ID):
+            if m.from_user.id not in SUPER_ADMINS and m.from_user.id not in (OWNER_ID, SUPER_ADMIN_ID):
                 return await m.reply_text("Admins only.")
         target: Optional[int] = None
         if m.reply_to_message and m.reply_to_message.from_user:
