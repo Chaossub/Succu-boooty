@@ -1,165 +1,168 @@
-import os, asyncio, logging, contextlib, importlib, pkgutil
-from typing import Optional, Set, List
-from dotenv import load_dotenv
-from pyrogram import Client
-from pyrogram.enums import ParseMode
-
-load_dotenv()
-
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+import os
+import logging
+from telegram import (
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
-log = logging.getLogger("SuccuBot")
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler,
+    CallbackQueryHandler, ContextTypes
+)
 
-def need(name: str) -> str:
-    v = os.getenv(name)
-    if not v:
-        raise RuntimeError(f"Missing required env var: {name}")
-    return v
+# --- Logging ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def build_app() -> Client:
-    return Client(
-        name=os.getenv("SESSION_NAME", "SuccuBot"),
-        api_id=int(need("API_ID")),
-        api_hash=need("API_HASH"),
-        bot_token=need("BOT_TOKEN"),
-        parse_mode=ParseMode.HTML,
-        in_memory=True,
-        workdir=".",
+# --- ENV CONFIG ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+SUPER_ADMINS = list(map(int, os.getenv("SUPER_ADMINS", "8087941938,6964994611").split(",")))
+MODELS = list(map(int, os.getenv("MODELS", "5650388514,6307783399").split(",")))
+
+# --- Role helpers ---
+def is_super(user_id: int) -> bool:
+    return user_id in SUPER_ADMINS
+
+def is_model(user_id: int) -> bool:
+    return user_id in MODELS
+
+# --- Menus ---
+def main_menu(user_id: int) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("Help", callback_data="help")],
+        [InlineKeyboardButton("Portal", callback_data="portal")],
+        [InlineKeyboardButton("Find Models Elsewhere", callback_data="links")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+def help_menu(user_id: int) -> InlineKeyboardMarkup:
+    buttons = []
+
+    # Member commands
+    buttons.append([InlineKeyboardButton("📜 Member Commands", callback_data="member_cmds")])
+    # Model commands
+    if is_model(user_id) or is_super(user_id):
+        buttons.append([InlineKeyboardButton("💃 Model Commands", callback_data="model_cmds")])
+    # Admin commands
+    if is_super(user_id):
+        buttons.append([InlineKeyboardButton("🛠 Admin Commands", callback_data="admin_cmds")])
+
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="back_main")])
+    return InlineKeyboardMarkup(buttons)
+
+def member_cmds_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("Buyer Requirements", callback_data="buyer_reqs")],
+        [InlineKeyboardButton("Buyer Rules", callback_data="buyer_rules")],
+        [InlineKeyboardButton("Game Rules", callback_data="game_rules")],
+        [InlineKeyboardButton("Menus", callback_data="menus")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="help")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+def model_cmds_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("Flyers", callback_data="flyers")],
+        [InlineKeyboardButton("Manage Menus", callback_data="manage_menus")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="help")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+def admin_cmds_menu() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("Exemption List", callback_data="exemptions")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="help")],
+    ]
+    return InlineKeyboardMarkup(buttons)
+
+# --- Handlers ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await update.message.reply_text(
+        "🔥 Welcome to SuccuBot 🔥\n"
+        "I’m your naughty little helper inside the Sanctuary — "
+        "here to keep things fun, flirty, and flowing.\n\n"
+        "Use the buttons below to explore.",
+        reply_markup=main_menu(user_id),
     )
 
-# Optional tiny health server (USE_HTTP_HEALTH=1)
-async def run_http_health():
-    if os.getenv("USE_HTTP_HEALTH", "1") != "1":
-        return
-    port = int(os.getenv("PORT", "8000"))
-    try:
-        from fastapi import FastAPI
-        import uvicorn
-        app = FastAPI()
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    data = query.data
 
-        @app.get("/health")
-        def health():
-            return {"ok": True}
+    if data == "help":
+        await query.edit_message_text(
+            "ℹ️ Help Menu", reply_markup=help_menu(user_id)
+        )
+    elif data == "portal":
+        await query.edit_message_text(
+            "🚪 The portal connects you to everything inside the Sanctuary."
+        )
+    elif data == "links":
+        await query.edit_message_text(
+            "✨ Find our models elsewhere:\n"
+            "• Ruby Ransoms: https://allmylinks.com/rubyransoms\n"
+            "• Roni: Coming soon!"
+        )
+    elif data == "back_main":
+        await query.edit_message_text(
+            "Back to main menu:", reply_markup=main_menu(user_id)
+        )
+    elif data == "member_cmds":
+        await query.edit_message_text(
+            "📜 Member Commands", reply_markup=member_cmds_menu()
+        )
+    elif data == "model_cmds":
+        await query.edit_message_text(
+            "💃 Model Commands", reply_markup=model_cmds_menu()
+        )
+    elif data == "admin_cmds":
+        await query.edit_message_text(
+            "🛠 Admin Commands", reply_markup=admin_cmds_menu()
+        )
+    elif data == "buyer_reqs":
+        await query.edit_message_text(
+            "🔥 Buyer Requirements 🔥\n\n"
+            "To stay in the group, you must:\n"
+            "• Spend $20+ each month OR\n"
+            "• Join 4+ games."
+        )
+    elif data == "buyer_rules":
+        await query.edit_message_text(
+            "📜 Buyer Rules 📜\n\n"
+            "1. Respect the models.\n"
+            "2. No freeloading — support at least two models.\n"
+            "3. No harassment or guilt-tripping."
+        )
+    elif data == "game_rules":
+        await query.edit_message_text(
+            "🎮 Game Rules 🎮\n\n"
+            "Each tip gets you into a game.\n"
+            "Minimum tip: $5.\n"
+            "Prizes include content from our models!"
+        )
+    elif data == "menus":
+        await query.edit_message_text("🍽 Menus — choose a model’s menu from the list.")
+    elif data == "flyers":
+        await query.edit_message_text("📢 Flyers — manage and post flyers here.")
+    elif data == "manage_menus":
+        await query.edit_message_text("📋 Manage Menus — update or add your menu.")
+    elif data == "exemptions":
+        await query.edit_message_text("🛡 Exemption List — view who is exempt and why.")
+    else:
+        await query.edit_message_text("⚠️ Unknown option.")
 
-        log.info("Starting FastAPI health server on :%d", port)
-        config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
-        server = uvicorn.Server(config)
-        await server.serve()
-    except Exception as e:
-        log.warning("Health server unavailable: %s", e)
+# --- Main ---
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-WIRED: Set[str] = set()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
-def _priority_key(modname: str) -> tuple:
-    # Lower = earlier wiring. Add new modules here to control setup order.
-    prio = {
-        "handlers.flyer_scheduler": 10,
-        # NEW: Help submenu early so its callbacks exist before others reference it
-        "handlers.help_menu": 15,
-        "handlers.schedulemsg": 10,
-        "handlers.welcome": 20,
-        "handlers.hi": 25,
-        "handlers.help_cmd": 30,
-        # NEW: Anon messaging near other core UX
-        "handlers.anon": 32,
-        "handlers.req_handlers": 40,
-        "handlers.enforce_requirements": 45,
-        "handlers.moderation": 50,
-        "handlers.federation": 55,
-        "handlers.warnings": 60,
-        "handlers.summon": 65,
-        "handlers.fun": 70,
-        "handlers.xp": 75,
-        "handlers.flyer": 80,
-        "handlers.menu": 85,
-        "handlers.warmup": 90,
-        "handlers.membership_watch": 95,
-    }
-    return (prio.get(modname, 100), modname)
-
-def _wire_handlers_package(app: Client, package_name: str = "handlers") -> None:
-    try:
-        pkg = importlib.import_module(package_name)
-    except ModuleNotFoundError:
-        log.warning("Package '%s' not found. Skipping.", package_name)
-        return
-
-    loop = asyncio.get_event_loop()
-    mods: List[str] = []
-    for _, modname, _ in pkgutil.walk_packages(pkg.__path__, pkg.__name__ + "."):
-        mods.append(modname)
-
-    for modname in sorted(mods, key=_priority_key):
-        try:
-            mod = importlib.import_module(modname)
-        except Exception as e:
-            log.exception("Failed import: %s (%s)", modname, e)
-            continue
-
-        if hasattr(mod, "set_main_loop"):
-            try:
-                mod.set_main_loop(loop)
-                log.info("set_main_loop: %s", modname)
-            except Exception as e:
-                log.exception("Error set_main_loop on %s: %s", modname, e)
-
-        if hasattr(mod, "register") and callable(mod.register):
-            try:
-                mod.register(app)
-                log.info("wired: %s", modname)
-                WIRED.add(modname)
-            except Exception as e:
-                log.exception("Failed register: %s (%s)", modname, e)
-
-def _wire_dm_foolproof(app: Client) -> None:
-    try:
-        mod = importlib.import_module("dm_foolproof")
-        if hasattr(mod, "register") and callable(mod.register):
-            mod.register(app)
-            log.info("wired: dm_foolproof")
-        else:
-            log.warning("dm_foolproof found but no register(app).")
-    except ModuleNotFoundError:
-        log.info("dm_foolproof not found (skipping).")
-    except Exception as e:
-        log.exception("failed wiring dm_foolproof: %s", e)
-
-def wire_everything(app: Client) -> None:
-    _wire_handlers_package(app, "handlers")
-    _wire_dm_foolproof(app)
-    log.info("Handlers wired: %d module(s) with register(app).", len(WIRED))
-
-async def main():
-    app = build_app()
-    wire_everything(app)
-
-    log.info("✅ Starting SuccuBot…")
-    await app.start()
-    log.info("🤖 Bot is online.")
-
-    health_task: Optional[asyncio.Task] = None
-    if os.getenv("USE_HTTP_HEALTH", "1") == "1":
-        health_task = asyncio.create_task(run_http_health())
-
-    try:
-        while True:
-            await asyncio.sleep(3600)
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        pass
-    finally:
-        log.info("🛑 Stopping SuccuBot…")
-        if health_task:
-            health_task.cancel()
-            with contextlib.suppress(Exception):
-                await health_task
-        await app.stop()
-        log.info("🧹 Clean shutdown complete.")
+    logger.info("Bot started...")
+    app.run_polling()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception:
-        log.exception("❌ Fatal error during startup")
-        raise
+    main()
+
