@@ -7,7 +7,7 @@ import logging
 import signal
 from contextlib import suppress
 
-from pyrogram import Client, idle
+from pyrogram import Client
 from uvicorn import Config, Server
 
 # ----------------------------
@@ -21,15 +21,13 @@ log = logging.getLogger("SuccuBot")
 
 # ----------------------------
 # FastAPI app loader
-#   - Adjust the import below to wherever your FastAPI `app` lives.
-#   - If you don't use FastAPI, this will simply not start Uvicorn.
 # ----------------------------
 def load_fastapi_app():
     candidates = [
-        ("webserver", "app"),        # e.g. webserver.py -> app = FastAPI()
-        ("server", "app"),           # e.g. server.py    -> app = FastAPI()
-        ("api", "app"),              # e.g. api.py       -> app = FastAPI()
-        ("web.api", "app"),          # e.g. web/api.py   -> app = FastAPI()
+        ("webserver", "app"),  # webserver.py -> app = FastAPI()
+        ("server", "app"),
+        ("api", "app"),
+        ("web.api", "app"),
         ("web.app", "app"),
     ]
     for mod, attr in candidates:
@@ -41,15 +39,10 @@ def load_fastapi_app():
     return None
 
 # ----------------------------
-# Handler wiring (your existing function)
-# If your handlers are wired elsewhere, import and call that here.
+# Handler wiring
 # ----------------------------
 def wire_handlers(app_client: Client):
-    """
-    Import your modules that call `register(app_client)`.
-    This mirrors what you already log as 'wired: ...'.
-    """
-    # Example pattern; keep what you already had:
+    """Import modules that call register(app_client)."""
     try:
         import dm_foolproof as dm_root
         dm_root.register(app_client)
@@ -57,7 +50,6 @@ def wire_handlers(app_client: Client):
     except Exception as e:
         log.exception("Failed to wire dm_foolproof: %s", e)
 
-    # Import the rest of your handlers the same way:
     for mod in [
         "handlers.dmnow",
         "handlers.enforce_requirements",
@@ -70,6 +62,11 @@ def wire_handlers(app_client: Client):
         "handlers.help_panel",
         "handlers.hi",
         "handlers.membership_watch",
+
+        # NEW: menu save/edit backend first
+        "handlers.menu_save_fix",
+
+        # Existing menu viewer
         "handlers.menu",
         "handlers.moderation",
         "handlers.req_handlers",
@@ -91,8 +88,6 @@ def wire_handlers(app_client: Client):
 # Build the Pyrogram client from env
 # ----------------------------
 def build_client() -> Client:
-    # Keep the same session name and parameters you were using before.
-    # If you previously created it elsewhere, mirror that here.
     return Client(
         "SuccuBot",
         api_id=int(os.getenv("API_ID", "0")),
@@ -110,16 +105,14 @@ async def run_uvicorn(app) -> Server:
         app=app,
         host="0.0.0.0",
         port=int(os.getenv("PORT", "8000")),
-        loop="asyncio",         # IMPORTANT: same loop as Pyrogram
+        loop="asyncio",   # same loop as Pyrogram
         lifespan="on",
         log_level="info",
         timeout_keep_alive=10,
         proxy_headers=True,
     )
     server = Server(cfg)
-    # Run serve() in a task so we can stop it later by setting server.should_exit
     asyncio.create_task(server.serve())
-    # Wait until the server is started (or immediately return if it is)
     while not server.started:
         await asyncio.sleep(0.05)
     log.info("Uvicorn started on 0.0.0.0:%s", cfg.port)
@@ -134,11 +127,9 @@ async def amain():
     app = build_client()
     wire_handlers(app)
 
-    # Start Pyrogram
     await app.start()
     log.info("Pyrogram started")
 
-    # Start FastAPI (if present)
     uvicorn_server = None
     fastapi_app = load_fastapi_app()
     if fastapi_app is not None:
@@ -146,7 +137,6 @@ async def amain():
     else:
         log.info("No FastAPI app found; skipping Uvicorn")
 
-    # Graceful shutdown on signals
     stop_event = asyncio.Event()
 
     def _signal_handler(*_):
@@ -158,13 +148,10 @@ async def amain():
         with suppress(NotImplementedError):
             loop.add_signal_handler(sig, _signal_handler)
 
-    # Idle until a signal happens
     await stop_event.wait()
 
-    # -------- Shutdown order: Uvicorn -> Pyrogram --------
     if uvicorn_server is not None:
         uvicorn_server.should_exit = True
-        # Wait a tiny moment for server.serve() to unwind
         await asyncio.sleep(0.1)
         log.info("Uvicorn stopped")
 
@@ -178,7 +165,6 @@ def main():
     try:
         asyncio.run(amain())
     except RuntimeError as e:
-        # Safety catch (shouldn’t trigger with the unified loop, but just in case)
         if "attached to a different loop" in str(e):
             log.warning("Suppressed cross-loop RuntimeError during shutdown: %s", e)
         else:
