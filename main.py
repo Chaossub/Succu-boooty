@@ -1,5 +1,4 @@
 # main.py — single-loop Pyrogram runner with robust logging & tracing
-
 import os, sys, asyncio, logging, signal
 from contextlib import suppress
 from logging.handlers import RotatingFileHandler
@@ -56,6 +55,10 @@ def build_client() -> Client:
         workdir=".",
         in_memory=True,
     )
+
+def _bot_has_username(client: Client) -> bool:
+    # Helps diagnose deep-link issues for DM buttons
+    return bool(getattr(client, "_me", None) and getattr(client._me, "username", None))
 
 
 def wire_handlers(app: Client):
@@ -129,7 +132,7 @@ def wire_handlers(app: Client):
 
     # ---- import your modules, but log failures instead of dying ----
     modules = [
-        "handlers.dm_foolproof",
+        "dm_foolproof",            # << root-level (your logs showed handlers.dm_foolproof missing)
         "handlers.dmnow",
         "handlers.enforce_requirements",
         "handlers.exemptions",
@@ -165,6 +168,24 @@ def wire_handlers(app: Client):
             logger.exception("Failed to wire %s", mod)
     logger.info("Handlers wired: %d module(s).", wired)
 
+    # --- Force-welcome shim (runs late; ensures buttons appear even if other /start crashes)
+    try:
+        from dm_foolproof import _welcome_kb as _df_welcome_kb, _spicy_intro as _df_intro
+    except Exception:
+        _df_welcome_kb = None
+        _df_intro = None
+
+    @app.on_message(filters.private & filters.command("start"), group=998)
+    async def _force_welcome(client: Client, m: Message):
+        if _df_welcome_kb and _df_intro:
+            try:
+                name = (m.from_user.first_name if m.from_user else "there")
+                await m.reply_text(_df_intro(name), reply_markup=_df_welcome_kb())
+                return
+            except Exception as e:
+                logger.exception("dm_foolproof welcome failed: %s", e)
+        # else: the normal fallback /start (group=999) will handle
+
 
 # ---------- Asyncio lifecycle ----------
 async def amain():
@@ -186,6 +207,9 @@ async def amain():
 
     await app.start()
     me = await app.get_me()
+    app._me = me  # cache for deep-link sanity
+    if not me.username:
+        logger.warning("Bot has no @username. Deep-link DM buttons (e.g., /dmnow) will not work.")
     logger.info("Bot started as @%s (%s)", me.username, me.id)
 
     # Graceful stop on signals
