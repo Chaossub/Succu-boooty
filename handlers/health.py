@@ -1,17 +1,23 @@
+# handlers/health.py
+import logging
 from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram.types import CallbackQuery
+
+log = logging.getLogger("health")
 
 def register(app: Client):
-    @app.on_message(filters.private & filters.command("health"))
-    async def health(client: Client, m: Message):
-        me = await client.get_me()
-        await m.reply_text(f"OK ✅ as @{me.username} (id={me.id})")
+    # Simple ping to verify bot liveness
+    @app.on_message(filters.command("ping"))
+    async def ping(client, m):
+        await m.reply_text("pong")
 
-    @app.on_message(filters.private)
-    async def any_dm(client: Client, m: Message):
-        # proves we receive *any* DM at all
+    # Catch-all *last* callback safety net: always answer to clear spinner
+    @app.on_callback_query(group=99)  # run after your regular handlers
+    async def _cb_safety(client: Client, cq: CallbackQuery):
+        # If another handler already answered, this is a no-op.
         try:
-            txt = m.text or m.caption or "(non-text)"
-        except Exception:
-            txt = "(unknown)"
-        print(f"[DM TRACE] from {m.from_user.id}: {txt}")
+            await cq.answer(cache_time=0)
+        except Exception as e:
+            # Ignore "query is too old"/already answered; log others.
+            if "QUERY_ID_INVALID" not in str(e):
+                log.debug("cb safety answer: %s", e)
