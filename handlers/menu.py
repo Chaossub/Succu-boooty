@@ -1,324 +1,312 @@
 # handlers/menu.py
-# Menus for Roni, Ruby, Rin, Savy + Contact Models + Editor commands.
-# Exports: menu_tabs_text(), menu_tabs_kb() for dm_foolproof to import.
+# Simple, self-contained Menus handler with storage + role-gated editing.
+# Commands:
+#   /menu                         -> Open menu picker (Roni, Ruby, Rin, Savy + Contact Models)
+#   /addmenu <model>              -> (reply to a PHOTO or send a PHOTO with caption)
+#   /changemenu <model>           -> (reply to a PHOTO or send a PHOTO with caption)
+#   /deletemenu <model>           -> Delete a model's menu
+#   /listmenus                    -> List which models have menus
+# Callbacks:
+#   menu:show:<model>             -> Show a model's menu (photo + caption)
+#   menu:contact                  -> Contact Models panel (DM links)
 
-import os, json, time
-from typing import Optional, Set, Dict, List, Tuple
-from dataclasses import dataclass
+import os, json, pathlib
+from typing import Dict, Optional, Set, Tuple
 
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
-from pyrogram.errors import RPCError
+from pyrogram.types import (
+    Message, InlineKeyboardMarkup, InlineKeyboardButton,
+    CallbackQuery, InputMediaPhoto
+)
 
-# ----------------------- IDs / helpers -----------------------
+# ---------- Models we support ----------
+MODELS = ["roni", "ruby", "rin", "savy"]
 
+# ---------- Env helpers ----------
 def _to_int(s: Optional[str]) -> Optional[int]:
     try:
         return int(str(s)) if s not in (None, "", "None") else None
     except Exception:
         return None
 
+def _ids_from_env(name: str) -> Set[int]:
+    raw = os.getenv(name, "")
+    ids: Set[int] = set()
+    for tok in raw.replace(";", ",").split(","):
+        tok = tok.strip()
+        if tok.isdigit():
+            ids.add(int(tok))
+    return ids
+
 OWNER_ID       = _to_int(os.getenv("OWNER_ID"))
 SUPER_ADMIN_ID = _to_int(os.getenv("SUPER_ADMIN_ID"))
+GLOBAL_EDITORS = _ids_from_env("MENU_EDITORS")  # comma/semicolon-separated Telegram user IDs
 
-# Global editors (optional)
-_EXTRA_ADMINS: Set[int] = set()
-if os.getenv("MENU_EDITORS"):
-    for tok in os.getenv("MENU_EDITORS").replace(";", ",").split(","):
-        v = _to_int(tok.strip())
-        if v: _EXTRA_ADMINS.add(v)
+# Per-model editor lists (optional)
+EDIT_RONI = _ids_from_env("MENU_EDITORS_RONI")
+EDIT_RUBY = _ids_from_env("MENU_EDITORS_RUBY")
+EDIT_RIN  = _ids_from_env("MENU_EDITORS_RIN")
+EDIT_SAVY = _ids_from_env("MENU_EDITORS_SAVY")
 
-ADMIN_IDS: Set[int] = set(i for i in (OWNER_ID, SUPER_ADMIN_ID) if i) | _EXTRA_ADMINS
-
-def _is_global_admin(uid: Optional[int]) -> bool:
-    return bool(uid and (uid in ADMIN_IDS))
-
-# ----------------------- Model roster / profile links -----------------------
-
-RONI_NAME = os.getenv("RONI_NAME", "Roni")
-RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
-RIN_NAME  = os.getenv("RIN_NAME",  "Rin")
-SAVY_NAME = os.getenv("SAVY_NAME", "Savy")
-
+# DM deep links (optional, used in "Contact Models")
 RUBY_ID = _to_int(os.getenv("RUBY_ID"))
 RIN_ID  = _to_int(os.getenv("RIN_ID"))
 SAVY_ID = _to_int(os.getenv("SAVY_ID"))
 
-MODELS: List[str] = ["roni", "ruby", "rin", "savy"]
-DISPLAY_NAME: Dict[str, str] = {
-    "roni": RONI_NAME, "ruby": RUBY_NAME, "rin": RIN_NAME, "savy": SAVY_NAME
-}
-PROFILE_ID: Dict[str, Optional[int]] = {
-    "roni": OWNER_ID, "ruby": RUBY_ID, "rin": RIN_ID, "savy": SAVY_ID
-}
+# ---------- Storage (JSON file by default) ----------
+MENU_JSON_PATH = os.getenv("MENU_JSON_PATH", "./data/menus.json")
 
-def _model_editors_from_env(model_key: str) -> Set[int]:
-    key = f"MENU_EDITORS_{model_key.upper()}"
-    out: Set[int] = set()
-    raw = os.getenv(key, "")
-    for tok in raw.replace(";", ",").split(","):
-        v = _to_int(tok.strip())
-        if v: out.add(v)
-    return out
+def _ensure_dir(path: str) -> None:
+    p = pathlib.Path(path).expanduser().resolve()
+    p.parent.mkdir(parents=True, exist_ok=True)
 
-def _is_editor(uid: Optional[int], model_key: str) -> bool:
-    if _is_global_admin(uid): return True
-    return bool(uid and (uid in _model_editors_from_env(model_key)))
+def _load_storage() -> Dict[str, Dict[str, str]]:
+    try:
+        with open(MENU_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # expected: { "roni": {"photo": "<file_id>", "caption": "text"}, ... }
+        if isinstance(data, dict):
+            return data
+        return {}
+    except Exception:
+        return {}
 
-# ----------------------- Storage: Mongo preferred, JSON fallback -----------
+def _save_storage(data: Dict[str, Dict[str, str]]) -> None:
+    _ensure_dir(MENU_JSON_PATH)
+    with open(MENU_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB  = os.getenv("MONGO_DB", "succubot")
-MONGO_COL = os.getenv("MONGO_MENU_COLLECTION", "menus")
-_JSON_FALLBACK = os.getenv("MENU_JSON_PATH", "./data/menus.json")
+# ---------- Permissions ----------
+def _per_model_editors(model: str) -> Set[int]:
+    model = model.lower()
+    if model == "roni": return EDIT_RONI
+    if model == "ruby": return EDIT_RUBY
+    if model == "rin":  return EDIT_RIN
+    if model == "savy": return EDIT_SAVY
+    return set()
 
-@dataclass
-class MenuDoc:
-    model: str
-    photo_id: str
-    caption: str
-    updated_by: int
-    updated_at: float
-
-class _MongoStore:
-    def __init__(self, uri: str, db: str, col: str):
-        from pymongo import MongoClient
-        self._cli = MongoClient(uri)
-        self._col = self._cli[db][col]
-        self._col.create_index("model", unique=True)
-
-    def get(self, model: str) -> Optional[MenuDoc]:
-        d = self._col.find_one({"model": model})
-        if not d: return None
-        return MenuDoc(model=d["model"], photo_id=d["photo_id"], caption=d.get("caption",""),
-                       updated_by=d.get("updated_by", 0), updated_at=float(d.get("updated_at", time.time())))
-
-    def set(self, md: MenuDoc) -> None:
-        self._col.update_one({"model": md.model},
-                             {"$set": {"photo_id": md.photo_id, "caption": md.caption,
-                                       "updated_by": md.updated_by, "updated_at": md.updated_at}},
-                             upsert=True)
-
-    def delete(self, model: str) -> bool:
-        return self._col.delete_one({"model": model}).deleted_count > 0
-
-    def list_models_with_menu(self) -> List[str]:
-        return [d["model"] for d in self._col.find({}, {"model": 1})]
-
-class _JsonStore:
-    def __init__(self, path: str):
-        self.path = path
-        d = os.path.dirname(path)
-        if d: os.makedirs(d, exist_ok=True)
-        if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f: json.dump({}, f)
-
-    def _load(self) -> Dict[str, Dict]:
-        try:
-            with open(self.path, "r", encoding="utf-8") as f: return json.load(f) or {}
-        except Exception:
-            return {}
-
-    def _save(self, data: Dict[str, Dict]):
-        with open(self.path, "w", encoding="utf-8") as f: json.dump(data, f)
-
-    def get(self, model: str) -> Optional[MenuDoc]:
-        d = self._load().get(model)
-        if not d: return None
-        return MenuDoc(model=model, photo_id=d["photo_id"], caption=d.get("caption",""),
-                       updated_by=d.get("updated_by", 0), updated_at=float(d.get("updated_at", time.time())))
-
-    def set(self, md: MenuDoc) -> None:
-        data = self._load()
-        data[md.model] = {"photo_id": md.photo_id, "caption": md.caption,
-                          "updated_by": md.updated_by, "updated_at": md.updated_at}
-        self._save(data)
-
-    def delete(self, model: str) -> bool:
-        data = self._load()
-        if model in data:
-            data.pop(model)
-            self._save(data)
-            return True
+def _is_editor(user_id: Optional[int], model: Optional[str] = None) -> bool:
+    if not user_id:
         return False
+    if user_id == OWNER_ID or user_id == SUPER_ADMIN_ID:
+        return True
+    if user_id in GLOBAL_EDITORS:
+        return True
+    if model:
+        if user_id in _per_model_editors(model):
+            return True
+    return False
 
-    def list_models_with_menu(self) -> List[str]:
-        return list(self._load().keys())
-
-_STORE = _MongoStore(MONGO_URI, MONGO_DB, MONGO_COL) if MONGO_URI else _JsonStore(_JSON_FALLBACK)
-
-# ----------------------- UI builders / exports -----------------------------
-
-def _menu_panel_text() -> str:
-    return "📜 <b>Model Menus</b>\nPick a model to view their current menu, or contact them directly."
-
-def _menu_panel_kb() -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-    row: List[InlineKeyboardButton] = []
-    for k in MODELS:
-        row.append(InlineKeyboardButton(DISPLAY_NAME.get(k, k.capitalize()), callback_data=f"menu:show:{k}"))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row: rows.append(row)
-    rows.append([InlineKeyboardButton("💌 Contact Models", callback_data="menu:contact")])
-    rows.append([InlineKeyboardButton("⬅️ Back to Welcome", callback_data="dmf_back_welcome")])
+# ---------- Keyboards ----------
+def _menu_root_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("Roni", callback_data="menu:show:roni"),
+         InlineKeyboardButton("Ruby", callback_data="menu:show:ruby")],
+        [InlineKeyboardButton("Rin",  callback_data="menu:show:rin"),
+         InlineKeyboardButton("Savy", callback_data="menu:show:savy")],
+        [InlineKeyboardButton("💌 Contact Models", callback_data="menu:contact")]
+    ]
+    # add “Back to Start” if your DM portal is installed
+    rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")])
     return InlineKeyboardMarkup(rows)
 
 def _contact_models_kb() -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-    row: List[InlineKeyboardButton] = []
-    for k in MODELS:
-        uid = PROFILE_ID.get(k)
-        label = f"💌 {DISPLAY_NAME.get(k, k.capitalize())}"
-        if uid:
-            row.append(InlineKeyboardButton(label, url=f"tg://user?id={uid}"))
-        else:
-            row.append(InlineKeyboardButton(f"{label} (unavailable)", callback_data="menu:nop"))
-        if len(row) == 2:
-            rows.append(row); row = []
-    if row: rows.append(row)
-    rows.append([InlineKeyboardButton("⬅️ Back to Menus", callback_data="menu:home")])
+    row1 = []
+    if OWNER_ID: row1.append(InlineKeyboardButton("💌 Roni", url=f"tg://user?id={OWNER_ID}"))
+    if RUBY_ID:  row1.append(InlineKeyboardButton("💌 Ruby", url=f"tg://user?id={RUBY_ID}"))
+    rows = []
+    if row1: rows.append(row1)
+    row2 = []
+    if RIN_ID:  row2.append(InlineKeyboardButton("💌 Rin",  url=f"tg://user?id={RIN_ID}"))
+    if SAVY_ID: row2.append(InlineKeyboardButton("💌 Savy", url=f"tg://user?id={SAVY_ID}"))
+    if row2: rows.append(row2)
+    rows.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="dmf_open_menu")])
+    rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")])
     return InlineKeyboardMarkup(rows)
 
-# Exported for dm_foolproof
-def menu_tabs_text() -> str:
-    return _menu_panel_text()
+# ---------- Utilities ----------
+def _get_photo_and_caption_from_message(m: Message) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Returns (photo_file_id, caption) from either the message itself (if it has a photo),
+    or the replied-to message (if present and has a photo).
+    """
+    # original message
+    if m.photo:
+        file_id = m.photo.file_id
+        caption = (m.caption or "").strip()
+        return file_id, caption
 
-def menu_tabs_kb() -> InlineKeyboardMarkup:
-    return _menu_panel_kb()
+    # replied-to message
+    if m.reply_to_message and m.reply_to_message.photo:
+        file_id = m.reply_to_message.photo.file_id
+        caption = (m.reply_to_message.caption or "").strip()
+        return file_id, caption
 
-def _norm_model(tok: Optional[str]) -> Optional[str]:
-    if not tok: return None
-    t = tok.strip().lower()
-    return t if t in MODELS else None
+    return None, None
 
-def _need_photo_from(m: Message) -> Optional[Tuple[str, str]]:
-    src = m
-    if not getattr(src, "photo", None) and m.reply_to_message:
-        src = m.reply_to_message
-    if getattr(src, "photo", None):
-        photo_id = src.photo.file_id
-        caption  = src.caption or m.caption or ""
-        return (photo_id, caption)
-    return None
+def _normalize_model(arg: Optional[str]) -> Optional[str]:
+    if not arg:
+        return None
+    val = arg.strip().lower()
+    return val if val in MODELS else None
 
-async def _send_menu_for(client: Client, chat_id: int, model: str):
-    doc = _STORE.get(model)
-    name = DISPLAY_NAME.get(model, model.capitalize())
-    if not doc:
-        return await client.send_message(chat_id, f"❌ No menu saved yet for <b>{name}</b>.")
-    try:
-        await client.send_photo(chat_id, doc.photo_id, caption=doc.caption or f"{name} — (no caption)")
-    except RPCError:
-        await client.send_message(chat_id, f"📜 <b>{name}</b>\n\n{doc.caption or '(no caption)'}")
+async def _send_menu_for_model(client: Client, chat_id: int, model: str, store: Dict[str, Dict[str, str]]):
+    rec = store.get(model)
+    if not rec:
+        await client.send_message(chat_id, f"❌ No menu saved for {model.title()} yet.")
+        return
+    photo = rec.get("photo")
+    caption = rec.get("caption", "") or " "
+    if photo:
+        await client.send_photo(chat_id, photo, caption=caption)
+    else:
+        await client.send_message(chat_id, caption or f"{model.title()} menu (no photo)")
 
-# ----------------------- Register -----------------------------
-
+# ---------- Register ----------
 def register(app: Client):
-    # Open menu panel (works in groups and DMs)
+
+    # /menu - works in both groups and DMs
     @app.on_message(filters.command("menu"))
-    async def open_menu_panel(client: Client, m: Message):
-        await m.reply_text(_menu_panel_text(), reply_markup=_menu_panel_kb(), disable_web_page_preview=True)
+    async def cmd_menu(client: Client, m: Message):
+        await m.reply_text(
+            "📖 <b>Model Menus</b>\nPick a model or contact directly:",
+            reply_markup=_menu_root_kb(),
+            disable_web_page_preview=True
+        )
 
-    # Shortcut: /menu <model> in DMs shows that model directly
-    @app.on_message(filters.private & filters.command("menu"))
-    async def direct_show_if_arg(client: Client, m: Message):
-        if len(m.command) >= 2:
-            model = _norm_model(m.command[1])
-            if model:
-                await _send_menu_for(client, m.chat.id, model)
-
-    # Callback: show a model's menu
-    @app.on_callback_query(filters.regex(r"^menu:show:(?P<model>[a-z0-9_]+)$"))
-    async def cb_show_menu(client: Client, cq: CallbackQuery):
-        model = _norm_model(cq.matches[0].group("model"))
+    # Add a menu (reply/send a PHOTO with optional caption)
+    @app.on_message(filters.command("addmenu"))
+    async def cmd_addmenu(client: Client, m: Message):
+        if len(m.command) < 2:
+            return await m.reply_text("Usage: <code>/addmenu roni|ruby|rin|savy</code> (reply/send a PHOTO with caption)")
+        model = _normalize_model(m.command[1])
         if not model:
-            return await cq.answer("Unknown model.", show_alert=True)
-        try: await cq.answer()
-        except Exception: pass
-        await _send_menu_for(client, cq.from_user.id, model)
+            return await m.reply_text("Unknown model. Use: roni, ruby, rin, savy")
 
-    # Callback: contact models panel
+        if not _is_editor(m.from_user.id if m.from_user else None, model):
+            return await m.reply_text("Admins/authorized editors only.")
+
+        file_id, caption = _get_photo_and_caption_from_message(m)
+        if not file_id:
+            return await m.reply_text("Please reply to a PHOTO or send a PHOTO with the command.")
+        store = _load_storage()
+        store[model] = {"photo": file_id, "caption": caption or ""}
+        _save_storage(store)
+        await m.reply_text(f"✅ Saved menu for <b>{model.title()}</b>.")
+
+    # Change a menu (reply/send a new PHOTO; caption optional to overwrite)
+    @app.on_message(filters.command("changemenu"))
+    async def cmd_changemenu(client: Client, m: Message):
+        if len(m.command) < 2:
+            return await m.reply_text("Usage: <code>/changemenu roni|ruby|rin|savy</code> (reply/send a PHOTO)")
+        model = _normalize_model(m.command[1])
+        if not model:
+            return await m.reply_text("Unknown model. Use: roni, ruby, rin, savy")
+
+        if not _is_editor(m.from_user.id if m.from_user else None, model):
+            return await m.reply_text("Admins/authorized editors only.")
+
+        file_id, caption = _get_photo_and_caption_from_message(m)
+        if not file_id:
+            return await m.reply_text("Please reply to a PHOTO or send a PHOTO with the command.")
+
+        store = _load_storage()
+        prev = store.get(model, {})
+        # keep old caption if new photo has no caption
+        if caption is None or caption.strip() == "":
+            caption = prev.get("caption", "")
+        store[model] = {"photo": file_id, "caption": caption or ""}
+        _save_storage(store)
+        await m.reply_text(f"✅ Updated menu for <b>{model.title()}</b>.")
+
+    # Delete a menu
+    @app.on_message(filters.command("deletemenu"))
+    async def cmd_deletemenu(client: Client, m: Message):
+        if len(m.command) < 2:
+            return await m.reply_text("Usage: <code>/deletemenu roni|ruby|rin|savy</code>")
+        model = _normalize_model(m.command[1])
+        if not model:
+            return await m.reply_text("Unknown model. Use: roni, ruby, rin, savy")
+
+        if not _is_editor(m.from_user.id if m.from_user else None, model):
+            return await m.reply_text("Admins/authorized editors only.")
+
+        store = _load_storage()
+        if model in store:
+            store.pop(model, None)
+            _save_storage(store)
+            return await m.reply_text(f"🗑️ Deleted menu for <b>{model.title()}</b>.")
+        return await m.reply_text(f"Nothing to delete — no menu saved for <b>{model.title()}</b>.")
+
+    # List menus present
+    @app.on_message(filters.command("listmenus"))
+    async def cmd_listmenus(client: Client, m: Message):
+        store = _load_storage()
+        have = [k for k in MODELS if k in store]
+        if not have:
+            return await m.reply_text("No menus saved yet.")
+        pretty = ", ".join(x.title() for x in have)
+        await m.reply_text(f"✅ Menus saved for: {pretty}")
+
+    # Optional: view a single model menu by command
+    @app.on_message(filters.command("viewmenu"))
+    async def cmd_viewmenu(client: Client, m: Message):
+        if len(m.command) < 2:
+            return await m.reply_text("Usage: <code>/viewmenu roni|ruby|rin|savy</code>")
+        model = _normalize_model(m.command[1])
+        if not model:
+            return await m.reply_text("Unknown model. Use: roni, ruby, rin, savy")
+        store = _load_storage()
+        await _send_menu_for_model(client, m.chat.id, model, store)
+
+    # Callbacks: show menu image/caption
+    @app.on_callback_query(filters.regex(r"^menu:show:(roni|ruby|rin|savy)$"))
+    async def cb_show_model(client: Client, cq: CallbackQuery):
+        model = cq.data.split(":")[-1]
+        store = _load_storage()
+
+        rec = store.get(model)
+        if not rec:
+            await cq.answer("No menu saved yet for this model.", show_alert=True)
+            try:
+                await cq.message.edit_text("Menu is unavailable right now.", reply_markup=_menu_root_kb())
+            except Exception:
+                await cq.message.reply_text("Menu is unavailable right now.", reply_markup=_menu_root_kb())
+            return
+
+        photo = rec.get("photo")
+        caption = rec.get("caption", "") or " "
+        # Try to edit in place to keep the same message thread tidy:
+        try:
+            if cq.message.photo and cq.message.media_group_id is None:
+                # Replace photo + caption
+                await cq.message.edit_media(InputMediaPhoto(media=photo, caption=caption))
+                await cq.message.edit_reply_markup(reply_markup=_menu_root_kb())
+            else:
+                # Send fresh if current message isn't a photo
+                await cq.message.reply_photo(photo, caption=caption, reply_markup=_menu_root_kb())
+        except Exception:
+            # Fallback to sending a fresh message
+            try:
+                await cq.message.reply_photo(photo, caption=caption, reply_markup=_menu_root_kb())
+            except Exception:
+                await cq.message.reply_text(caption, reply_markup=_menu_root_kb())
+
+        await cq.answer()
+
+    # Callbacks: Contact Models (DM links)
     @app.on_callback_query(filters.regex(r"^menu:contact$"))
     async def cb_contact_models(client: Client, cq: CallbackQuery):
         try:
-            await cq.message.edit_text("💌 <b>Contact Models</b>\nTap a name to open DM:",
-                                       reply_markup=_contact_models_kb(),
-                                       disable_web_page_preview=True)
+            await cq.message.edit_text(
+                "💌 Contact a model directly:",
+                reply_markup=_contact_models_kb(),
+                disable_web_page_preview=True
+            )
         except Exception:
-            await cq.message.reply_text("💌 <b>Contact Models</b>\nTap a name to open DM:",
-                                        reply_markup=_contact_models_kb(),
-                                        disable_web_page_preview=True)
+            await cq.message.reply_text(
+                "💌 Contact a model directly:",
+                reply_markup=_contact_models_kb(),
+                disable_web_page_preview=True
+            )
         await cq.answer()
-
-    # Callback: back to menu home
-    @app.on_callback_query(filters.regex(r"^menu:home$"))
-    async def cb_menu_home(client: Client, cq: CallbackQuery):
-        try:
-            await cq.message.edit_text(_menu_panel_text(), reply_markup=_menu_panel_kb(), disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text(_menu_panel_text(), reply_markup=_menu_panel_kb(), disable_web_page_preview=True)
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^menu:nop$"))
-    async def cb_menu_nop(client: Client, cq: CallbackQuery):
-        await cq.answer("That profile link isn’t configured yet.", show_alert=True)
-
-    # ---------------- Editor Commands ----------------
-
-    @app.on_message(filters.command("listmenus"))
-    async def list_menus(client: Client, m: Message):
-        have = set(_STORE.list_models_with_menu())
-        if not have:
-            return await m.reply_text("No menus saved yet.")
-        lines = []
-        for k in MODELS:
-            mark = "✅" if k in have else "—"
-            lines.append(f"{mark} {DISPLAY_NAME.get(k, k.capitalize())}")
-        await m.reply_text("<b>Menus:</b>\n" + "\n".join(lines))
-
-    @app.on_message(filters.command("addmenu"))
-    async def add_menu(client: Client, m: Message):
-        if len(m.command) < 2:
-            return await m.reply_text("Usage: <code>/addmenu &lt;model&gt;</code> (attach or reply to a photo)")
-        model = _norm_model(m.command[1])
-        if not model:
-            return await m.reply_text(f"Model not recognized. Valid: {', '.join(MODELS)}")
-        if not _is_editor(m.from_user.id, model):
-            return await m.reply_text("Admins/authorized editors only.")
-        pc = _need_photo_from(m)
-        if not pc:
-            return await m.reply_text("Attach or reply to a <b>photo</b> for the menu.")
-        photo_id, caption = pc
-        _STORE.set(MenuDoc(model=model, photo_id=photo_id, caption=caption or "", updated_by=m.from_user.id, updated_at=time.time()))
-        await m.reply_text(f"✅ Saved <b>{DISPLAY_NAME.get(model, model.capitalize())}</b> menu.")
-
-    @app.on_message(filters.command("changemenu"))
-    async def change_menu(client: Client, m: Message):
-        if len(m.command) < 2:
-            return await m.reply_text("Usage: <code>/changemenu &lt;model&gt;</code> (reply to a new photo; optional caption)")
-        model = _norm_model(m.command[1])
-        if not model:
-            return await m.reply_text(f"Model not recognized. Valid: {', '.join(MODELS)}")
-        if not _is_editor(m.from_user.id, model):
-            return await m.reply_text("Admins/authorized editors only.")
-        prev = _STORE.get(model)
-        pc = _need_photo_from(m)
-        if not pc:
-            return await m.reply_text("Reply to a <b>photo</b> (new image).")
-        photo_id, new_caption = pc
-        caption = (new_caption if (new_caption and new_caption.strip()) else (prev.caption if prev else ""))
-        _STORE.set(MenuDoc(model=model, photo_id=photo_id, caption=caption, updated_by=m.from_user.id, updated_at=time.time()))
-        await m.reply_text(f"✅ Updated <b>{DISPLAY_NAME.get(model, model.capitalize())}</b> menu.")
-
-    @app.on_message(filters.command("deletemenu"))
-    async def delete_menu(client: Client, m: Message):
-        if len(m.command) < 2:
-            return await m.reply_text("Usage: <code>/deletemenu &lt;model&gt;</code>")
-        model = _norm_model(m.command[1])
-        if not model:
-            return await m.reply_text(f"Model not recognized. Valid: {', '.join(MODELS)}")
-        if not _is_editor(m.from_user.id, model):
-            return await m.reply_text("Admins/authorized editors only.")
-        ok = _STORE.delete(model)
-        await m.reply_text(("✅ Deleted" if ok else "Nothing to delete for") + f" <b>{DISPLAY_NAME.get(model, model.capitalize())}</b>.")
