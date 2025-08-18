@@ -1,21 +1,17 @@
-# handlers/help_menu.py
-# Role-aware Help with submenus and clean Back navigation.
-# - Callback entry: dmf_show_help   (from your portal)
-# - Submenus: buyer requirements/rules/games, commands
-# - Members see only member commands
-# - Admins see member + admin commands
-#
-# Depends on env:
-#   OWNER_ID, SUPER_ADMIN_ID (ints)
-# Optional: RULES_TEXT, BUYER_REQ_TEXT (HTML)
+# handlers/menu.py
+# Menus for Roni, Ruby, Rin, Savy + Contact Models + Editor commands.
+# Exports: menu_tabs_text(), menu_tabs_kb() for dm_foolproof to import.
 
-import os
-from typing import Optional, Set
+import os, json, time
+from typing import Optional, Set, Dict, List, Tuple
+from dataclasses import dataclass
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
+from pyrogram.errors import RPCError
 
-# --------- Config / IDs ----------
+# ----------------------- IDs / helpers -----------------------
+
 def _to_int(s: Optional[str]) -> Optional[int]:
     try:
         return int(str(s)) if s not in (None, "", "None") else None
@@ -25,156 +21,304 @@ def _to_int(s: Optional[str]) -> Optional[int]:
 OWNER_ID       = _to_int(os.getenv("OWNER_ID"))
 SUPER_ADMIN_ID = _to_int(os.getenv("SUPER_ADMIN_ID"))
 
-# If you’ve got extra admins in your req_store you can merge them in at runtime too
+# Global editors (optional)
 _EXTRA_ADMINS: Set[int] = set()
 if os.getenv("MENU_EDITORS"):
-    for tok in os.getenv("MENU_EDITORS").split(","):
+    for tok in os.getenv("MENU_EDITORS").replace(";", ",").split(","):
         v = _to_int(tok.strip())
-        if v:
-            _EXTRA_ADMINS.add(v)
+        if v: _EXTRA_ADMINS.add(v)
 
 ADMIN_IDS: Set[int] = set(i for i in (OWNER_ID, SUPER_ADMIN_ID) if i) | _EXTRA_ADMINS
 
-# --------- Text (env overrides ok) ----------
-RULES_TEXT = os.getenv("RULES_TEXT") or (
-    "📜 <b>Buyer Rules</b>\n\n"
-    "1) Respect the models — no harassment or guilt-tripping.\n"
-    "2) No freeloading / begging for free content.\n"
-    "3) Follow payment & delivery instructions posted by the team.\n"
-)
+def _is_global_admin(uid: Optional[int]) -> bool:
+    return bool(uid and (uid in ADMIN_IDS))
 
-BUYER_REQ_TEXT = os.getenv("BUYER_REQ_TEXT") or (
-    "💸 <b>Buyer Requirements</b>\n\n"
-    "To stay in the group each month, complete at least ONE:\n"
-    "• Spend $20+ (tips/games/content), or\n"
-    "• Join 4+ games.\n"
-)
+# ----------------------- Model roster / profile links -----------------------
 
-GAME_RULES_TEXT = (
-    "🎲 <b>Succubus Sanctuary Game Rules</b>\n\n"
-    "🕯️ <b>Candle Temptation Game</b>\n"
-    "• $5 lights a random candle. 3 candles for a model = her spicy surprise.\n"
-    "• All 12 candles by end = special group reward.\n\n"
-    "🍑 <b>Pick a Peach</b>\n"
-    "• Pick 1–12 and tip $5. Each number hides a model’s surprise.\n"
-    "• No repeats per model; spread the love.\n\n"
-    "💃 <b>Flash Frenzy</b>\n"
-    "• $5 triggers a flash by the chosen girl. Stacks for back-to-back flashes.\n\n"
-    "🎰 <b>Dirty Wheel Spins</b>\n"
-    "• $10 per spin. Whatever it lands on is the prize. Add jackpots like “double prize”.\n\n"
-    "🎲 <b>Dice Roll Game</b>\n"
-    "• $5 per roll (1–6). Number = prize. Two dice variant for bigger pools.\n\n"
-    "🔥 <b>Forbidden Folder Friday</b>\n"
-    "• $80 premium folder (photos + clips), limited-time each Friday.\n"
-    "• Pay Ruby; Roni delivers the Dropbox link. Closes at midnight.\n"
-)
+RONI_NAME = os.getenv("RONI_NAME", "Roni")
+RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
+RIN_NAME  = os.getenv("RIN_NAME",  "Rin")
+SAVY_NAME = os.getenv("SAVY_NAME", "Savy")
 
-# --------- Command catalogs (display only) ----------
-# What regular members are allowed to SEE (safe/fun/self-service)
-MEMBER_COMMANDS = [
-    "/help — open this help",
-    "/menu — open model menus",
-    "/rules — show buyer rules",
-    # add your fun/summon/etc here if you want them listed:
-    # "/summon @user — tag someone",
-    # "/flirtysummon @user — flirty tag",
-]
+RUBY_ID = _to_int(os.getenv("RUBY_ID"))
+RIN_ID  = _to_int(os.getenv("RIN_ID"))
+SAVY_ID = _to_int(os.getenv("SAVY_ID"))
 
-# Admin-only commands (will be shown ONLY to admins)
-ADMIN_ONLY_COMMANDS = [
-    # requirements (no self-service for members)
-    "/reqadd — add purchase amount for a user",
-    "/reqgame — add a game for a user",
-    # moderation / ops (examples, match your actual handlers)
-    "/warn, /resetwarns, /mute, /unmute, /ban, /kick",
-    "/fedban, /fedunban, /fedcheck, /togglefedaction",
-    "/addflyer, /changeflyer, /deleteflyer, /listflyers, /flyer",
-    "/dmready, /dmunready, /dmreadylist, /dmnudge",
-]
+MODELS: List[str] = ["roni", "ruby", "rin", "savy"]
+DISPLAY_NAME: Dict[str, str] = {
+    "roni": RONI_NAME, "ruby": RUBY_NAME, "rin": RIN_NAME, "savy": SAVY_NAME
+}
+PROFILE_ID: Dict[str, Optional[int]] = {
+    "roni": OWNER_ID, "ruby": RUBY_ID, "rin": RIN_ID, "savy": SAVY_ID
+}
 
-# --------- UI builders ----------
-def _help_root_kb(is_admin: bool) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("💸 Buyer Requirements", callback_data="help:reqs")],
-        [InlineKeyboardButton("📜 Buyer Rules", callback_data="help:rules")],
-        [InlineKeyboardButton("🎮 Game Rules", callback_data="help:games")],
-        [InlineKeyboardButton("🧰 Commands", callback_data="help:cmds_member")],
-    ]
-    if is_admin:
-        rows.append([InlineKeyboardButton("🛡 Admin Commands", callback_data="help:cmds_admin")])
-    # Back row (to your portal + menu)
-    rows.append([InlineKeyboardButton("⬅️ Back to Welcome", callback_data="dmf_back_welcome")])
-    rows.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="dmf_open_menu")])
-    return InlineKeyboardMarkup(rows)
+def _model_editors_from_env(model_key: str) -> Set[int]:
+    key = f"MENU_EDITORS_{model_key.upper()}"
+    out: Set[int] = set()
+    raw = os.getenv(key, "")
+    for tok in raw.replace(";", ",").split(","):
+        v = _to_int(tok.strip())
+        if v: out.add(v)
+    return out
 
-def _back_to_help_kb(is_admin: bool) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton("⬅️ Back to Help", callback_data="dmf_show_help")]]
-    rows.append([InlineKeyboardButton("⬅️ Back to Welcome", callback_data="dmf_back_welcome")])
-    rows.append([InlineKeyboardButton("⬅️ Back to Menu", callback_data="dmf_open_menu")])
-    return InlineKeyboardMarkup(rows)
+def _is_editor(uid: Optional[int], model_key: str) -> bool:
+    if _is_global_admin(uid): return True
+    return bool(uid and (uid in _model_editors_from_env(model_key)))
 
-# --------- helpers ----------
-def _is_admin(uid: Optional[int]) -> bool:
-    return bool(uid and uid in ADMIN_IDS)
+# ----------------------- Storage: Mongo preferred, JSON fallback -----------
 
-# --------- register ----------
-def register(app: Client):
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB  = os.getenv("MONGO_DB", "succubot")
+MONGO_COL = os.getenv("MONGO_MENU_COLLECTION", "menus")
+_JSON_FALLBACK = os.getenv("MENU_JSON_PATH", "./data/menus.json")
 
-    # Entry point from your portal Help button
-    @app.on_callback_query(filters.regex(r"^dmf_show_help$"))
-    async def cb_help_root(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else None
-        is_admin = _is_admin(uid)
+@dataclass
+class MenuDoc:
+    model: str
+    photo_id: str
+    caption: str
+    updated_by: int
+    updated_at: float
+
+class _MongoStore:
+    def __init__(self, uri: str, db: str, col: str):
+        from pymongo import MongoClient
+        self._cli = MongoClient(uri)
+        self._col = self._cli[db][col]
+        self._col.create_index("model", unique=True)
+
+    def get(self, model: str) -> Optional[MenuDoc]:
+        d = self._col.find_one({"model": model})
+        if not d: return None
+        return MenuDoc(model=d["model"], photo_id=d["photo_id"], caption=d.get("caption",""),
+                       updated_by=d.get("updated_by", 0), updated_at=float(d.get("updated_at", time.time())))
+
+    def set(self, md: MenuDoc) -> None:
+        self._col.update_one({"model": md.model},
+                             {"$set": {"photo_id": md.photo_id, "caption": md.caption,
+                                       "updated_by": md.updated_by, "updated_at": md.updated_at}},
+                             upsert=True)
+
+    def delete(self, model: str) -> bool:
+        return self._col.delete_one({"model": model}).deleted_count > 0
+
+    def list_models_with_menu(self) -> List[str]:
+        return [d["model"] for d in self._col.find({}, {"model": 1})]
+
+class _JsonStore:
+    def __init__(self, path: str):
+        self.path = path
+        d = os.path.dirname(path)
+        if d: os.makedirs(d, exist_ok=True)
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f: json.dump({}, f)
+
+    def _load(self) -> Dict[str, Dict]:
         try:
-            await cq.message.edit_text("❓ <b>Help</b>\nPick a topic:", reply_markup=_help_root_kb(is_admin), disable_web_page_preview=True)
+            with open(self.path, "r", encoding="utf-8") as f: return json.load(f) or {}
         except Exception:
-            await cq.message.reply_text("❓ <b>Help</b>\nPick a topic:", reply_markup=_help_root_kb(is_admin), disable_web_page_preview=True)
+            return {}
+
+    def _save(self, data: Dict[str, Dict]):
+        with open(self.path, "w", encoding="utf-8") as f: json.dump(data, f)
+
+    def get(self, model: str) -> Optional[MenuDoc]:
+        d = self._load().get(model)
+        if not d: return None
+        return MenuDoc(model=model, photo_id=d["photo_id"], caption=d.get("caption",""),
+                       updated_by=d.get("updated_by", 0), updated_at=float(d.get("updated_at", time.time())))
+
+    def set(self, md: MenuDoc) -> None:
+        data = self._load()
+        data[md.model] = {"photo_id": md.photo_id, "caption": md.caption,
+                          "updated_by": md.updated_by, "updated_at": md.updated_at}
+        self._save(data)
+
+    def delete(self, model: str) -> bool:
+        data = self._load()
+        if model in data:
+            data.pop(model)
+            self._save(data)
+            return True
+        return False
+
+    def list_models_with_menu(self) -> List[str]:
+        return list(self._load().keys())
+
+_STORE = _MongoStore(MONGO_URI, MONGO_DB, MONGO_COL) if MONGO_URI else _JsonStore(_JSON_FALLBACK)
+
+# ----------------------- UI builders / exports -----------------------------
+
+def _menu_panel_text() -> str:
+    return "📜 <b>Model Menus</b>\nPick a model to view their current menu, or contact them directly."
+
+def _menu_panel_kb() -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    row: List[InlineKeyboardButton] = []
+    for k in MODELS:
+        row.append(InlineKeyboardButton(DISPLAY_NAME.get(k, k.capitalize()), callback_data=f"menu:show:{k}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([InlineKeyboardButton("💌 Contact Models", callback_data="menu:contact")])
+    rows.append([InlineKeyboardButton("⬅️ Back to Welcome", callback_data="dmf_back_welcome")])
+    return InlineKeyboardMarkup(rows)
+
+def _contact_models_kb() -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = []
+    row: List[InlineKeyboardButton] = []
+    for k in MODELS:
+        uid = PROFILE_ID.get(k)
+        label = f"💌 {DISPLAY_NAME.get(k, k.capitalize())}"
+        if uid:
+            row.append(InlineKeyboardButton(label, url=f"tg://user?id={uid}"))
+        else:
+            row.append(InlineKeyboardButton(f"{label} (unavailable)", callback_data="menu:nop"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row: rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ Back to Menus", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+# Exported for dm_foolproof
+def menu_tabs_text() -> str:
+    return _menu_panel_text()
+
+def menu_tabs_kb() -> InlineKeyboardMarkup:
+    return _menu_panel_kb()
+
+def _norm_model(tok: Optional[str]) -> Optional[str]:
+    if not tok: return None
+    t = tok.strip().lower()
+    return t if t in MODELS else None
+
+def _need_photo_from(m: Message) -> Optional[Tuple[str, str]]:
+    src = m
+    if not getattr(src, "photo", None) and m.reply_to_message:
+        src = m.reply_to_message
+    if getattr(src, "photo", None):
+        photo_id = src.photo.file_id
+        caption  = src.caption or m.caption or ""
+        return (photo_id, caption)
+    return None
+
+async def _send_menu_for(client: Client, chat_id: int, model: str):
+    doc = _STORE.get(model)
+    name = DISPLAY_NAME.get(model, model.capitalize())
+    if not doc:
+        return await client.send_message(chat_id, f"❌ No menu saved yet for <b>{name}</b>.")
+    try:
+        await client.send_photo(chat_id, doc.photo_id, caption=doc.caption or f"{name} — (no caption)")
+    except RPCError:
+        await client.send_message(chat_id, f"📜 <b>{name}</b>\n\n{doc.caption or '(no caption)'}")
+
+# ----------------------- Register -----------------------------
+
+def register(app: Client):
+    # Open menu panel (works in groups and DMs)
+    @app.on_message(filters.command("menu"))
+    async def open_menu_panel(client: Client, m: Message):
+        await m.reply_text(_menu_panel_text(), reply_markup=_menu_panel_kb(), disable_web_page_preview=True)
+
+    # Shortcut: /menu <model> in DMs shows that model directly
+    @app.on_message(filters.private & filters.command("menu"))
+    async def direct_show_if_arg(client: Client, m: Message):
+        if len(m.command) >= 2:
+            model = _norm_model(m.command[1])
+            if model:
+                await _send_menu_for(client, m.chat.id, model)
+
+    # Callback: show a model's menu
+    @app.on_callback_query(filters.regex(r"^menu:show:(?P<model>[a-z0-9_]+)$"))
+    async def cb_show_menu(client: Client, cq: CallbackQuery):
+        model = _norm_model(cq.matches[0].group("model"))
+        if not model:
+            return await cq.answer("Unknown model.", show_alert=True)
+        try: await cq.answer()
+        except Exception: pass
+        await _send_menu_for(client, cq.from_user.id, model)
+
+    # Callback: contact models panel
+    @app.on_callback_query(filters.regex(r"^menu:contact$"))
+    async def cb_contact_models(client: Client, cq: CallbackQuery):
+        try:
+            await cq.message.edit_text("💌 <b>Contact Models</b>\nTap a name to open DM:",
+                                       reply_markup=_contact_models_kb(),
+                                       disable_web_page_preview=True)
+        except Exception:
+            await cq.message.reply_text("💌 <b>Contact Models</b>\nTap a name to open DM:",
+                                        reply_markup=_contact_models_kb(),
+                                        disable_web_page_preview=True)
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^help:reqs$"))
-    async def cb_help_reqs(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else None
-        is_admin = _is_admin(uid)
-        await _edit_or_reply(cq, BUYER_REQ_TEXT, _back_to_help_kb(is_admin))
+    # Callback: back to menu home
+    @app.on_callback_query(filters.regex(r"^menu:home$"))
+    async def cb_menu_home(client: Client, cq: CallbackQuery):
+        try:
+            await cq.message.edit_text(_menu_panel_text(), reply_markup=_menu_panel_kb(), disable_web_page_preview=True)
+        except Exception:
+            await cq.message.reply_text(_menu_panel_text(), reply_markup=_menu_panel_kb(), disable_web_page_preview=True)
+        await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^help:rules$"))
-    async def cb_help_rules(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else None
-        is_admin = _is_admin(uid)
-        await _edit_or_reply(cq, RULES_TEXT, _back_to_help_kb(is_admin))
+    @app.on_callback_query(filters.regex(r"^menu:nop$"))
+    async def cb_menu_nop(client: Client, cq: CallbackQuery):
+        await cq.answer("That profile link isn’t configured yet.", show_alert=True)
 
-    @app.on_callback_query(filters.regex(r"^help:games$"))
-    async def cb_help_games(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else None
-        is_admin = _is_admin(uid)
-        await _edit_or_reply(cq, GAME_RULES_TEXT, _back_to_help_kb(is_admin))
+    # ---------------- Editor Commands ----------------
 
-    # Member-visible commands (filtered)
-    @app.on_callback_query(filters.regex(r"^help:cmds_member$"))
-    async def cb_help_cmds_member(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else None
-        is_admin = _is_admin(uid)
-        text = "📌 <b>Available Commands</b>\n\n" + "\n".join(MEMBER_COMMANDS)
-        await _edit_or_reply(cq, text, _back_to_help_kb(is_admin))
+    @app.on_message(filters.command("listmenus"))
+    async def list_menus(client: Client, m: Message):
+        have = set(_STORE.list_models_with_menu())
+        if not have:
+            return await m.reply_text("No menus saved yet.")
+        lines = []
+        for k in MODELS:
+            mark = "✅" if k in have else "—"
+            lines.append(f"{mark} {DISPLAY_NAME.get(k, k.capitalize())}")
+        await m.reply_text("<b>Menus:</b>\n" + "\n".join(lines))
 
-    # Admin-only commands list (only reachable if admin)
-    @app.on_callback_query(filters.regex(r"^help:cmds_admin$"))
-    async def cb_help_cmds_admin(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else None
-        if not _is_admin(uid):
-            # Silent ignore or send a gentle notice
-            try:
-                await cq.answer("Admins only.", show_alert=True)
-            except Exception:
-                pass
-            return
-        text = "🛡 <b>Admin Commands</b>\n\n" + "\n".join(ADMIN_ONLY_COMMANDS)
-        await _edit_or_reply(cq, text, _back_to_help_kb(True))
+    @app.on_message(filters.command("addmenu"))
+    async def add_menu(client: Client, m: Message):
+        if len(m.command) < 2:
+            return await m.reply_text("Usage: <code>/addmenu &lt;model&gt;</code> (attach or reply to a photo)")
+        model = _norm_model(m.command[1])
+        if not model:
+            return await m.reply_text(f"Model not recognized. Valid: {', '.join(MODELS)}")
+        if not _is_editor(m.from_user.id, model):
+            return await m.reply_text("Admins/authorized editors only.")
+        pc = _need_photo_from(m)
+        if not pc:
+            return await m.reply_text("Attach or reply to a <b>photo</b> for the menu.")
+        photo_id, caption = pc
+        _STORE.set(MenuDoc(model=model, photo_id=photo_id, caption=caption or "", updated_by=m.from_user.id, updated_at=time.time()))
+        await m.reply_text(f"✅ Saved <b>{DISPLAY_NAME.get(model, model.capitalize())}</b> menu.")
 
-# --------- local util ----------
-async def _edit_or_reply(cq: CallbackQuery, text: str, kb: InlineKeyboardMarkup):
-    try:
-        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
-    except Exception:
-        await cq.message.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
-    await cq.answer()
+    @app.on_message(filters.command("changemenu"))
+    async def change_menu(client: Client, m: Message):
+        if len(m.command) < 2:
+            return await m.reply_text("Usage: <code>/changemenu &lt;model&gt;</code> (reply to a new photo; optional caption)")
+        model = _norm_model(m.command[1])
+        if not model:
+            return await m.reply_text(f"Model not recognized. Valid: {', '.join(MODELS)}")
+        if not _is_editor(m.from_user.id, model):
+            return await m.reply_text("Admins/authorized editors only.")
+        prev = _STORE.get(model)
+        pc = _need_photo_from(m)
+        if not pc:
+            return await m.reply_text("Reply to a <b>photo</b> (new image).")
+        photo_id, new_caption = pc
+        caption = (new_caption if (new_caption and new_caption.strip()) else (prev.caption if prev else ""))
+        _STORE.set(MenuDoc(model=model, photo_id=photo_id, caption=caption, updated_by=m.from_user.id, updated_at=time.time()))
+        await m.reply_text(f"✅ Updated <b>{DISPLAY_NAME.get(model, model.capitalize())}</b> menu.")
+
+    @app.on_message(filters.command("deletemenu"))
+    async def delete_menu(client: Client, m: Message):
+        if len(m.command) < 2:
+            return await m.reply_text("Usage: <code>/deletemenu &lt;model&gt;</code>")
+        model = _norm_model(m.command[1])
+        if not model:
+            return await m.reply_text(f"Model not recognized. Valid: {', '.join(MODELS)}")
+        if not _is_editor(m.from_user.id, model):
+            return await m.reply_text("Admins/authorized editors only.")
+        ok = _STORE.delete(model)
+        await m.reply_text(("✅ Deleted" if ok else "Nothing to delete for") + f" <b>{DISPLAY_NAME.get(model, model.capitalize())}</b>.")
