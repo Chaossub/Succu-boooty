@@ -1,99 +1,60 @@
-# dm_foolproof.py
-# (only differences from your current file are marked <<< CHANGED >>>)
-
-import os, time, asyncio, secrets, json
-from typing import Optional, List, Dict
+import logging
+from contextlib import suppress
 from pyrogram import Client, filters
-from pyrogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton,
-    CallbackQuery, ReplyKeyboardMarkup, ReplyKeyboardRemove
-)
-from pyrogram.errors import RPCError, FloodWait, UserIsBlocked, PeerIdInvalid
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
-# Optional req store (unchanged) ...
-# [keep your existing req_store/_DummyStore block here]
+log = logging.getLogger("dm_foolproof")
 
-# ==== ENV ====
-OWNER_ID       = int(os.getenv("OWNER_ID", "0"))
-SUPER_ADMIN_ID = int(os.getenv("SUPER_ADMIN_ID", "6964994611"))
-SUPER_ADMINS   = {int(x) for x in os.getenv("SUPER_ADMINS", "6964994611,8087941938").replace(";", ",").split(",") if x.strip().isdigit()}
-MODEL_IDS      = {int(x) for x in os.getenv("MODEL_IDS", "5650388514,6307783399").replace(";", ",").split(",") if x.strip().isdigit()}
+# Replace with your real store
+try:
+    from req_store import ReqStore
+    _store = ReqStore()
+except Exception:
+    class _Dummy:
+        def is_dm_ready_global(self, uid: int) -> bool: return False
+        def set_dm_ready_global(self, uid: int, ready: bool, by_admin=False): pass
+    _store = _Dummy()
 
-RONI_NAME = os.getenv("RONI_NAME", "Roni")
-RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
-RIN_NAME  = os.getenv("RIN_NAME",  "Rin")
-SAVY_NAME = os.getenv("SAVY_NAME", "Savy")
+def _welcome_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Help & Commands", callback_data="help")],
+        [InlineKeyboardButton("Portal", callback_data="portal")]
+    ])
 
-RUBY_ID = int(os.getenv("RUBY_ID", "8087941938"))
-RIN_ID  = int(os.getenv("RIN_ID",  "0"))
-SAVY_ID = int(os.getenv("SAVY_ID", "0"))
+def _mark_kb_shown(uid: int): pass  # stub, fill in if needed
+def _targets_any(): return []       # stub
+async def _notify(client, targets, text): pass
 
-DM_READY_NOTIFY_MODE = os.getenv("DM_READY_NOTIFY_MODE", "first_time").lower()
-DM_FORWARD_MODE      = os.getenv("DM_FORWARD_MODE", "off").lower()
-SHOW_RELAY_KB        = os.getenv("SHOW_RELAY_KB", "first_time").lower()
+DM_READY_NOTIFY_MODE = "first_time"
 
-RULES_TEXT      = os.getenv("RULES_TEXT", "")
-BUYER_REQ_TEXT  = os.getenv("BUYER_REQ_TEXT", "")
-RULES_PHOTO     = os.getenv("RULES_PHOTO")
-BUYER_REQ_PHOTO = os.getenv("BUYER_REQ_PHOTO")
-
-MODELS_LINKS_TEXT = os.getenv(
-    "MODELS_LINKS_TEXT",
-    "🔥 Find Our Models Elsewhere 🔥\n\n"
-    "👑 Roni Jane (Owner)\n"
-    "https://allmylinks.com/chaossub283\n\n"
-    "💎 Ruby Ransom (Co-Owner)\n"
-    "(Link coming soon)\n\n"
-    "🍑 Peachy Rin\n"
-    "https://allmylinks.com/peachybunsrin\n\n"
-    "⚡ Savage Savy\n"
-    "https://allmylinks.com/savannahxsavage"
-)
-MODELS_LINKS_PHOTO = os.getenv("MODELS_LINKS_PHOTO")
-MODELS_LINKS_BUTTONS_JSON = os.getenv("MODELS_LINKS_BUTTONS_JSON")
-
-# <<< CHANGED: commands we must NOT intercept in the DM catch-all >>>
-MENU_ADMIN_CMDS = ["addmenu", "changemenu", "deletemenu", "listmenus"]
-
-# ==== STATE ==== (unchanged)
-_pending: Dict[int, Dict[str, bool]] = {}
-_kb_last_shown: Dict[int, float] = {}
-_anon_threads: Dict[str, int] = {}
-_admin_pending_reply: Dict[int, str] = {}
-
-# ==== ROLE HELPERS / HELPERS / UI BUILDERS ====
-# [keep your existing helper + UI functions here unchanged]
-
-# ==== REGISTER ====
 def register(app: Client):
-
-    # /start → Welcome UI  (unchanged)
     @app.on_message(filters.private & filters.command("start"))
     async def dmf_start(client: Client, m: Message):
-        # [body unchanged]
-        ...
+        try:
+            uid = m.from_user.id if m.from_user else 0
+            first_time = not _store.is_dm_ready_global(uid)
 
-    # /dmsetup (unchanged)
-    @app.on_message(filters.command("dmsetup"))
-    async def dmsetup(client: Client, m: Message):
-        # [body unchanged]
-        ...
+            if first_time:
+                try:
+                    _store.set_dm_ready_global(uid, True, by_admin=False)
+                except Exception as e:
+                    log.exception("set_dm_ready_global failed: %s", e)
+                if DM_READY_NOTIFY_MODE in ("always", "first_time") and _targets_any():
+                    with suppress(Exception):
+                        await _notify(client, _targets_any(),
+                                      f"🔔 DM-ready: {m.from_user.mention} (<code>{uid}</code>)")
 
-    # /message|/contact (unchanged)
-    @app.on_message(filters.private & filters.command(["message", "contact"]))
-    async def dm_message_panel(client: Client, m: Message):
-        # [body unchanged]
-        ...
+            await m.reply_text(
+                "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
+                "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.",
+                reply_markup=_welcome_kb(),
+                disable_web_page_preview=True
+            )
+            _mark_kb_shown(uid)
 
-    # <<< CHANGED: catch-all DM inbox excludes menu admin commands >>>
-    @app.on_message(
-        filters.private
-        & ~filters.command(["message", "contact", "start"] + MENU_ADMIN_CMDS)
-    )
-    async def on_private_message(client: Client, m: Message):
-        # [body unchanged]
-        ...
-
-    # All your callback handlers and admin commands below remain unchanged
-    # (dmf_back_welcome, dmf_show_help, dmf_* callbacks, dmready/dmunready, dmreadylist, dmnudge, etc.)
-    ...
+        except Exception as e:
+            log.exception("/start failed: %s", e)
+            try:
+                await m.reply_text("I’m awake, but something hiccuped. Tap Menu below 👇", reply_markup=_welcome_kb())
+            except Exception:
+                pass
