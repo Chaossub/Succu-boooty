@@ -1,4 +1,5 @@
 # main.py — single-loop Pyrogram runner with robust logging & tracing
+
 import os, sys, asyncio, logging, signal
 from contextlib import suppress
 from logging.handlers import RotatingFileHandler
@@ -20,13 +21,12 @@ _ch = logging.StreamHandler(sys.stdout)
 _ch.setFormatter(_fmt)
 logger.addHandler(_ch)
 
-# rotating file (optional but helpful on platforms that keep /logs)
+# rotating file (optional)
 os.makedirs("logs", exist_ok=True)
 _fh = RotatingFileHandler("logs/bot.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
 _fh.setFormatter(_fmt)
 logger.addHandler(_fh)
 
-# make pyrogram very chatty when you need it
 if PYROGRAM_DEBUG:
     logging.getLogger("pyrogram").setLevel(logging.DEBUG)
     logging.getLogger("pyrogram.session").setLevel(logging.DEBUG)
@@ -37,19 +37,8 @@ API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0) or None
-
-# runtime switch for update tracing
-TRACE_UPDATES = os.getenv("TRACE_UPDATES", "0") in ("1", "true", "True", "YES", "yes")
-
-# Optional ReqStore for DM-ready flag
-_req_store = None
-try:
-    from req_store import ReqStore
-    _req_store = ReqStore()
-    logger.info("ReqStore loaded for DM-ready tracking.")
-except Exception:
-    logger.warning("ReqStore not available; DM-ready marking will be best-effort only.")
+OWNER_ID = int(os.getenv("OWNER_ID", "0")) or None
+TRACE_UPDATES = os.getenv("TRACE_UPDATES", "0") in ("1","true","True","YES","yes")
 
 def build_client() -> Client:
     if not (API_ID and API_HASH and BOT_TOKEN):
@@ -66,24 +55,16 @@ def build_client() -> Client:
 def wire_handlers(app: Client):
     """Wire baseline handlers + your modules with exception visibility."""
 
-    # ---- /start (private): flirty welcome + mark DM-ready) ----
-    @app.on_message(filters.private & filters.command("start"))
-    async def _start_private(client: Client, m: Message):
-        uid = m.from_user.id if m.from_user else None
-        if uid and _req_store:
-            try:
-                _req_store.set_dm_ready_global(uid, True, by_admin=False)
-                logger.info("DM-ready set for %s via /start", uid)
-            except Exception:
-                logger.exception("Failed to set DM-ready for %s", uid)
-        # Your flirty welcome text
+    # ---- baseline safety handlers ----
+    @app.on_message(filters.command("start") & filters.private)
+    async def _fallback_start(_, m: Message):
         await m.reply_text(
             "🔥 Welcome to SuccuBot 🔥\n"
-            "Your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing. 💋",
+            "I’m alive. Try /ping or /diag.\n"
+            "Use /traceon to trace every update (verbose).",
             disable_web_page_preview=True,
         )
 
-    # ---- baseline utilities ----
     @app.on_message(filters.command("ping"))
     async def _ping(_, m: Message):
         await m.reply_text("pong ✅")
@@ -114,14 +95,12 @@ def wire_handlers(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ---- global trace taps (lowest group so they run first) ----
+    # ---- global trace taps ----
     @app.on_message(filters.all, group=-1000)
     async def _trace_msg(_, m: Message):
         if TRACE_UPDATES:
-            logger.info("MSG chat=%s from=%s text=%r",
-                        getattr(m.chat, "id", None),
-                        getattr(m.from_user, "id", None),
-                        m.text or m.caption or "")
+            logger.info("MSG chat=%s from=%s text=%r", getattr(m.chat, "id", None),
+                        getattr(m.from_user, "id", None), m.text or m.caption or "")
 
     @app.on_callback_query(group=-1000)
     async def _trace_cbq(_, cq: CallbackQuery):
@@ -140,10 +119,10 @@ def wire_handlers(app: Client):
                         getattr(ev.old_chat_member, "status", None),
                         getattr(ev.new_chat_member, "status", None))
 
-    # ---- import your modules, but log failures instead of dying ----
+    # ---- import your modules (log failures, don’t crash) ----
     modules = [
-        "dm_foolproof",            # root-level portal & buttons
-        "handlers.dmnow",
+        "handlers.dm_foolproof",        # /start portal, DM-ready mark, contact, links, help
+        "handlers.dmnow",               # your DM button setup
         "handlers.enforce_requirements",
         "handlers.exemptions",
         "handlers.federation",
@@ -153,7 +132,7 @@ def wire_handlers(app: Client):
         "handlers.help_cmd",
         "handlers.help_panel",
         "handlers.hi",
-        "handlers.membership_watch",
+        "handlers.membership_watch",    # clears dm-ready on leave/kick/ban
         "handlers.menu",
         "handlers.moderation",
         "handlers.req_handlers",
@@ -198,11 +177,8 @@ async def amain():
 
     await app.start()
     me = await app.get_me()
-    if not me.username:
-        logger.warning("Bot has no @username. Deep-link DM buttons (e.g., /dmnow) will not work.")
     logger.info("Bot started as @%s (%s)", me.username, me.id)
 
-    # Graceful stop on signals
     stop_event = asyncio.Event()
     def _signal(*_):
         logger.info("Stop signal received. Shutting down…")
