@@ -1,100 +1,96 @@
 # handlers/help_panel.py
-# Help submenu for the DM portal:
-# - "dmf_help"        → opens help submenu
-# - "dmf_help_cmds"   → member commands (no self-serve add)
-# - "dmf_help_buyer"  → buyer requirements + rules (from env)
-# - "dmf_help_games"  → game rules (from env)
-# - "dmf_home"        → back to portal (also provided in other files)
+# Help submenu:
+#  - Member Commands (trimmed: only what members can use; requirements: /reqstatus only)
+#  - Buyer Requirements
+#  - Buyer Rules
+#  - Game Rules
+#  - Back to Portal
 
 import os
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
-# ------------ Content (env overrides supported) -----------------
+# ---------- Content (env overrides allowed) ----------
 
-# Member commands (no /reqadd or /reqgame)
-DEFAULT_MEMBER_COMMANDS = (
-    "🧭 <b>Member Commands</b>\n"
-    "These work for regular members:\n\n"
-    "🛠 <b>General</b>\n"
-    "• /start — open the DM portal (Menu / Contact / Links / Help)\n"
-    "• /help  — (in DM) opens this Help\n"
-    "• /ping  — quick health check\n\n"
-    "😈 <b>Fun</b>\n"
-    "• /bite @user • /spank @user • /tease @user — playful commands\n\n"
-    "📈 <b>XP</b>\n"
-    "• /naughtystats — your XP\n"
-    "• /leaderboard — server leaderboard\n\n"
-    "📋 <b>Requirements</b>\n"
-    "• /reqstatus — show your recorded purchases/games and compliance\n"
-)
+MEMBER_COMMANDS_TEXT = os.getenv("MEMBER_COMMANDS_TEXT", "").strip()
+if not MEMBER_COMMANDS_TEXT:
+    MEMBER_COMMANDS_TEXT = (
+        "🧭 <b>Member Commands</b>\n\n"
+        "🛠 <b>General</b>\n"
+        "• /start — open the portal (Menu / Contact / Links / Help)\n"
+        "• /help  — show Help\n"
+        "• /ping  — quick bot check\n\n"
+        "😈 <b>Fun</b>\n"
+        "• /bite @user • /spank @user • /tease @user\n\n"
+        "📈 <b>XP</b>\n"
+        "• /naughtystats — your XP\n"
+        "• /leaderboard — server leaderboard\n\n"
+        "🔔 <b>Summon</b>\n"
+        "• /summon @user — summon someone (where allowed)\n"
+        "• /summonall — summon all (if enabled)\n\n"
+        "📋 <b>Requirements</b>\n"
+        "• /reqstatus — see your recorded spend/games & compliance\n"
+    )
 
-# Buyer requirements & rules (env-driven)
-DEFAULT_BUYER_REQ = os.getenv("BUYER_REQUIREMENTS_TEXT", "").strip()
-if not DEFAULT_BUYER_REQ:
-    DEFAULT_BUYER_REQ = (
+BUYER_REQUIREMENTS_TEXT = os.getenv("BUYER_REQUIREMENTS_TEXT", "").strip()
+if not BUYER_REQUIREMENTS_TEXT:
+    BUYER_REQUIREMENTS_TEXT = (
         "✨ <b>Buyer Requirements</b>\n\n"
-        "To stay in the group, complete <b>one</b> each month:\n"
+        "To stay in the group each month, complete <b>at least one</b>:\n"
         "• Spend <b>$20+</b> (tips, games, content, etc.)\n"
-        "• <i>or</i> join <b>4+ games</b>\n\n"
-        "Miss it → removal at month’s end; re-entry fee <b>$20</b> later."
+        "• <i>or</i> play <b>4+ games</b>\n\n"
+        "Support is what keeps the Sanctuary alive and spicy 💋"
     )
 
-DEFAULT_RULES = os.getenv("SANCTUARY_RULES_TEXT", "").strip()
-if not DEFAULT_RULES:
-    DEFAULT_RULES = (
+BUYER_RULES_TEXT = os.getenv("SANCTUARY_RULES_TEXT", "").strip()
+if not BUYER_RULES_TEXT:
+    BUYER_RULES_TEXT = (
         "‼️ <b>Succubus Sanctuary Rules</b>\n\n"
-        "1) Respect models; no haggling/harassment/unsolicited DMs\n"
-        "2) Keep it classy; no spam or explicit public posts\n"
-        "3) No content theft; screenshots/forwarding = ban\n"
-        "4) No begging/scamming; fake payments/chargebacks = ban\n"
-        "5) Mods rule; staff actions at their discretion"
+        "1) Respect the Models — consent & boundaries always.\n"
+        "2) Keep It Classy — no unsolicited explicit spam.\n"
+        "3) No Content Theft — sharing/forwarding gets you banned.\n"
+        "4) Stay on Theme — keep it fun & flirty.\n"
+        "5) No Begging/Scamming — no fake payments or chargebacks.\n"
+        "6) Mods Rule — staff discretion applies."
     )
 
-# Game rules (env-driven)
-DEFAULT_GAME_RULES = os.getenv("GAME_RULES_TEXT", "").strip()
-if not DEFAULT_GAME_RULES:
-    DEFAULT_GAME_RULES = (
-        "🎲 <b>Sanctuary Game Rules</b>\n\n"
-        "🕯️ <b>Candle Temptation</b>\n"
-        "• Tip $5 to light a random candle\n"
-        "• 3 candles for a model = spicy surprise\n"
-        "• All 12 lit = group reward\n\n"
+GAME_RULES_TEXT = os.getenv("GAME_RULES_TEXT", "").strip()
+if not GAME_RULES_TEXT:
+    GAME_RULES_TEXT = (
+        "🎲 <b>Succubus Sanctuary Game Rules</b>\n"
+        "⸻\n\n"
+        "🕯️ <b>Candle Temptation Game</b>\n"
+        "• $5 to light a random candle. 12 total, 3 per model.\n"
+        "• When a model’s 3 candles are lit, she drops a spicy surprise.\n"
+        "• If all 12 are lit: group reward unlocked.\n\n"
         "🍑 <b>Pick a Peach</b>\n"
-        "• Tip $5, pick 1–12; each hides a model reward (no repeats)\n\n"
+        "• Pick 1–12 & tip $5. Each hides a model’s reward.\n"
+        "• No repeats; make sure everyone gets love.\n\n"
         "💃 <b>Flash Frenzy</b>\n"
-        "• Tip $5 to trigger flashes; tips stack for back-to-back\n\n"
+        "• $5 triggers a timed flash from a chosen model.\n"
+        "• Tips can stack for back-to-back flashes.\n\n"
         "🎰 <b>Dirty Wheel Spins</b>\n"
-        "• Tip $10 per spin; random naughty prize; jackpots possible\n\n"
-        "🎲 <b>Dice Roll</b>\n"
-        "• Tip $5 to roll; prize by number (doubles = bonus)\n\n"
+        "• $10 to spin. Prize is final — no do-overs.\n"
+        "• Add jackpot slots like double prize or custom mini-video.\n\n"
+        "🎲 <b>Dice Roll Game</b>\n"
+        "• $5 to roll (1–6). Number rolled = prize.\n"
+        "• Optional: 2 dice (doubles = bonus).\n\n"
         "🔥 <b>Forbidden Folder Friday</b>\n"
-        "• $80 premium mixed folder drop (pay Ruby; Roni delivers link)"
+        "• $80 unlocks a premium mixed-content folder, Fridays only.\n"
+        "• Pay Ruby; Roni delivers the Dropbox link. Limited-time."
     )
-
-# ------------ Keyboards -------------------------
 
 def _help_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📖 Member Commands", callback_data="dmf_help_cmds")],
-        [InlineKeyboardButton("✨ Buyer Requirements + ‼️ Rules", callback_data="dmf_help_buyer")],
+        [InlineKeyboardButton("✨ Buyer Requirements", callback_data="dmf_help_buyer")],
+        [InlineKeyboardButton("‼️ Buyer Rules", callback_data="dmf_help_rules")],
         [InlineKeyboardButton("🎲 Game Rules", callback_data="dmf_help_games")],
-        [InlineKeyboardButton("◀️ Back to Portal", callback_data="dmf_home")],
+        [InlineKeyboardButton("◀️ Back to Start", callback_data="dmf_home")],
     ])
 
 def _back_to_help_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="dmf_help")]])
-
-def _portal_kb() -> InlineKeyboardMarkup:
-    # Keep aligned with your portal callbacks
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💕 Menu", callback_data="dmf_open_menu")],
-        [InlineKeyboardButton("💌 Contact", callback_data="dmf_contact")],
-        [InlineKeyboardButton("🔗 Find our models elsewhere", callback_data="dmf_links")],
-        [InlineKeyboardButton("❔ Help", callback_data="dmf_help")],
-    ])
-
-# ------------ Utilities -------------------------
 
 async def _edit_or_reply(cq: CallbackQuery, text: str, kb: InlineKeyboardMarkup):
     try:
@@ -102,45 +98,29 @@ async def _edit_or_reply(cq: CallbackQuery, text: str, kb: InlineKeyboardMarkup)
     except Exception:
         await cq.message.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
 
-# ------------ Handlers --------------------------
-
 def register(app: Client):
 
-    # Open Help submenu
     @app.on_callback_query(filters.regex(r"^dmf_help$"))
     async def on_help_root(client: Client, cq: CallbackQuery):
-        await _edit_or_reply(
-            cq,
-            "❔ <b>Help Center</b>\nChoose a topic:",
-            _help_menu_kb()
-        )
+        await _edit_or_reply(cq, "❔ <b>Help Center</b>\nChoose a topic:", _help_menu_kb())
         await cq.answer()
 
-    # Member commands
     @app.on_callback_query(filters.regex(r"^dmf_help_cmds$"))
     async def on_help_cmds(client: Client, cq: CallbackQuery):
-        await _edit_or_reply(cq, DEFAULT_MEMBER_COMMANDS, _back_to_help_kb())
+        await _edit_or_reply(cq, MEMBER_COMMANDS_TEXT, _back_to_help_kb())
         await cq.answer()
 
-    # Buyer req + rules
     @app.on_callback_query(filters.regex(r"^dmf_help_buyer$"))
     async def on_help_buyer(client: Client, cq: CallbackQuery):
-        text = DEFAULT_BUYER_REQ + "\n\n" + DEFAULT_RULES
-        await _edit_or_reply(cq, text, _back_to_help_kb())
+        await _edit_or_reply(cq, BUYER_REQUIREMENTS_TEXT, _back_to_help_kb())
         await cq.answer()
 
-    # Game rules
+    @app.on_callback_query(filters.regex(r"^dmf_help_rules$"))
+    async def on_help_rules(client: Client, cq: CallbackQuery):
+        await _edit_or_reply(cq, BUYER_RULES_TEXT, _back_to_help_kb())
+        await cq.answer()
+
     @app.on_callback_query(filters.regex(r"^dmf_help_games$"))
     async def on_help_games(client: Client, cq: CallbackQuery):
-        await _edit_or_reply(cq, DEFAULT_GAME_RULES, _back_to_help_kb())
-        await cq.answer()
-
-    # Back to portal
-    @app.on_callback_query(filters.regex(r"^dmf_home$"))
-    async def on_home(client: Client, cq: CallbackQuery):
-        await _edit_or_reply(
-            cq,
-            "Welcome to the Sanctuary portal 💋 Choose an option:",
-            _portal_kb()
-        )
+        await _edit_or_reply(cq, GAME_RULES_TEXT, _back_to_help_kb())
         await cq.answer()
