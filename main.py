@@ -1,4 +1,4 @@
-# main.py — single-loop Pyrogram runner (cleaned) with robust logging & tracing
+# main.py — Pyrogram runner (no fallback /start)
 
 import os, sys, asyncio, logging, signal
 from contextlib import suppress
@@ -11,27 +11,23 @@ from pyrogram.types import Message, CallbackQuery, ChatMemberUpdated
 # ---------- .env ----------
 load_dotenv()
 
-# ---------- Logging setup ----------
+# ---------- Logging ----------
 LOGLEVEL = os.getenv("LOGLEVEL", "INFO").upper()
-PYROGRAM_DEBUG = os.getenv("PYROGRAM_DEBUG", "0") in ("1", "true", "True", "YES", "yes")
+PYROGRAM_DEBUG = os.getenv("PYROGRAM_DEBUG", "0") in ("1","true","True","YES","yes")
 
 logger = logging.getLogger("SuccuBot")
 logger.setLevel(LOGLEVEL)
-
 _fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
 
-# console
 _ch = logging.StreamHandler(sys.stdout)
 _ch.setFormatter(_fmt)
 logger.addHandler(_ch)
 
-# rotating file (optional)
 os.makedirs("logs", exist_ok=True)
 _fh = RotatingFileHandler("logs/bot.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
 _fh.setFormatter(_fmt)
 logger.addHandler(_fh)
 
-# make pyrogram chatty if needed
 if PYROGRAM_DEBUG:
     logging.getLogger("pyrogram").setLevel(logging.DEBUG)
     logging.getLogger("pyrogram.session").setLevel(logging.DEBUG)
@@ -42,11 +38,7 @@ API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-# Optional: who to DM upon hard errors (not used directly here, but read by handlers)
-OWNER_ID = int(os.getenv("OWNER_ID", "0")) or None
-
-# Runtime switch for update tracing
-TRACE_UPDATES = os.getenv("TRACE_UPDATES", "0") in ("1", "true", "True", "YES", "yes")
+TRACE_UPDATES = os.getenv("TRACE_UPDATES", "0") in ("1","true","True","YES","yes")
 
 
 def build_client() -> Client:
@@ -63,39 +55,25 @@ def build_client() -> Client:
 
 
 def wire_handlers(app: Client):
-    """Wire baseline handlers + your modules with exception visibility."""
-
-    # ---- baseline safety handlers ----
-    @app.on_message(filters.command("start") & filters.private)
-    async def _fallback_start(_, m: Message):
-        # Your real /start UI is in dm_foolproof; this is a fallback if that failed to load
-        await m.reply_text(
-            "🔥 Welcome to SuccuBot 🔥\n"
-            "I’m alive. Try /ping or /diag.\n"
-            "Use /traceon to trace every update (verbose).",
-            disable_web_page_preview=True,
-        )
-
+    # --------- Utility commands (no /start here) ----------
     @app.on_message(filters.command("ping"))
     async def _ping(_, m: Message):
         await m.reply_text("pong ✅")
 
-    # Toggle tracing live
     @app.on_message(filters.command("traceon"))
     async def trace_on(_, m: Message):
         global TRACE_UPDATES
         TRACE_UPDATES = True
-        logger.warning("TRACE_UPDATES enabled by %s", m.from_user.id if m.from_user else "?")
+        logger.warning("TRACE_UPDATES enabled by %s", getattr(m.from_user, "id", "?"))
         await m.reply_text("Tracing enabled. Check logs.")
 
     @app.on_message(filters.command("traceoff"))
     async def trace_off(_, m: Message):
         global TRACE_UPDATES
         TRACE_UPDATES = False
-        logger.warning("TRACE_UPDATES disabled by %s", m.from_user.id if m.from_user else "?")
+        logger.warning("TRACE_UPDATES disabled by %s", getattr(m.from_user, "id", "?"))
         await m.reply_text("Tracing disabled.")
 
-    # Quick health dump
     @app.on_message(filters.command("diag"))
     async def diag(client: Client, m: Message):
         me = await client.get_me()
@@ -103,12 +81,11 @@ def wire_handlers(app: Client):
             "🤖 <b>Diag</b>\n"
             f"• Me: @{me.username} (<code>{me.id}</code>)\n"
             f"• Trace: {'ON' if TRACE_UPDATES else 'OFF'}\n"
-            f"• Pyrogram debug: {'ON' if PYROGRAM_DEBUG else 'OFF'}\n"
-            f"• Handlers wired: check logs\n",
-            disable_web_page_preview=True,
+            f"• Pyrogram debug: {'ON' if PYROGRAM_DEBUG else 'OFF'}\n",
+            disable_web_page_preview=True
         )
 
-    # ---- global trace taps (lowest group so they run first) ----
+    # --------- Global trace taps ----------
     @app.on_message(filters.all, group=-1000)
     async def _trace_msg(_, m: Message):
         if TRACE_UPDATES:
@@ -120,7 +97,7 @@ def wire_handlers(app: Client):
     @app.on_callback_query(group=-1000)
     async def _trace_cbq(_, cq: CallbackQuery):
         if TRACE_UPDATES:
-            logger.info("CBQ from=%s data=%r in chat=%s msg_id=%s",
+            logger.info("CBQ from=%s data=%r chat=%s msg_id=%s",
                         getattr(cq.from_user, "id", None), cq.data,
                         getattr(getattr(cq.message, "chat", None), "id", None),
                         getattr(cq.message, "id", None))
@@ -128,18 +105,18 @@ def wire_handlers(app: Client):
     @app.on_chat_member_updated(group=-1000)
     async def _trace_cmu(_, ev: ChatMemberUpdated):
         if TRACE_UPDATES:
-            logger.info("CHAT_MEMBER_UPDATE chat=%s user=%s status=%s -> %s",
+            logger.info("CHAT_MEMBER_UPDATE chat=%s user=%s %s->%s",
                         getattr(ev.chat, "id", None),
                         getattr(getattr(ev.new_chat_member, "user", None), "id", None),
                         getattr(ev.old_chat_member, "status", None),
                         getattr(ev.new_chat_member, "status", None))
 
-    # ---- import your modules (ONLY the ones that exist) ----
+    # --------- Import only real modules ----------
     modules = [
-        # Root portal that handles /start, DM-ready flag, and portal buttons
+        # Root portal: /start + DM-ready + portal buttons
         "dm_foolproof",
 
-        # Handlers package
+        # Handlers you actually have:
         "handlers.menu",
         "handlers.help_panel",
         "handlers.help_cmd",
@@ -176,20 +153,18 @@ def wire_handlers(app: Client):
     logger.info("Handlers wired: %d module(s).", wired)
 
 
-# ---------- Asyncio lifecycle ----------
+# ---------- Async lifecycle ----------
 async def amain():
-    logger.info("✅ Starting SuccuBot with enhanced logging")
+    logger.info("✅ Starting SuccuBot")
     app = build_client()
     wire_handlers(app)
 
-    # Global asyncio exception hook
     def _asyncio_ex_handler(loop, context):
-        msg = context.get("message", "")
         exc = context.get("exception")
         if exc:
             logger.exception("UNHANDLED asyncio exception: %s", exc)
         else:
-            logger.error("Asyncio error: %s | context=%r", msg, context)
+            logger.error("Asyncio error: %r", context)
 
     loop = asyncio.get_running_loop()
     loop.set_exception_handler(_asyncio_ex_handler)
@@ -198,7 +173,6 @@ async def amain():
     me = await app.get_me()
     logger.info("Bot started as @%s (%s)", me.username, me.id)
 
-    # Graceful stop on signals
     stop_event = asyncio.Event()
 
     def _signal(*_):
