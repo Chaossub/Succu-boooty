@@ -1,23 +1,33 @@
-# main.py — Pyrogram runner with root dm_foolproof support
+# main.py — Single-loop Pyrogram runner with clean wiring (dm_foolproof at repo root)
 
-import os, sys, asyncio, logging, signal, importlib.util, importlib
+import os
+import sys
+import asyncio
+import logging
+import signal
 from contextlib import suppress
 from logging.handlers import RotatingFileHandler
+
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery, ChatMemberUpdated
 
 # ---------- Logging ----------
 LOGLEVEL = os.getenv("LOGLEVEL", "INFO").upper()
-PYROGRAM_DEBUG = os.getenv("PYROGRAM_DEBUG", "0") in ("1","true","True","YES","yes")
+PYROGRAM_DEBUG = os.getenv("PYROGRAM_DEBUG", "0") in ("1", "true", "True", "YES", "yes")
 
 logger = logging.getLogger("SuccuBot")
 logger.setLevel(LOGLEVEL)
-_fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
 
-ch = logging.StreamHandler(sys.stdout); ch.setFormatter(_fmt); logger.addHandler(ch)
+fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
+
+ch = logging.StreamHandler(sys.stdout)
+ch.setFormatter(fmt)
+logger.addHandler(ch)
+
 os.makedirs("logs", exist_ok=True)
 fh = RotatingFileHandler("logs/bot.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8")
-fh.setFormatter(_fmt); logger.addHandler(fh)
+fh.setFormatter(fmt)
+logger.addHandler(fh)
 
 if PYROGRAM_DEBUG:
     logging.getLogger("pyrogram").setLevel(logging.DEBUG)
@@ -29,82 +39,52 @@ API_ID    = int(os.getenv("API_ID", "0"))
 API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-OWNER_ID = int(os.getenv("OWNER_ID", "0")) or None
-TRACE_UPDATES = os.getenv("TRACE_UPDATES", "0") in ("1","true","True","YES","yes")
+TRACE_UPDATES = os.getenv("TRACE_UPDATES", "0") in ("1", "true", "True", "YES", "yes")
 
 def build_client() -> Client:
     if not (API_ID and API_HASH and BOT_TOKEN):
         raise RuntimeError("Missing API_ID/API_HASH/BOT_TOKEN envs")
-    return Client("SuccuBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workdir=".", in_memory=True)
-
-# Will be filled if the root portal module is available
-_portal_builder = None
-
-def _load_root_portal():
-    """Load root-level portal module (dm_foolproof or foolproofdms)."""
-    global _portal_builder
-    for modname in ("dm_foolproof", "foolproofdms"):
-        try:
-            if importlib.util.find_spec(modname) is None:
-                continue
-            mod = importlib.import_module(modname)
-            # grab a keyboard builder if the module exposes one
-            kb_fn = None
-            for attr in ("portal_keyboard", "_portal_kb"):
-                if hasattr(mod, attr) and callable(getattr(mod, attr)):
-                    kb_fn = getattr(mod, attr); break
-            _portal_builder = kb_fn
-            # wire handlers if register() exists
-            if hasattr(mod, "register"):
-                yield (modname, getattr(mod, "register"))
-            else:
-                logger.warning("Root module %s has no register()", modname)
-            return
-        except Exception as e:
-            logger.exception("Failed importing root portal %s: %s", modname, e)
-    logger.warning("No root portal module found (dm_foolproof or foolproofdms)")
+    return Client(
+        "SuccuBot",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=BOT_TOKEN,
+        workdir=".",
+        in_memory=True,
+    )
 
 def wire_handlers(app: Client):
-    """Wire baseline handlers + root portal + handlers.* modules."""
-
-    # ---- baseline / health ----
-    @app.on_message(filters.command("start") & filters.private)
-    async def _fallback_start(client: Client, m: Message):
-        kb = _portal_builder() if callable(_portal_builder) else None
-        text = (
-            "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
-            "If you don’t see the portal, try again in a moment."
-        )
-        await m.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
-
+    """Import our modules and wire their register() if present.
+       NOTE: dm_foolproof is a root module, not under handlers/."""
+    # --- baseline utilities (no /start here to avoid duplicate portals) ---
     @app.on_message(filters.command("ping"))
-    async def _ping(_, m: Message): await m.reply_text("pong ✅")
+    async def _ping(_, m: Message):
+        await m.reply_text("pong ✅")
 
     @app.on_message(filters.command("traceon"))
-    async def trace_on(_, m: Message):
-        global TRACE_UPDATES; TRACE_UPDATES = True
-        logger.warning("TRACE_UPDATES enabled by %s", getattr(m.from_user, "id", "?"))
+    async def _trace_on(_, m: Message):
+        global TRACE_UPDATES
+        TRACE_UPDATES = True
         await m.reply_text("Tracing enabled.")
 
     @app.on_message(filters.command("traceoff"))
-    async def trace_off(_, m: Message):
-        global TRACE_UPDATES; TRACE_UPDATES = False
-        logger.warning("TRACE_UPDATES disabled by %s", getattr(m.from_user, "id", "?"))
+    async def _trace_off(_, m: Message):
+        global TRACE_UPDATES
+        TRACE_UPDATES = False
         await m.reply_text("Tracing disabled.")
 
     @app.on_message(filters.command("diag"))
-    async def diag(client: Client, m: Message):
+    async def _diag(client: Client, m: Message):
         me = await client.get_me()
         await m.reply_text(
             "🤖 <b>Diag</b>\n"
             f"• Me: @{me.username} (<code>{me.id}</code>)\n"
             f"• Trace: {'ON' if TRACE_UPDATES else 'OFF'}\n"
-            f"• Pyrogram debug: {'ON' if PYROGRAM_DEBUG else 'OFF'}\n"
-            f"• Handlers wired: see logs\n",
+            f"• Pyrogram debug: {'ON' if PYROGRAM_DEBUG else 'OFF'}\n",
             disable_web_page_preview=True,
         )
 
-    # ---- global trace taps ----
+    # --- trace taps (lowest group so they run first) ---
     @app.on_message(filters.all, group=-1000)
     async def _trace_msg(_, m: Message):
         if TRACE_UPDATES:
@@ -116,30 +96,25 @@ def wire_handlers(app: Client):
     @app.on_callback_query(group=-1000)
     async def _trace_cbq(_, cq: CallbackQuery):
         if TRACE_UPDATES:
-            logger.info("CBQ from=%s data=%r chat=%s msg=%s",
-                        getattr(cq.from_user, "id", None), cq.data,
+            logger.info("CBQ from=%s data=%r in chat=%s msg_id=%s",
+                        getattr(cq.from_user, "id", None),
+                        cq.data,
                         getattr(getattr(cq.message, "chat", None), "id", None),
                         getattr(cq.message, "id", None))
 
     @app.on_chat_member_updated(group=-1000)
     async def _trace_cmu(_, ev: ChatMemberUpdated):
         if TRACE_UPDATES:
-            logger.info("CMU chat=%s user=%s %s->%s",
+            logger.info("CHAT_MEMBER_UPDATE chat=%s user=%s status=%s -> %s",
                         getattr(ev.chat, "id", None),
                         getattr(getattr(ev.new_chat_member, "user", None), "id", None),
                         getattr(ev.old_chat_member, "status", None),
                         getattr(ev.new_chat_member, "status", None))
 
-    # ---- wire ROOT portal (dm_foolproof/foolproofdms) ----
-    for modname, reg in _load_root_portal():
-        try:
-            reg(app)
-            logger.info("wired: %s (root)", modname)
-        except Exception:
-            logger.exception("Failed to wire root portal %s", modname)
-
-    # ---- wire handlers.* modules (do NOT try handlers.dm_foolproof) ----
+    # --- modules list (dm_foolproof sits at repo root) ---
     modules = [
+        "dm_foolproof",                 # root file — portal & DM-ready
+        # handlers below:
         "handlers.menu",
         "handlers.help_panel",
         "handlers.help_cmd",
@@ -160,41 +135,46 @@ def wire_handlers(app: Client):
         "handlers.xp",
         "handlers.dmnow",
     ]
+
     wired = 0
     for name in modules:
         try:
-            if importlib.util.find_spec(name) is None:
-                logger.warning("Module not found (skipped): %s", name)
-                continue
-            m = importlib.import_module(name)
+            m = __import__(name, fromlist=["register"])
             if hasattr(m, "register"):
-                m.register(app); wired += 1; logger.info("wired: %s", name)
+                m.register(app)
+                logger.info("wired: %s", name)
+                wired += 1
             else:
-                logger.warning("module %s has no register()", name)
+                logger.warning("Module %s has no register()", name)
+        except ModuleNotFoundError as e:
+            logger.warning("Module not found (skipped): %s (%s)", name, e)
         except Exception:
             logger.exception("Failed to wire %s", name)
     logger.info("Handlers wired: %d module(s).", wired)
 
-# ---------- lifecycle ----------
 async def amain():
     logger.info("✅ Starting SuccuBot with enhanced logging")
     app = build_client()
     wire_handlers(app)
 
-    def _asyncio_ex_handler(loop, context):
+    def _asyncio_err(loop, context):
         exc = context.get("exception")
-        if exc: logger.exception("UNHANDLED asyncio exception: %s", exc)
-        else:   logger.error("Asyncio error: %r", context)
+        if exc:
+            logger.exception("UNHANDLED asyncio exception: %s", exc)
+        else:
+            logger.error("Asyncio error: %r", context)
 
     loop = asyncio.get_running_loop()
-    loop.set_exception_handler(_asyncio_ex_handler)
+    loop.set_exception_handler(_asyncio_err)
 
     await app.start()
     me = await app.get_me()
     logger.info("Bot started as @%s (%s)", me.username, me.id)
 
     stop_event = asyncio.Event()
-    def _signal(*_): logger.info("Stop signal received. Shutting down…"); stop_event.set()
+    def _signal(*_):
+        logger.info("Stop signal received. Shutting down…")
+        stop_event.set()
     for sig in (signal.SIGINT, signal.SIGTERM):
         with suppress(NotImplementedError):
             loop.add_signal_handler(sig, _signal)
