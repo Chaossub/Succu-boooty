@@ -1,13 +1,17 @@
-# DM portal + DM-ready marking + Contact Admins/Models + Help + Links
+# DM portal + DM-ready marking + Admin/Models/Links/Help
 import os
-from typing import List, Optional
+from typing import Optional, List
 
 from pyrogram import Client, filters
 from pyrogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
-# ✅ correct import path for StopPropagation across Pyrogram builds
-from pyrogram.handlers import StopPropagation
+# robust StopPropagation import
+try:
+    from pyrogram.handlers import StopPropagation
+except Exception:
+    # legacy path
+    from pyrogram.handlers.handler import StopPropagation  # type: ignore
 
 try:
     from req_store import ReqStore
@@ -15,7 +19,7 @@ try:
 except Exception:
     _store = None
 
-# ------------- env helpers -------------
+# ---------- env helpers ----------
 def _to_int(x: Optional[str]) -> Optional[int]:
     try:
         return int(str(x)) if x not in (None, "", "None") else None
@@ -38,7 +42,7 @@ SAVY_NAME = os.getenv("SAVY_NAME", "Savy")
 def _is_admin(uid: Optional[int]) -> bool:
     return bool(uid and uid in {OWNER_ID, SUPER_ADMIN_ID})
 
-# ------------- text -------------
+# ---------- copy/text ----------
 WELCOME_TEXT = (
     "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
     "Your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing. 💋\n\n"
@@ -54,13 +58,13 @@ MODELS_LINKS_TEXT = os.getenv("MODELS_LINKS_TEXT", "").strip() or (
 )
 MODELS_LINKS_PHOTO = os.getenv("MODELS_LINKS_PHOTO")
 
-# ------------- keyboards -------------
+# ---------- keyboards ----------
 def _portal_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💕 Menu", callback_data="dmf_open_menu")],
         [InlineKeyboardButton("Contact Admins 👑", callback_data="dmf_open_admins")],
         [InlineKeyboardButton("Find Our Models Elsewhere 🔥", callback_data="dmf_links")],
-        [InlineKeyboardButton("❓ Help", callback_data="dmf_help")]
+        [InlineKeyboardButton("❓ Help", callback_data="dmf_help")],
     ])
 
 def _back_portal_kb() -> InlineKeyboardMarkup:
@@ -89,7 +93,7 @@ def _admins_kb() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_home")])
     return InlineKeyboardMarkup(rows)
 
-# ------------- util -------------
+# ---------- utils ----------
 def _mark_dm_ready_once(uid: int) -> bool:
     if not _store:
         return False
@@ -101,36 +105,28 @@ def _mark_dm_ready_once(uid: int) -> bool:
     except Exception:
         return False
 
-# ------------- register -------------
+# ---------- registration ----------
 def register(app: Client):
-
-    # Earliest priority so no other /start consumes the update first
-    @app.on_message(filters.private & filters.command(["start", "portal"]) , group=-999)
+    # SUPER EARLY: catch start wherever it appears to avoid other handlers eating it
+    @app.on_message(filters.command(["start", "portal", "forceportal"]) & ~filters.edited, group=-1000)
     async def start_portal(client: Client, m: Message):
         uid = m.from_user.id if m.from_user else 0
-        first_mark = _mark_dm_ready_once(uid)
 
-        # DM-ready ping (only first time)
+        first_mark = _mark_dm_ready_once(uid)
         if first_mark and OWNER_ID:
             try:
-                mention = m.from_user.mention if m.from_user else f"<a href='tg://user?id={uid}'>User</a>"
+                # Prefer username mention; fallback to tap-to-mention by id
+                if m.from_user and m.from_user.username:
+                    mention = f"@{m.from_user.username}"
+                else:
+                    mention = m.from_user.mention if m.from_user else f"<a href='tg://user?id={uid}'>user</a>"
                 await client.send_message(OWNER_ID, f"✅ <b>DM-ready</b> — {mention} just opened the portal.")
             except Exception:
                 pass
 
         await m.reply_text(WELCOME_TEXT, reply_markup=_portal_kb(), disable_web_page_preview=True)
 
-        # stop any other /start from replying (prevents duplicates)
-        raise StopPropagation
-
-    # Fallback /menu command opens the model hub too
-    @app.on_message(filters.private & filters.command("menu"), group=-998)
-    async def alias_menu(client: Client, m: Message):
-        try:
-            from handlers.menu import menu_tabs_text, menu_tabs_kb
-            await m.reply_text(menu_tabs_text(), reply_markup=menu_tabs_kb(), disable_web_page_preview=True)
-        except Exception:
-            await m.reply_text("💕 Model Menus\nChoose a name:", reply_markup=_contact_models_kb(), disable_web_page_preview=True)
+        # Prevent duplicate replies from any other /start handlers
         raise StopPropagation
 
     # Back to start
@@ -187,14 +183,17 @@ def register(app: Client):
     async def links(client: Client, cq: CallbackQuery):
         try:
             if MODELS_LINKS_PHOTO:
-                await client.send_photo(cq.from_user.id, MODELS_LINKS_PHOTO, caption=MODELS_LINKS_TEXT, reply_markup=_back_portal_kb())
+                await client.send_photo(cq.from_user.id, MODELS_LINKS_PHOTO,
+                                        caption=MODELS_LINKS_TEXT, reply_markup=_back_portal_kb())
             else:
-                await cq.message.edit_text(MODELS_LINKS_TEXT, reply_markup=_back_portal_kb(), disable_web_page_preview=False)
+                await cq.message.edit_text(MODELS_LINKS_TEXT, reply_markup=_back_portal_kb(),
+                                           disable_web_page_preview=False)
         except Exception:
-            await cq.message.reply_text(MODELS_LINKS_TEXT, reply_markup=_back_portal_kb(), disable_web_page_preview=False)
+            await cq.message.reply_text(MODELS_LINKS_TEXT, reply_markup=_back_portal_kb(),
+                                        disable_web_page_preview=False)
         await cq.answer()
 
-    # Admin: list DM-ready
+    # Admin: list who is DM-ready
     @app.on_message(filters.private & filters.command("dmready_list"))
     async def dmready_list(client: Client, m: Message):
         uid = m.from_user.id if m.from_user else 0
@@ -207,13 +206,15 @@ def register(app: Client):
         if not data:
             await m.reply_text("No one is marked DM-ready yet.")
             return
-
         lines = []
         for s_uid in sorted(data.keys(), key=lambda x: int(x)):
             i_uid = int(s_uid)
             try:
                 u = await client.get_users(i_uid)
-                disp = u.mention if u else f"<a href='tg://user?id={i_uid}'>User {i_uid}</a>"
+                if u and u.username:
+                    disp = f"@{u.username}"
+                else:
+                    disp = u.mention if u else f"<a href='tg://user?id={i_uid}'>User {i_uid}</a>"
             except Exception:
                 disp = f"<a href='tg://user?id={i_uid}'>User {i_uid}</a>"
             lines.append(f"• {disp}")
