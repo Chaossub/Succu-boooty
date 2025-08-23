@@ -1,14 +1,20 @@
+# main.py
 import os
 import logging
+from pathlib import Path
+
 from dotenv import load_dotenv
 from pyrogram import Client
+from pyrogram.enums import ParseMode
 
-# --------------------------- env & logging ---------------------------
+# -----------------------------
+# Env & logging
+# -----------------------------
 load_dotenv()
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    level=LOG_LEVEL,
     format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 log = logging.getLogger("SuccuBot")
@@ -17,43 +23,46 @@ API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-if not API_ID or not API_HASH or not BOT_TOKEN:
-    log.error("Missing API_ID/API_HASH/BOT_TOKEN.")
-    raise SystemExit(1)
+if not (API_ID and API_HASH and BOT_TOKEN):
+    raise RuntimeError("Missing API_ID / API_HASH / BOT_TOKEN in environment")
 
-# --------------------------- app ---------------------------
+# -----------------------------
+# Pyrogram client
+# -----------------------------
 app = Client(
     "succubot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    parse_mode="html",
+    parse_mode=ParseMode.HTML,  # <-- Pyrogram 2 requires the enum, not "html"
     in_memory=True,
 )
 
-# --------------------------- dynamic wiring ---------------------------
-def _wire_one(modname: str):
+
+# -----------------------------
+# Handler wiring
+# -----------------------------
+def _try_import_and_register(module_name: str):
+    """Import a module that has a `register(app)` function and call it."""
     try:
-        m = __import__(modname, fromlist=["register"])
-    except Exception as e:
-        log.error("Failed to import %s: %s", modname, e)
-        return
-    try:
-        if hasattr(m, "register"):
-            m.register(app)
-            log.info("wired: %s", modname)
+        mod = __import__(module_name, fromlist=["register"])
+        if hasattr(mod, "register"):
+            mod.register(app)
+            log.info("wired: %s", module_name)
         else:
-            log.warning("%s has no register()", modname)
+            log.warning("%s has no register()", module_name)
     except Exception as e:
-        log.error("Failed to wire %s: %s", modname, e)
+        log.error("Failed to wire %s: %s", module_name, e)
+
 
 def wire_handlers():
     log.info("✅ Booting SuccuBot")
-    modules = [
-        # root module (NOT under handlers)
-        "dm_foolproof",
 
-        # your existing handlers (wire those that exist; missing are skipped gracefully)
+    # Root-level extras (keep dm_foolproof in project root)
+    _try_import_and_register("dm_foolproof")
+
+    # Handlers folder (only those present in your repo)
+    handlers = [
         "handlers.menu",
         "handlers.help_panel",
         "handlers.help_cmd",
@@ -74,11 +83,22 @@ def wire_handlers():
         "handlers.xp",
         "handlers.dmnow",
     ]
-    for name in modules:
-        _wire_one(name)
+
+    for name in handlers:
+        _try_import_and_register(name)
+
     log.info("Handlers wired.")
 
-# --------------------------- main ---------------------------
+
+# -----------------------------
+# Run
+# -----------------------------
 if __name__ == "__main__":
     wire_handlers()
+
+    @app.on_client_started
+    async def _on_started(client: Client):
+        me = await client.get_me()
+        log.info("Bot started as @%s (%s)", me.username, me.id)
+
     app.run()
