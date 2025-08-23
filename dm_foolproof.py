@@ -102,8 +102,8 @@ def _mark_dm_ready_once(uid: int) -> bool:
 
 # ---------- registration ----------
 def register(app: Client):
-    # Catch at earliest priority; no StopPropagation used (Pyrogram 2.0.106)
-    @app.on_message(filters.command(["start", "portal", "forceportal"]) & ~filters.edited, group=-1000)
+    # NOTE: Pyrogram 2.0.106 has no filters.edited, so we keep it simple.
+    @app.on_message(filters.command(["start", "portal", "forceportal"]), group=-1000)
     async def start_portal(client: Client, m: Message):
         uid = m.from_user.id if m.from_user else 0
 
@@ -119,7 +119,6 @@ def register(app: Client):
                 pass
 
         await m.reply_text(WELCOME_TEXT, reply_markup=_portal_kb(), disable_web_page_preview=True)
-        # NOTE: We don't raise StopPropagation on this Pyrogram version.
 
     # Back to start
     @app.on_callback_query(filters.regex(r"^dmf_home$"))
@@ -203,7 +202,7 @@ def register(app: Client):
             i_uid = int(s_uid)
             try:
                 u = await client.get_users(i_uid)
-                if u and u.username:
+                if u and getattr(u, "username", None):
                     disp = f"@{u.username}"
                 else:
                     disp = u.mention if u else f"<a href='tg://user?id={i_uid}'>User {i_uid}</a>"
