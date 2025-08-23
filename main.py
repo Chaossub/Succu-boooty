@@ -5,7 +5,8 @@ from pyrogram import Client
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 log = logging.getLogger("SuccuBot")
 
 API_ID = int(os.getenv("API_ID"))
@@ -25,10 +26,9 @@ def _wire(module_name: str, attr: str = "register"):
 
 def wire_all():
     log.info("✅ Booting SuccuBot")
-    # Portal lives in the root
+    # Portal lives in repo ROOT
     _wire("dm_foolproof")
 
-    # Your other modules (keep as you have them)
     for m in [
         "handlers.menu",
         "handlers.help_panel",
