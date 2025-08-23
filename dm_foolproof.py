@@ -1,253 +1,327 @@
-# dm_foolproof.py
-# DM portal (root): /start portal + DM-ready flag + Contact Admins + Contact Models + Links + Help
+"""
+Start-portal + Contact Admins/Models + one-time DM-ready flag & admin alert.
+
+- Shows the portal on /start with buttons:
+  [💕 Menu] [Contact Admins 👑] [💕 Contact Models] [Find Our Models Elsewhere 🔥] [❓ Help]
+- Marks the user DM-ready the FIRST time they open the portal (one-time alert to admins).
+- /dmready_list  -> lists all global DM-ready users (owner/super-admin only)
+- /envcheck      -> quick debug of resolved env (owner only)
+"""
 
 import os
-from typing import List, Optional
-from contextlib import suppress
+import time
+from typing import Optional, List
 
 from pyrogram import Client, filters
 from pyrogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
 
-# ---------- store ----------
+# --------------------------- optional store ---------------------------
 try:
     from req_store import ReqStore
     _store = ReqStore()
 except Exception:
     _store = None
 
-# ---------- env helpers ----------
-def _to_int(x: Optional[str]) -> Optional[int]:
+# --------------------------- env helpers ---------------------------
+def _to_int(x):
     try:
-        return int(str(x)) if x not in (None, "", "None") else None
+        x = (x or "").strip()
+        if not x or x.lower() == "none" or x == "0":
+            return None
+        return int(x)
     except Exception:
         return None
 
-def _t_me(username: Optional[str]) -> Optional[str]:
-    u = (username or "").lstrip("@").strip()
-    return f"https://t.me/{u}" if u else None
+def _clean_username(u: Optional[str]) -> Optional[str]:
+    if not u:
+        return None
+    u = u.strip()
+    return u[1:] if u.startswith("@") else (u or None)
 
-def _tg_id_url(uid: Optional[int]) -> Optional[str]:
-    return f"tg://user?id={uid}" if uid else None
-
-# ---------- Admins / models ----------
-OWNER_ID        = _to_int(os.getenv("OWNER_ID"))
-OWNER_USERNAME  = os.getenv("OWNER_USERNAME")
+# Accept both OWNER_* and RONI_* for the owner slot
+OWNER_ID        = _to_int(os.getenv("OWNER_ID") or os.getenv("RONI_ID"))
+OWNER_USERNAME  = _clean_username(os.getenv("OWNER_USERNAME") or os.getenv("RONI_USERNAME"))
 RONI_NAME       = os.getenv("RONI_NAME", "Roni")
 
-RUBY_ID         = _to_int(os.getenv("RUBY_ID"))
-RUBY_USERNAME   = os.getenv("RUBY_USERNAME")
-RUBY_NAME       = os.getenv("RUBY_NAME", "Ruby")
-
-RIN_ID          = _to_int(os.getenv("RIN_ID"))
-RIN_USERNAME    = os.getenv("RIN_USERNAME")
-RIN_NAME        = os.getenv("RIN_NAME", "Rin")
-
-SAVY_ID         = _to_int(os.getenv("SAVY_ID"))
-SAVY_USERNAME   = os.getenv("SAVY_USERNAME")
-SAVY_NAME       = os.getenv("SAVY_NAME", "Savy")
-
 SUPER_ADMIN_ID  = _to_int(os.getenv("SUPER_ADMIN_ID"))
+SUPER_ADMIN_USERNAME = _clean_username(os.getenv("SUPER_ADMIN_USERNAME"))
 
-# ---------- texts ----------
+RUBY_ID        = _to_int(os.getenv("RUBY_ID"))
+RUBY_USERNAME  = _clean_username(os.getenv("RUBY_USERNAME"))
+RUBY_NAME      = os.getenv("RUBY_NAME", "Ruby")
+
+RIN_ID        = _to_int(os.getenv("RIN_ID"))
+RIN_USERNAME  = _clean_username(os.getenv("RIN_USERNAME"))
+RIN_NAME      = os.getenv("RIN_NAME", "Rin")
+
+SAVY_ID        = _to_int(os.getenv("SAVY_ID") or os.getenv("SAVVY_ID"))
+SAVY_USERNAME  = _clean_username(os.getenv("SAVY_USERNAME") or os.getenv("SAVVY_USERNAME"))
+SAVY_NAME      = os.getenv("SAVY_NAME", os.getenv("SAVVY_NAME", "Savy"))
+
+# Links panel content
+MODELS_LINKS_TEXT = os.getenv(
+    "MODELS_LINKS_TEXT",
+    "🔥 <b>Find Our Models Elsewhere</b> 🔥\n\n"
+    "👑 <b>Roni Jane (Owner)</b>\n"
+    "<a href='https://t.me/{}'>@{}</a>\n\n".format(OWNER_USERNAME or "username", OWNER_USERNAME or "username")
+)
+MODELS_LINKS_PHOTO = os.getenv("MODELS_LINKS_PHOTO")  # optional URL/file id
+
 WELCOME_TEXT = (
     "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
     "Your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
     "Tap a button to begin:"
 )
 
-MODELS_LINKS_TEXT = os.getenv(
-    "MODELS_LINKS_TEXT",
-    "🔥 <b>Find Our Models Elsewhere</b> 🔥\n\n"
-    "👑 <b>Roni Jane (Owner)</b>\n"
-    "<a href='https://allmylinks.com/chaossub283'>https://allmylinks.com/chaossub283</a>\n\n"
-    "💎 <b>Ruby Ransom (Co-Owner)</b>\n"
-    "<a href='https://allmylinks.com/rubyransoms'>https://allmylinks.com/rubyransoms</a>\n\n"
-    "🍑 <b>Peachy Rin</b>\n"
-    "<a href='https://allmylinks.com/peachybunsrin'>https://allmylinks.com/peachybunsrin</a>\n\n"
-    "⚡ <b>Savage Savy</b>\n"
-    "<a href='https://allmylinks.com/savannahxsavage'>https://allmylinks.com/savannahxsavage</a>"
-)
-MODELS_LINKS_PHOTO = os.getenv("MODELS_LINKS_PHOTO")
+# --------------------------- small utils ---------------------------
+def _contact_url(user_id: Optional[int], username: Optional[str]) -> Optional[str]:
+    if username:
+        return f"https://t.me/{username}"
+    if user_id:
+        return f"tg://user?id={user_id}"
+    return None
 
-# ---------- utils ----------
-def _is_admin(uid: Optional[int]) -> bool:
-    return bool(uid and uid in {OWNER_ID, SUPER_ADMIN_ID, RUBY_ID})
+def _admins_to_notify() -> List[int]:
+    ids = []
+    if OWNER_ID:
+        ids.append(OWNER_ID)
+    if SUPER_ADMIN_ID and SUPER_ADMIN_ID != OWNER_ID:
+        ids.append(SUPER_ADMIN_ID)
+    # include any custom admins saved in store
+    if _store:
+        for a in _store.list_admins():
+            if a not in ids:
+                ids.append(a)
+    return ids
 
-def _edit_or_reply(cq: CallbackQuery, text: str, kb: InlineKeyboardMarkup, preview: bool = False):
-    async def _do():
-        with suppress(Exception):
-            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=not preview)
-            return True
-        with suppress(Exception):
-            await cq.message.reply_text(text, reply_markup=kb, disable_web_page_preview=not preview)
-            return True
+def _user_display(u) -> str:
+    # prefer @username, fall back to first name or id
+    if getattr(u, "username", None):
+        return f"@{u.username}"
+    if getattr(u, "first_name", None):
+        return u.first_name
+    return f"User {u.id}"
+
+def _mark_dm_ready_once(uid: int) -> bool:
+    """Returns True if it changed from not-ready -> ready."""
+    if not _store:
         return False
-    return _do()
+    try:
+        if _store.is_dm_ready_global(uid):
+            return False
+        _store.set_dm_ready_global(uid, True, by_admin=False)
+        return True
+    except Exception:
+        return False
 
-def _open_url_button(label: str, uid: Optional[int], username: Optional[str]) -> Optional[InlineKeyboardButton]:
-    # Prefer tg://user?id=..., otherwise https://t.me/username
-    url = _tg_id_url(uid) or _t_me(username)
-    return InlineKeyboardButton(label, url=url) if url else None
-
+# --------------------------- keyboards ---------------------------
 def _welcome_kb() -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = [
+    rows = [
         [InlineKeyboardButton("💕 Menu", callback_data="dmf_open_menu")],
         [InlineKeyboardButton("Contact Admins 👑", callback_data="dmf_open_admins")],
-        [InlineKeyboardButton("💞 Contact Models", callback_data="dmf_contact_models")],
+        [InlineKeyboardButton("💕 Contact Models", callback_data="dmf_open_models")],
         [InlineKeyboardButton("Find Our Models Elsewhere 🔥", callback_data="dmf_models_links")],
         [InlineKeyboardButton("❓ Help", callback_data="dmf_show_help")],
     ]
     return InlineKeyboardMarkup(rows)
 
-def _back_to_start_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")]])
-
-def _admins_kb() -> InlineKeyboardMarkup:
-    row: List[InlineKeyboardButton] = []
-    b = _open_url_button(f"👑 Message {RONI_NAME}", OWNER_ID, OWNER_USERNAME)
-    if b: row.append(b)
-    b = _open_url_button(f"💎 Message {RUBY_NAME}", RUBY_ID, RUBY_USERNAME)
-    if b: row.append(b)
-
+def _contact_admins_kb() -> InlineKeyboardMarkup:
     rows = []
-    if row: rows.append(row)
+    url = _contact_url(OWNER_ID, OWNER_USERNAME)
+    if url:
+        rows.append([InlineKeyboardButton("👑 Message Roni", url=url)])
+    url = _contact_url(RUBY_ID, RUBY_USERNAME)
+    if url:
+        rows.append([InlineKeyboardButton("💎 Message Ruby", url=url)])
     rows.append([InlineKeyboardButton("🙈 Send Anonymous Message", callback_data="dmf_anon_admins")])
-    rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")])
+    rows.append([InlineKeyboardButton("◀️ Back to Start", callback_data="dmf_back_welcome")])
     return InlineKeyboardMarkup(rows)
 
-def _pair_row(btns: List[Optional[InlineKeyboardButton]]) -> Optional[List[InlineKeyboardButton]]:
-    row = [b for b in btns if b is not None]
-    return row if row else None
-
-def _contact_models_kb() -> InlineKeyboardMarkup:
-    # First row: Roni + Ruby. Second row: Rin + Savy. (Skip any missing)
-    roni = _open_url_button(f"💗 {RONI_NAME}", OWNER_ID, OWNER_USERNAME)
-    ruby = _open_url_button(f"💗 {RUBY_NAME}", RUBY_ID, RUBY_USERNAME)
-    rin  = _open_url_button(f"💗 {RIN_NAME}",  RIN_ID,  RIN_USERNAME)
-    savy = _open_url_button(f"💗 {SAVY_NAME}", SAVY_ID, SAVY_USERNAME)
-
-    rows: List[List[InlineKeyboardButton]] = []
-    row1 = _pair_row([roni, ruby])
-    row2 = _pair_row([rin, savy])
-    if row1: rows.append(row1)
-    if row2: rows.append(row2)
-
-    rows.append([InlineKeyboardButton("⬅️ Back to Menus", callback_data="dmf_open_menu")])
+def _models_panel_kb() -> InlineKeyboardMarkup:
+    rows = []
+    # Row 1: Roni + Ruby
+    row1 = []
+    url = _contact_url(OWNER_ID, OWNER_USERNAME)
+    if url:
+        row1.append(InlineKeyboardButton(f"💌 {RONI_NAME}", url=url))
+    url = _contact_url(RUBY_ID, RUBY_USERNAME)
+    if url:
+        row1.append(InlineKeyboardButton(f"💌 {RUBY_NAME}", url=url))
+    if row1:
+        rows.append(row1)
+    # Row 2: Rin + Savy
+    row2 = []
+    url = _contact_url(RIN_ID, RIN_USERNAME)
+    if url:
+        row2.append(InlineKeyboardButton(f"💌 {RIN_NAME}", url=url))
+    url = _contact_url(SAVY_ID, SAVY_USERNAME)
+    if url:
+        row2.append(InlineKeyboardButton(f"💌 {SAVY_NAME}", url=url))
+    if row2:
+        rows.append(row2)
+    rows.append([InlineKeyboardButton("◀️ Back to Menus", callback_data="dmf_open_menu")])
     return InlineKeyboardMarkup(rows)
 
-# ---------- DM-ready (throttle) ----------
-_ALERTED: set[int] = set()  # in-process throttle: ensure single admin alert per user
-
-async def _mark_dm_ready_once(client: Client, m: Message):
-    if not m.from_user or not _store:
-        return
-    uid = m.from_user.id
-
-    already = _store.is_dm_ready_global(uid)
-    if not already:
-        with suppress(Exception):
-            _store.set_dm_ready_global(uid, True, by_admin=False)
-
-    # Only alert admins once (guard by store + in-proc throttle)
-    if uid in _ALERTED:
-        return
-    if already:
-        return
-    _ALERTED.add(uid)
-
-    uname = f"@{m.from_user.username}" if m.from_user.username else m.from_user.first_name
-    txt = f"✅ <b>DM-ready</b> — {uname} just opened the portal."
-    # Send to distinct admins
-    for aid in {x for x in (OWNER_ID, RUBY_ID, SUPER_ADMIN_ID) if x}:
-        with suppress(Exception):
-            await client.send_message(aid, txt)
-
-# ---------- Handlers ----------
+# --------------------------- register ---------------------------
 def register(app: Client):
 
-    # /start — shows welcome + marks DM-ready (once)
+    # /start: show portal + one-time dm-ready + one-time admin alert
     @app.on_message(filters.private & filters.command("start"))
-    async def on_start(client: Client, m: Message):
-        await _mark_dm_ready_once(client, m)
+    async def start_cmd(client: Client, m: Message):
+        uid = m.from_user.id if m.from_user else 0
+
+        changed = _mark_dm_ready_once(uid)
+        if changed:
+            # alert admins ONCE
+            mention = _user_display(m.from_user)
+            text = f"✅ <b>DM-ready</b> — {mention} just opened the portal."
+            for aid in _admins_to_notify():
+                if aid and aid != uid:
+                    try:
+                        await client.send_message(aid, text)
+                    except Exception:
+                        pass
+
+        # welcome panel
         await m.reply_text(WELCOME_TEXT, reply_markup=_welcome_kb(), disable_web_page_preview=True)
 
     # Back to welcome
     @app.on_callback_query(filters.regex("^dmf_back_welcome$"))
     async def back_welcome(client: Client, cq: CallbackQuery):
-        await _edit_or_reply(cq, WELCOME_TEXT, _welcome_kb())
+        try:
+            await cq.message.edit_text(WELCOME_TEXT, reply_markup=_welcome_kb(), disable_web_page_preview=True)
+        except Exception:
+            await cq.message.reply_text(WELCOME_TEXT, reply_markup=_welcome_kb(), disable_web_page_preview=True)
         await cq.answer()
 
-    # Menu (delegates to handlers.menu if present, otherwise fallback)
+    # Open "menu" (delegates to handlers.menu if present)
     @app.on_callback_query(filters.regex("^dmf_open_menu$"))
     async def open_menu(client: Client, cq: CallbackQuery):
         try:
             from handlers.menu import menu_tabs_text, menu_tabs_kb
-            with suppress(Exception):
+            try:
                 await cq.message.edit_text(menu_tabs_text(), reply_markup=menu_tabs_kb(), disable_web_page_preview=True)
-            await cq.answer()
-            return
+            except Exception:
+                await cq.message.reply_text(menu_tabs_text(), reply_markup=menu_tabs_kb(), disable_web_page_preview=True)
         except Exception:
-            pass
-        await _edit_or_reply(cq, "💞 <b>Model Menus</b>\nChoose a name:", _contact_models_kb())
+            await cq.message.reply_text("Menu is unavailable right now.")
         await cq.answer()
 
     # Contact Admins
     @app.on_callback_query(filters.regex("^dmf_open_admins$"))
     async def open_admins(client: Client, cq: CallbackQuery):
-        await _edit_or_reply(cq, "How would you like to reach us?", _admins_kb())
+        try:
+            await cq.message.edit_text("How would you like to reach us?", reply_markup=_contact_admins_kb())
+        except Exception:
+            await cq.message.reply_text("How would you like to reach us?", reply_markup=_contact_admins_kb())
         await cq.answer()
 
     # Contact Models
-    @app.on_callback_query(filters.regex("^dmf_contact_models$"))
-    async def contact_models(client: Client, cq: CallbackQuery):
-        await _edit_or_reply(cq, "Contact a model directly:", _contact_models_kb())
+    @app.on_callback_query(filters.regex("^dmf_open_models$"))
+    async def open_models(client: Client, cq: CallbackQuery):
+        try:
+            await cq.message.edit_text("Contact a model directly:", reply_markup=_models_panel_kb())
+        except Exception:
+            await cq.message.reply_text("Contact a model directly:", reply_markup=_models_panel_kb())
         await cq.answer()
 
-    # Anonymous message entry (placeholder – your relay hooks here)
+    # Anonymous message entry (you can hook this to your existing anon relay)
     @app.on_callback_query(filters.regex("^dmf_anon_admins$"))
     async def anon_admins(client: Client, cq: CallbackQuery):
-        await _edit_or_reply(
-            cq,
-            "You're anonymous. Type the message you want me to forward to the admins.",
-            _back_to_start_kb()
+        txt = (
+            "You're anonymous. Type the message you want me to forward to the admins.\n\n"
+            "Use /cancel to stop."
         )
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Start", callback_data="dmf_back_welcome")]])
+        try:
+            await cq.message.edit_text(txt, reply_markup=kb)
+        except Exception:
+            await cq.message.reply_text(txt, reply_markup=kb)
         await cq.answer()
+        # If you already have an anon flow/state machine, set the flag here.
 
-    # Links
+    # Links panel
     @app.on_callback_query(filters.regex("^dmf_models_links$"))
     async def models_links(client: Client, cq: CallbackQuery):
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Start", callback_data="dmf_back_welcome")]])
         try:
             if MODELS_LINKS_PHOTO:
-                await client.send_photo(cq.from_user.id, MODELS_LINKS_PHOTO, caption=MODELS_LINKS_TEXT, reply_markup=_back_to_start_kb())
+                await client.send_photo(cq.from_user.id, MODELS_LINKS_PHOTO, caption=MODELS_LINKS_TEXT, reply_markup=kb)
             else:
-                await _edit_or_reply(cq, MODELS_LINKS_TEXT, _back_to_start_kb(), preview=True)
+                await cq.message.edit_text(MODELS_LINKS_TEXT, reply_markup=kb, disable_web_page_preview=False)
         except Exception:
-            with suppress(Exception):
-                await cq.message.reply_text(MODELS_LINKS_TEXT, reply_markup=_back_to_start_kb(), disable_web_page_preview=False)
+            await cq.message.reply_text(MODELS_LINKS_TEXT, reply_markup=kb, disable_web_page_preview=False)
         await cq.answer()
 
-    # /dmreadylist — admin only
-    @app.on_message(filters.private & filters.command(["dmreadylist","dmrlist","dmr"]))
+    # Help (delegates to handlers.help_panel if present)
+    @app.on_callback_query(filters.regex("^dmf_show_help$"))
+    async def show_help(client: Client, cq: CallbackQuery):
+        try:
+            from handlers.help_panel import show_help_root
+            await show_help_root(client, cq.message, from_callback=True)
+        except Exception:
+            await cq.message.reply_text("Type /help to open the help menu.", reply_markup=_welcome_kb())
+        await cq.answer()
+
+    # ------------------- admin utilities -------------------
+    def _is_owner(uid: Optional[int]) -> bool:
+        return bool(uid and OWNER_ID and uid == OWNER_ID)
+
+    def _is_super(uid: Optional[int]) -> bool:
+        return bool(uid and SUPER_ADMIN_ID and uid == SUPER_ADMIN_ID)
+
+    def _is_admin(uid: Optional[int]) -> bool:
+        if _is_owner(uid) or _is_super(uid):
+            return True
+        if _store:
+            try:
+                return uid in _store.list_admins()
+            except Exception:
+                return False
+        return False
+
+    @app.on_message(filters.private & filters.command("envcheck"))
+    async def envcheck(client: Client, m: Message):
+        if not _is_owner(m.from_user.id):
+            return
+        lines = [
+            "<b>Resolved contact env:</b>",
+            f"RONI: id={OWNER_ID} user={OWNER_USERNAME} name={RONI_NAME}",
+            f"RUBY: id={RUBY_ID} user={RUBY_USERNAME} name={RUBY_NAME}",
+            f"RIN:  id={RIN_ID} user={RIN_USERNAME} name={RIN_NAME}",
+            f"SAVY: id={SAVY_ID} user={SAVY_USERNAME} name={SAVY_NAME}",
+        ]
+        await m.reply_text("\n".join(lines), disable_web_page_preview=True)
+
+    @app.on_message(filters.private & filters.command(["dmready_list", "dmready"]))
     async def dmready_list(client: Client, m: Message):
-        uid = m.from_user.id if m.from_user else 0
-        if not _is_admin(uid):
+        if not _is_admin(m.from_user.id):
             return
         if not _store:
-            await m.reply_text("Store unavailable.")
+            await m.reply_text("No store is configured.")
             return
-        data = _store.list_dm_ready_global()
+        data = _store.list_dm_ready_global() or {}
         if not data:
-            await m.reply_text("No one is marked DM-ready yet.")
+            await m.reply_text("Nobody is marked DM-ready yet.")
             return
-        lines = ["<b>DM-ready users</b>:"]
-        for s_uid in sorted(data.keys(), key=lambda x: int(x)):
-            user_id = int(s_uid)
+        # try to show nice usernames
+        out = ["<b>DM-ready users:</b>"]
+        for s_uid, meta in sorted(data.items(), key=lambda kv: int(kv[0])):
+            uid = int(s_uid)
+            username = None
             try:
-                u = await client.get_users(user_id)
-                handle = f"@{u.username}" if getattr(u, 'username', None) else u.first_name
+                u = await client.get_users(uid)
+                username = f"@{u.username}" if u and u.username else None
             except Exception:
-                handle = s_uid
-            lines.append(f"• {handle} (<code>{user_id}</code>)")
-        await m.reply_text("\n".join(lines))
+                username = None
+            ts = meta.get("since")
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "—"
+            line = f"• {username or ('<code>'+s_uid+'</code>')} — since {when}"
+            out.append(line)
+        await m.reply_text("\n".join(out), disable_web_page_preview=True)
+
