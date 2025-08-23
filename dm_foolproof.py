@@ -6,12 +6,6 @@ from pyrogram import Client, filters
 from pyrogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
-# robust StopPropagation import
-try:
-    from pyrogram.handlers import StopPropagation
-except Exception:
-    # legacy path
-    from pyrogram.handlers.handler import StopPropagation  # type: ignore
 
 try:
     from req_store import ReqStore
@@ -29,6 +23,7 @@ def _to_int(x: Optional[str]) -> Optional[int]:
 OWNER_ID        = _to_int(os.getenv("OWNER_ID"))
 SUPER_ADMIN_ID  = _to_int(os.getenv("SUPER_ADMIN_ID"))
 
+# models
 RONI_ID   = _to_int(os.getenv("RONI_ID")) or OWNER_ID
 RUBY_ID   = _to_int(os.getenv("RUBY_ID"))
 RIN_ID    = _to_int(os.getenv("RIN_ID"))
@@ -107,7 +102,7 @@ def _mark_dm_ready_once(uid: int) -> bool:
 
 # ---------- registration ----------
 def register(app: Client):
-    # SUPER EARLY: catch start wherever it appears to avoid other handlers eating it
+    # Catch at earliest priority; no StopPropagation used (Pyrogram 2.0.106)
     @app.on_message(filters.command(["start", "portal", "forceportal"]) & ~filters.edited, group=-1000)
     async def start_portal(client: Client, m: Message):
         uid = m.from_user.id if m.from_user else 0
@@ -115,7 +110,6 @@ def register(app: Client):
         first_mark = _mark_dm_ready_once(uid)
         if first_mark and OWNER_ID:
             try:
-                # Prefer username mention; fallback to tap-to-mention by id
                 if m.from_user and m.from_user.username:
                     mention = f"@{m.from_user.username}"
                 else:
@@ -125,9 +119,7 @@ def register(app: Client):
                 pass
 
         await m.reply_text(WELCOME_TEXT, reply_markup=_portal_kb(), disable_web_page_preview=True)
-
-        # Prevent duplicate replies from any other /start handlers
-        raise StopPropagation
+        # NOTE: We don't raise StopPropagation on this Pyrogram version.
 
     # Back to start
     @app.on_callback_query(filters.regex(r"^dmf_home$"))
@@ -138,14 +130,14 @@ def register(app: Client):
             await cq.message.reply_text(WELCOME_TEXT, reply_markup=_portal_kb(), disable_web_page_preview=True)
         await cq.answer()
 
-    # Menus
+    # Menus (delegates to handlers.menu if present)
     @app.on_callback_query(filters.regex(r"^dmf_open_menu$"))
     async def open_menu(client: Client, cq: CallbackQuery):
         try:
             from handlers.menu import menu_tabs_text, menu_tabs_kb
             await cq.message.edit_text(menu_tabs_text(), reply_markup=menu_tabs_kb(), disable_web_page_preview=True)
         except Exception:
-            await cq.message.reply_text("💕 Model Menus\nChoose a name:", reply_markup=_contact_models_kb())
+            await cq.message.edit_text("💕 Model Menus\nChoose a name:", reply_markup=_contact_models_kb())
         await cq.answer()
 
     # Contact admins
