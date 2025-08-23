@@ -1,15 +1,11 @@
 import os
 import logging
-from pyrogram import Client
 from dotenv import load_dotenv
+from pyrogram import Client
 
 load_dotenv()
 
-# ---------- logging ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s - %(message)s")
 log = logging.getLogger("SuccuBot")
 
 API_ID = int(os.getenv("API_ID"))
@@ -25,34 +21,36 @@ def _wire(module_name: str, attr: str = "register"):
         getattr(mod, attr)(app)
         log.info("wired: %s", module_name)
     except Exception as e:
-        log.warning("Module not found (skipped): %s (%s)", module_name, e)
+        log.error("Failed to wire %s: %s", module_name, e)
 
 def wire_all():
-    log.info("✅ Starting SuccuBot with enhanced logging")
-    # ---- DM portal lives in root as dm_foolproof ----
+    log.info("✅ Booting SuccuBot")
+    # Portal lives in the root
     _wire("dm_foolproof")
 
-    # ---- core handlers (keep your existing ones) ----
-    _wire("handlers.menu")
-    _wire("handlers.help_panel")
-    _wire("handlers.help_cmd")
-    _wire("handlers.req_handlers")
-    _wire("handlers.enforce_requirements")
-    _wire("handlers.exemptions")
-    _wire("handlers.membership_watch")
-    _wire("handlers.flyer")
-    _wire("handlers.flyer_scheduler")
-    _wire("handlers.schedulemsg")
-    _wire("handlers.warmup")
-    _wire("handlers.hi")
-    _wire("handlers.fun")
-    _wire("handlers.warnings")
-    _wire("handlers.moderation")
-    _wire("handlers.federation")
-    _wire("handlers.summon")
-    _wire("handlers.xp")
-    _wire("handlers.dmnow")
-
+    # Your other modules (keep as you have them)
+    for m in [
+        "handlers.menu",
+        "handlers.help_panel",
+        "handlers.help_cmd",
+        "handlers.req_handlers",
+        "handlers.enforce_requirements",
+        "handlers.exemptions",
+        "handlers.membership_watch",
+        "handlers.flyer",
+        "handlers.flyer_scheduler",
+        "handlers.schedulemsg",
+        "handlers.warmup",
+        "handlers.hi",
+        "handlers.fun",
+        "handlers.warnings",
+        "handlers.moderation",
+        "handlers.federation",
+        "handlers.summon",
+        "handlers.xp",
+        "handlers.dmnow",
+    ]:
+        _wire(m)
     log.info("Handlers wired.")
 
 if __name__ == "__main__":
