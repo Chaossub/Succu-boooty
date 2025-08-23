@@ -1,71 +1,84 @@
-# main.py
 import os
 import logging
 from dotenv import load_dotenv
 from pyrogram import Client
 
+# --------------------------- env & logging ---------------------------
 load_dotenv()
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s"
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
 log = logging.getLogger("SuccuBot")
-log.info("✅ Booting SuccuBot")
 
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
+if not API_ID or not API_HASH or not BOT_TOKEN:
+    log.error("Missing API_ID/API_HASH/BOT_TOKEN.")
+    raise SystemExit(1)
+
+# --------------------------- app ---------------------------
 app = Client(
     "succubot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    in_memory=True
+    parse_mode="html",
+    in_memory=True,
 )
 
-def _wire(module_path: str, label: str = None):
-    label = label or module_path
+# --------------------------- dynamic wiring ---------------------------
+def _wire_one(modname: str):
     try:
-        m = __import__(module_path, fromlist=["register"])
+        m = __import__(modname, fromlist=["register"])
+    except Exception as e:
+        log.error("Failed to import %s: %s", modname, e)
+        return
+    try:
         if hasattr(m, "register"):
             m.register(app)
-            log.info("wired: %s", label)
+            log.info("wired: %s", modname)
         else:
-            log.warning("Module missing register(): %s", module_path)
+            log.warning("%s has no register()", modname)
     except Exception as e:
-        log.error("Failed to wire %s: %s", label, e)
+        log.error("Failed to wire %s: %s", modname, e)
 
-# --- Handlers order ---
-# 1) DM portal (+ DM-ready + contact admins/models + links + help)
-_wire("dm_foolproof", "dm_foolproof")
+def wire_handlers():
+    log.info("✅ Booting SuccuBot")
+    modules = [
+        # root module (NOT under handlers)
+        "dm_foolproof",
 
-# 2) Existing handlers in your repo (leave as-is)
-for mod in [
-    "handlers.menu",
-    "handlers.help_panel",
-    "handlers.help_cmd",
-    "handlers.req_handlers",
-    "handlers.enforce_requirements",
-    "handlers.exemptions",
-    "handlers.membership_watch",
-    "handlers.flyer",
-    "handlers.flyer_scheduler",
-    "handlers.schedulemsg",
-    "handlers.warmup",
-    "handlers.hi",
-    "handlers.fun",
-    "handlers.warnings",
-    "handlers.moderation",
-    "handlers.federation",
-    "handlers.summon",
-    "handlers.xp",
-    "handlers.dmnow",
-]:
-    _wire(mod, mod)
+        # your existing handlers (wire those that exist; missing are skipped gracefully)
+        "handlers.menu",
+        "handlers.help_panel",
+        "handlers.help_cmd",
+        "handlers.req_handlers",
+        "handlers.enforce_requirements",
+        "handlers.exemptions",
+        "handlers.membership_watch",
+        "handlers.flyer",
+        "handlers.flyer_scheduler",
+        "handlers.schedulemsg",
+        "handlers.warmup",
+        "handlers.hi",
+        "handlers.fun",
+        "handlers.warnings",
+        "handlers.moderation",
+        "handlers.federation",
+        "handlers.summon",
+        "handlers.xp",
+        "handlers.dmnow",
+    ]
+    for name in modules:
+        _wire_one(name)
+    log.info("Handlers wired.")
 
-log.info("Handlers wired.")
-
+# --------------------------- main ---------------------------
 if __name__ == "__main__":
+    wire_handlers()
     app.run()
