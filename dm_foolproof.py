@@ -1,8 +1,5 @@
 # dm_foolproof.py
 # DM portal (root): /start portal + DM-ready flag + Contact Admins + Contact Models + Links + Help
-# - Marks users DM-ready once and notifies admins once.
-# - Buttons for both admins (Roni & Ruby) and for contacting models directly.
-# - /dmreadylist shows all DM-ready users (owner/super-admin only).
 
 import os
 from typing import List, Optional
@@ -36,7 +33,7 @@ def _tg_id_url(uid: Optional[int]) -> Optional[str]:
 
 # ---------- Admins / models ----------
 OWNER_ID        = _to_int(os.getenv("OWNER_ID"))
-OWNER_USERNAME  = os.getenv("OWNER_USERNAME")   # optional, for link fallback
+OWNER_USERNAME  = os.getenv("OWNER_USERNAME")
 RONI_NAME       = os.getenv("RONI_NAME", "Roni")
 
 RUBY_ID         = _to_int(os.getenv("RUBY_ID"))
@@ -108,58 +105,62 @@ def _back_to_start_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")]])
 
 def _admins_kb() -> InlineKeyboardMarkup:
-    row1: List[InlineKeyboardButton] = []
-    btn = _open_url_button(f"👑 Message {RONI_NAME}", OWNER_ID, OWNER_USERNAME)
-    if btn: row1.append(btn)
-    btn = _open_url_button(f"💎 Message {RUBY_NAME}", RUBY_ID, RUBY_USERNAME)
-    if btn: row1.append(btn)
+    row: List[InlineKeyboardButton] = []
+    b = _open_url_button(f"👑 Message {RONI_NAME}", OWNER_ID, OWNER_USERNAME)
+    if b: row.append(b)
+    b = _open_url_button(f"💎 Message {RUBY_NAME}", RUBY_ID, RUBY_USERNAME)
+    if b: row.append(b)
 
     rows = []
-    if row1:
-        rows.append(row1)
+    if row: rows.append(row)
     rows.append([InlineKeyboardButton("🙈 Send Anonymous Message", callback_data="dmf_anon_admins")])
     rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_back_welcome")])
     return InlineKeyboardMarkup(rows)
 
-def _contact_models_kb() -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-    # Roni (owner) — ensure she appears here as requested
-    btns_row = []
-    b = _open_url_button(f"💗 {RONI_NAME}", OWNER_ID, OWNER_USERNAME)
-    if b: btns_row.append(b)
-    b = _open_url_button(f"💗 {RUBY_NAME}", RUBY_ID, RUBY_USERNAME)
-    if b:
-        if btns_row: rows.append(btns_row); btns_row = []
-        btns_row.append(b)
-    if btns_row:
-        rows.append(btns_row); btns_row = []
+def _pair_row(btns: List[Optional[InlineKeyboardButton]]) -> Optional[List[InlineKeyboardButton]]:
+    row = [b for b in btns if b is not None]
+    return row if row else None
 
-    row = []
-    b = _open_url_button(f"💗 {RIN_NAME}", RIN_ID, RIN_USERNAME)
-    if b: row.append(b)
-    b = _open_url_button(f"💗 {SAVY_NAME}", SAVY_ID, SAVY_USERNAME)
-    if b: row.append(b)
-    if row: rows.append(row)
+def _contact_models_kb() -> InlineKeyboardMarkup:
+    # First row: Roni + Ruby. Second row: Rin + Savy. (Skip any missing)
+    roni = _open_url_button(f"💗 {RONI_NAME}", OWNER_ID, OWNER_USERNAME)
+    ruby = _open_url_button(f"💗 {RUBY_NAME}", RUBY_ID, RUBY_USERNAME)
+    rin  = _open_url_button(f"💗 {RIN_NAME}",  RIN_ID,  RIN_USERNAME)
+    savy = _open_url_button(f"💗 {SAVY_NAME}", SAVY_ID, SAVY_USERNAME)
+
+    rows: List[List[InlineKeyboardButton]] = []
+    row1 = _pair_row([roni, ruby])
+    row2 = _pair_row([rin, savy])
+    if row1: rows.append(row1)
+    if row2: rows.append(row2)
+
     rows.append([InlineKeyboardButton("⬅️ Back to Menus", callback_data="dmf_open_menu")])
     return InlineKeyboardMarkup(rows)
 
-# ---------- DM-ready ----------
+# ---------- DM-ready (throttle) ----------
+_ALERTED: set[int] = set()  # in-process throttle: ensure single admin alert per user
+
 async def _mark_dm_ready_once(client: Client, m: Message):
-    if not m.from_user:
+    if not m.from_user or not _store:
         return
     uid = m.from_user.id
-    if not _store:
-        return
-    # Only mark & alert once per user
-    if _store.is_dm_ready_global(uid):
-        return
-    with suppress(Exception):
-        _store.set_dm_ready_global(uid, True, by_admin=False)
 
-    # Notify admins once with clickable username (when available)
-    uname = f"@{m.from_user.username}" if m.from_user.username else f"{m.from_user.first_name}"
+    already = _store.is_dm_ready_global(uid)
+    if not already:
+        with suppress(Exception):
+            _store.set_dm_ready_global(uid, True, by_admin=False)
+
+    # Only alert admins once (guard by store + in-proc throttle)
+    if uid in _ALERTED:
+        return
+    if already:
+        return
+    _ALERTED.add(uid)
+
+    uname = f"@{m.from_user.username}" if m.from_user.username else m.from_user.first_name
     txt = f"✅ <b>DM-ready</b> — {uname} just opened the portal."
-    for aid in filter(None, {OWNER_ID, RUBY_ID, SUPER_ADMIN_ID}):
+    # Send to distinct admins
+    for aid in {x for x in (OWNER_ID, RUBY_ID, SUPER_ADMIN_ID) if x}:
         with suppress(Exception):
             await client.send_message(aid, txt)
 
@@ -178,7 +179,7 @@ def register(app: Client):
         await _edit_or_reply(cq, WELCOME_TEXT, _welcome_kb())
         await cq.answer()
 
-    # Menu (delegates to your handlers.menu if present)
+    # Menu (delegates to handlers.menu if present, otherwise fallback)
     @app.on_callback_query(filters.regex("^dmf_open_menu$"))
     async def open_menu(client: Client, cq: CallbackQuery):
         try:
@@ -189,7 +190,6 @@ def register(app: Client):
             return
         except Exception:
             pass
-        # Fallback basic menu
         await _edit_or_reply(cq, "💞 <b>Model Menus</b>\nChoose a name:", _contact_models_kb())
         await cq.answer()
 
@@ -199,13 +199,13 @@ def register(app: Client):
         await _edit_or_reply(cq, "How would you like to reach us?", _admins_kb())
         await cq.answer()
 
-    # Contact Models (explicit)
+    # Contact Models
     @app.on_callback_query(filters.regex("^dmf_contact_models$"))
     async def contact_models(client: Client, cq: CallbackQuery):
         await _edit_or_reply(cq, "Contact a model directly:", _contact_models_kb())
         await cq.answer()
 
-    # Anonymous message entry (placeholder: your anon relay can hook here)
+    # Anonymous message entry (placeholder – your relay hooks here)
     @app.on_callback_query(filters.regex("^dmf_anon_admins$"))
     async def anon_admins(client: Client, cq: CallbackQuery):
         await _edit_or_reply(
@@ -215,7 +215,7 @@ def register(app: Client):
         )
         await cq.answer()
 
-    # Links panel
+    # Links
     @app.on_callback_query(filters.regex("^dmf_models_links$"))
     async def models_links(client: Client, cq: CallbackQuery):
         try:
@@ -229,7 +229,7 @@ def register(app: Client):
         await cq.answer()
 
     # /dmreadylist — admin only
-    @app.on_message(filters.private & filters.command(["dmreadylist", "dmrlist", "dmr"]))
+    @app.on_message(filters.private & filters.command(["dmreadylist","dmrlist","dmr"]))
     async def dmready_list(client: Client, m: Message):
         uid = m.from_user.id if m.from_user else 0
         if not _is_admin(uid):
@@ -241,7 +241,6 @@ def register(app: Client):
         if not data:
             await m.reply_text("No one is marked DM-ready yet.")
             return
-        # Build a neat list with @username when available
         lines = ["<b>DM-ready users</b>:"]
         for s_uid in sorted(data.keys(), key=lambda x: int(x)):
             user_id = int(s_uid)
