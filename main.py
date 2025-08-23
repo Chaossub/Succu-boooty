@@ -28,7 +28,7 @@ def _wire(module_name: str, attr: str = "register"):
 
 def wire_all():
     log.info("✅ Booting SuccuBot")
-    # Portal handler lives in REPO ROOT as dm_foolproof.py
+    # Root-level portal
     _wire("dm_foolproof")
 
     for m in [
