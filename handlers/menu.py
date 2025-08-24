@@ -1,292 +1,212 @@
 # handlers/menu.py
-# Model menus + Contact Models sub-menu with back navigation.
-# - /menu          → open tabs
-# - callbacks      → tabs + contact models + back to portal
+# Menu tree exactly as requested. Admin intake goes to OWNER_ID DMs.
 
-import os
-import time
-from typing import Optional, Tuple, Dict, Set
+from os import getenv
+from typing import Dict, Optional
 
 from pyrogram import Client, filters
-from pyrogram.enums import ChatType
 from pyrogram.types import (
-    Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+    InlineKeyboardMarkup, InlineKeyboardButton,
+    CallbackQuery, Message, ForceReply
 )
-from pymongo import MongoClient
 
-# ---------- Config ----------
-MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB  = os.getenv("MONGO_DBNAME", "succubus")
-COLL      = "model_menus"
+# ---------- ENV ----------
+FIND_ELSEWHERE_URL      = getenv("FIND_ELSEWHERE_URL", "https://example.com/models")
+BUYER_RULES_URL         = getenv("BUYER_RULES_URL", "https://example.com/buyer-rules")
+BUYER_REQUIREMENTS_URL  = getenv("BUYER_REQUIREMENTS_URL", "https://example.com/buyer-requirements")
+GAME_RULES_TEXT         = getenv("GAME_RULES_TEXT", "• Game rules go here.")
+MEMBER_COMMANDS_TEXT    = getenv("MEMBER_COMMANDS_TEXT", "• Members can use: /menu, /help, /portal")
 
-ALLOWED_MODELS = {"roni": "Roni", "ruby": "Ruby", "rin": "Rin", "savy": "Savy"}
+# Models (usernames WITHOUT @)
+MODEL_RONI_USER = getenv("MODEL_RONI_USER", "RoniJane")
+MODEL_RUBY_USER = getenv("MODEL_RUBY_USER", "Ruby")
+MODEL_RIN_USER  = getenv("MODEL_RIN_USER",  "Rin")
+MODEL_SAVY_USER = getenv("MODEL_SAVY_USER", "Savy")
 
-def _to_int(s: Optional[str]) -> Optional[int]:
+# Admins for “Contact Admins”
+ADMIN_RONI_USER = getenv("ADMIN_RONI_USER", MODEL_RONI_USER)
+ADMIN_RUBY_USER = getenv("ADMIN_RUBY_USER", MODEL_RUBY_USER)
+
+def _to_int(x: Optional[str]) -> Optional[int]:
     try:
-        return int(str(s)) if s not in (None, "", "None") else None
+        return int(str(x)) if x not in (None, "", "None") else None
     except Exception:
         return None
 
-# Admin / Model IDs (for edit permissions & contact models)
-SUPER_ADMIN_ID = _to_int(os.getenv("SUPER_ADMIN_ID"))
-OWNER_ID       = _to_int(os.getenv("OWNER_ID"))
+OWNER_ID = _to_int(getenv("OWNER_ID"))
 
-RONI_ID = _to_int(os.getenv("RONI_ID"))
-RUBY_ID = _to_int(os.getenv("RUBY_ID"))
-RIN_ID  = _to_int(os.getenv("RIN_ID"))
-SAVY_ID = _to_int(os.getenv("SAVY_ID"))
-
-RONI_NAME = os.getenv("RONI_NAME", "Roni")
-RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
-RIN_NAME  = os.getenv("RIN_NAME", "Rin")
-SAVY_NAME = os.getenv("SAVY_NAME", "Savy")
-
-_EXTRA_EDITORS: Set[int] = set()
-if os.getenv("MENU_EDITORS"):
-    for tok in os.getenv("MENU_EDITORS").split(","):
-        v = _to_int(tok.strip())
-        if v:
-            _EXTRA_EDITORS.add(v)
-
-ADMIN_IDS: Set[int] = set(i for i in (SUPER_ADMIN_ID, OWNER_ID) if i) | _EXTRA_EDITORS
-MODEL_OWNER_ID = {"Roni": RONI_ID, "Ruby": RUBY_ID, "Rin": RIN_ID, "Savy": SAVY_ID}
-
-# ---------- DB ----------
-_client: Optional[MongoClient] = None
-def _db():
-    global _client
-    if _client is None:
-        if not MONGO_URI:
-            raise RuntimeError("MONGO_URI not set")
-        _client = MongoClient(MONGO_URI, connect=False)
-    return _client[MONGO_DB][COLL]
-
-def set_menu(name: str, text: str, photo_id: Optional[str], by_id: Optional[int]):
-    _db().update_one(
-        {"name": name},
-        {"$set": {"name": name, "text": text, "photo_id": photo_id, "updated_at": int(time.time()), "by": by_id}},
-        upsert=True
-    )
-
-def get_menu(name: str) -> Optional[Dict]:
-    return _db().find_one({"name": name})
-
-def list_menus():
-    return [x["name"] for x in _db().find({}, {"name": 1}).sort("name", 1)]
-
-def delete_menu(name: str) -> bool:
-    return _db().delete_one({"name": name}).deleted_count > 0
-
-# ---------- Permissions ----------
-def _norm_name(raw: str) -> Optional[str]:
-    if not raw: return None
-    return ALLOWED_MODELS.get(raw.strip().lower())
-
-def _is_admin(user_id: Optional[int]) -> bool:
-    return bool(user_id and user_id in ADMIN_IDS)
-
-def _is_model_owner(model: str, user_id: Optional[int]) -> bool:
-    return bool(user_id and MODEL_OWNER_ID.get(model) and MODEL_OWNER_ID[model] == user_id)
-
-def _can_edit(model: str, user_id: Optional[int]) -> bool:
-    return _is_admin(user_id) or _is_model_owner(model, user_id)
-
-# ---------- Parse helpers ----------
-def _extract_text_and_model(m: Message):
-    content = (m.caption or m.text or "").strip()
-    if not content:
-        return None, None
-    parts = content.split(None, 2)
-    if len(parts) < 2:
-        return None, None
-    model = _norm_name(parts[1])
-    if not model:
-        return None, None
-    if len(parts) >= 3 and parts[2].strip():
-        return model, parts[2].strip()
-    lines = content.splitlines()
-    if len(lines) > 1:
-        rest = "\n".join(lines[1:]).strip()
-        if rest:
-            return model, rest
-    return model, None
-
-def _photo_id_from(m: Message) -> Optional[str]:
-    if m.photo:
-        return m.photo[-1].file_id
-    if m.reply_to_message and m.reply_to_message.photo:
-        return m.reply_to_message.photo[-1].file_id
-    return None
+# ---------- simple state for reply flows ----------
+# pending[user_id] = "anon" | "sugg_anon" | "sugg_named"
+_pending: Dict[int, str] = {}
 
 # ---------- Keyboards ----------
-def _tabs_kb(include_back_to_portal: bool = True) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton("Roni", callback_data="menu_tab:Roni"),
-            InlineKeyboardButton("Ruby", callback_data="menu_tab:Ruby"),
-        ],
-        [
-            InlineKeyboardButton("Rin", callback_data="menu_tab:Rin"),
-            InlineKeyboardButton("Savy", callback_data="menu_tab:Savy"),
-        ],
-        [InlineKeyboardButton("💌 Contact Models", callback_data="menu_contact_models")],
-    ]
-    if include_back_to_portal:
-        rows.append([InlineKeyboardButton("◀️ Back", callback_data="menu_home")])
-    return InlineKeyboardMarkup(rows)
-
-def _back_to_tabs_kb() -> InlineKeyboardMarkup:
+def _kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("◀️ Back", callback_data="menu_back_tabs")],
-        [InlineKeyboardButton("🏠 Start", callback_data="dmf_home")],
+        [InlineKeyboardButton("📚 Menus", callback_data="menus")],
+        [InlineKeyboardButton("🔎 Find Our Models Elsewhere", url=FIND_ELSEWHERE_URL)],
+        [InlineKeyboardButton("🛡️ Contact Admins", callback_data="admins")],
+        [InlineKeyboardButton("🧵 Help", callback_data="help")],
     ])
 
-def _contact_models_kb() -> InlineKeyboardMarkup:
-    rows = []
-    row1 = []
-    if RONI_ID: row1.append(InlineKeyboardButton(f"💌 {RONI_NAME}", url=f"tg://user?id={RONI_ID}"))
-    if RUBY_ID: row1.append(InlineKeyboardButton(f"💌 {RUBY_NAME}", url=f"tg://user?id={RUBY_ID}"))
-    if row1: rows.append(row1)
-    row2 = []
-    if RIN_ID:  row2.append(InlineKeyboardButton(f"💌 {RIN_NAME}",  url=f"tg://user?id={RIN_ID}"))
-    if SAVY_ID: row2.append(InlineKeyboardButton(f"💌 {SAVY_NAME}", url=f"tg://user?id={SAVY_ID}"))
-    if row2: rows.append(row2)
-    rows.append([InlineKeyboardButton("◀️ Back to Menus", callback_data="menu_back_tabs")])
-    return InlineKeyboardMarkup(rows)
-
-def menu_tabs_text() -> str:
-    return "💕 <b>Model Menus</b>\nChoose a name:"
-
-def menu_tabs_kb() -> InlineKeyboardMarkup:
-    return _tabs_kb(include_back_to_portal=True)
-
-def _portal_kb() -> InlineKeyboardMarkup:
+def _kb_menus() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💕 Menu", callback_data="dmf_open_menu")],
-        [InlineKeyboardButton("Contact Admins 👑", callback_data="dmf_open_admins")],
-        [InlineKeyboardButton("🔥 Find Our Models Elsewhere", callback_data="dmf_models_links")],
-        [InlineKeyboardButton("❓ Help", callback_data="dmf_help")],
+        [
+            InlineKeyboardButton("💗 Roni", callback_data="menu_roni"),
+            InlineKeyboardButton("💗 Ruby", callback_data="menu_ruby"),
+        ],
+        [
+            InlineKeyboardButton("💗 Rin", callback_data="menu_rin"),
+            InlineKeyboardButton("💗 Savy", callback_data="menu_savy"),
+        ],
+        [InlineKeyboardButton("💬 Contact Models", callback_data="contact_models_all")],
+        [InlineKeyboardButton("◀️ Back", callback_data="back_main")],
     ])
 
-# ---------- Handlers ----------
+def _kb_contact_models_all() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("DM Roni", url=f"https://t.me/{MODEL_RONI_USER}")],
+        [InlineKeyboardButton("DM Ruby", url=f"https://t.me/{MODEL_RUBY_USER}")],
+        [InlineKeyboardButton("DM Rin",  url=f"https://t.me/{MODEL_RIN_USER}")],
+        [InlineKeyboardButton("DM Savy", url=f"https://t.me/{MODEL_SAVY_USER}")],
+        [InlineKeyboardButton("◀️ Back", callback_data="menus")],
+    ])
+
+def _kb_model_single(username: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💌 Open DMs", url=f"https://t.me/{username}")],
+        [InlineKeyboardButton("◀️ Back", callback_data="menus")],
+    ])
+
+def _kb_admins() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👑 Message Roni", url=f"https://t.me/{ADMIN_RONI_USER}")],
+        [InlineKeyboardButton("👑 Message Ruby", url=f"https://t.me/{ADMIN_RUBY_USER}")],
+        [InlineKeyboardButton("🙈 Send Anonymous Message", callback_data="anon")],
+        [InlineKeyboardButton("💡 Suggestion (Anon)", callback_data="sugg_anon")],
+        [InlineKeyboardButton("💡 Suggestion (With Name)", callback_data="sugg_named")],
+        [InlineKeyboardButton("◀️ Back", callback_data="back_main")],
+    ])
+
+def _kb_help() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("‼️ Buyer Rules", url=BUYER_RULES_URL)],
+        [InlineKeyboardButton("✨ Buyer Requirements", url=BUYER_REQUIREMENTS_URL)],
+        [InlineKeyboardButton("❓ Member Commands", callback_data="help_cmds")],
+        [InlineKeyboardButton("🎲 Game Rules", callback_data="help_game")],
+        [InlineKeyboardButton("◀️ Back", callback_data="back_main")],
+    ])
+
+def _kb_help_back() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="help")]])
+
+# ---------- Public: show Main Menu ----------
+async def send_main_menu(app: Client, chat_id: int):
+    await app.send_message(chat_id, "Main Menu", reply_markup=_kb_main())
+
+# ---------- Register handlers ----------
 def register(app: Client):
 
-    @app.on_message(filters.command("addmenu"))
-    async def addmenu_handler(client: Client, m: Message):
-        if m.chat.type != ChatType.PRIVATE:
-            me = await client.get_me()
-            return await m.reply_text(
-                f"Add menus in DM.\nOpen: https://t.me/{me.username}",
-                disable_web_page_preview=True
-            )
+    # Nav: Main <-> submenus
+    @app.on_callback_query(filters.regex("^back_main$"))
+    async def _back_main(_, q: CallbackQuery):
+        await q.message.edit_text("Main Menu", reply_markup=_kb_main())
+        await q.answer()
 
-        model, text = _extract_text_and_model(m)
-        photo_id = _photo_id_from(m)
-        uid = m.from_user.id if m.from_user else None
+    @app.on_callback_query(filters.regex("^menus$"))
+    async def _menus(_, q: CallbackQuery):
+        await q.message.edit_text("Menus", reply_markup=_kb_menus())
+        await q.answer()
 
-        if not model:
-            return await m.reply_text(
-                "Which model? Use one of: <code>Roni</code>, <code>Ruby</code>, <code>Rin</code>, <code>Savy</code>\n\n"
-                "Examples:\n"
-                "<code>/addmenu Roni &lt;b&gt;Roni’s Menu&lt;/b&gt; • GFE $XX • Customs $XX</code>\n"
-                "or send a photo and put the command + text in the caption.",
-                disable_web_page_preview=True
-            )
+    @app.on_callback_query(filters.regex("^admins$"))
+    async def _admins(_, q: CallbackQuery):
+        await q.message.edit_text("Contact Admins", reply_markup=_kb_admins())
+        await q.answer()
 
-        if not _can_edit(model, uid):
-            return await m.reply_text(
-                f"Sorry, you don’t have permission to edit <b>{model}</b>’s menu.\n"
-                "If you are that model, ask an admin to set your user ID (RONI_ID/RUBY_ID/RIN_ID/SAVY_ID)."
-            )
+    @app.on_callback_query(filters.regex("^help$"))
+    async def _help(_, q: CallbackQuery):
+        await q.message.edit_text("Help", reply_markup=_kb_help())
+        await q.answer()
 
-        if not text and not photo_id:
-            return await m.reply_text(
-                "I need the menu text.\n\n"
-                f"Send one message like:\n<code>/addmenu {model}\n&lt;b&gt;Title&lt;/b&gt;\\n• line\\n• line</code>\n"
-                "Or send a photo and put the command + text in the caption.\n"
-                f"You can also reply to a photo with: <code>/addmenu {model} Your text…</code>",
-                disable_web_page_preview=True
-            )
+    # Menus -> each model submenu
+    @app.on_callback_query(filters.regex("^menu_roni$"))
+    async def _menu_roni(_, q: CallbackQuery):
+        await q.message.edit_text("Roni", reply_markup=_kb_model_single(MODEL_RONI_USER))
+        await q.answer()
 
-        set_menu(model, text or "", photo_id, by_id=uid)
-        pretty = f"<b>{model}</b> menu saved"
-        if photo_id and text: pretty += " (photo + text)."
-        elif photo_id:        pretty += " (photo-only)."
-        else:                 pretty += " (text-only)."
-        return await m.reply_text(f"✅ {pretty}")
+    @app.on_callback_query(filters.regex("^menu_ruby$"))
+    async def _menu_ruby(_, q: CallbackQuery):
+        await q.message.edit_text("Ruby", reply_markup=_kb_model_single(MODEL_RUBY_USER))
+        await q.answer()
 
-    @app.on_message(filters.command("menus"))
-    async def menus_handler(client: Client, m: Message):
-        names = list_menus()
-        if not names:
-            return await m.reply_text("No menus saved yet. Use <code>/addmenu Roni ...</code> in DM.")
-        await m.reply_text("Available menus:\n• " + "\n• ".join(names))
+    @app.on_callback_query(filters.regex("^menu_rin$"))
+    async def _menu_rin(_, q: CallbackQuery):
+        await q.message.edit_text("Rin", reply_markup=_kb_model_single(MODEL_RIN_USER))
+        await q.answer()
 
-    @app.on_message(filters.command("deletemenu"))
-    async def deletemenu_handler(client: Client, m: Message):
-        parts = (m.text or "").split(None, 1)
-        if len(parts) < 2:
-            return await m.reply_text("Usage: <code>/deletemenu Roni</code>")
-        model = _norm_name(parts[1])
-        uid = m.from_user.id if m.from_user else None
-        if not model:
-            return await m.reply_text("Pick one of: Roni, Ruby, Rin, Savy")
-        if not _can_edit(model, uid):
-            return await m.reply_text(f"Sorry, you don’t have permission to delete <b>{model}</b>’s menu.")
-        ok = delete_menu(model)
-        await m.reply_text("🗑 Deleted." if ok else f"No menu found for <b>{model}</b>.")
+    @app.on_callback_query(filters.regex("^menu_savy$"))
+    async def _menu_savy(_, q: CallbackQuery):
+        await q.message.edit_text("Savy", reply_markup=_kb_model_single(MODEL_SAVY_USER))
+        await q.answer()
 
-    @app.on_message(filters.command("menu"))
-    async def open_menu(client: Client, m: Message):
-        await m.reply_text(menu_tabs_text(), reply_markup=menu_tabs_kb(), disable_web_page_preview=True)
+    # Menus -> Contact Models (all names → DMs)
+    @app.on_callback_query(filters.regex("^contact_models_all$"))
+    async def _contact_models_all(_, q: CallbackQuery):
+        await q.message.edit_text("Contact Models", reply_markup=_kb_contact_models_all())
+        await q.answer()
 
-    # ---- callbacks ----
-    @app.on_callback_query(filters.regex(r"^menu_back_tabs$"))
-    async def on_back_tabs(client: Client, cq: CallbackQuery):
-        try:
-            await cq.message.edit_text(menu_tabs_text(), reply_markup=menu_tabs_kb(), disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text(menu_tabs_text(), reply_markup=menu_tabs_kb(), disable_web_page_preview=True)
-        await cq.answer()
+    # Help leaves
+    @app.on_callback_query(filters.regex("^help_cmds$"))
+    async def _help_cmds(_, q: CallbackQuery):
+        await q.message.edit_text(MEMBER_COMMANDS_TEXT, reply_markup=_kb_help_back(), disable_web_page_preview=True)
+        await q.answer()
 
-    @app.on_callback_query(filters.regex(r"^menu_home$"))
-    async def on_menu_home(client: Client, cq: CallbackQuery):
-        try:
-            await cq.message.edit_text("Welcome to the Sanctuary portal 💋 Choose an option:", reply_markup=_portal_kb(), disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text("Welcome to the Sanctuary portal 💋 Choose an option:", reply_markup=_portal_kb(), disable_web_page_preview=True)
-        await cq.answer()
+    @app.on_callback_query(filters.regex("^help_game$"))
+    async def _help_game(_, q: CallbackQuery):
+        await q.message.edit_text(GAME_RULES_TEXT, reply_markup=_kb_help_back(), disable_web_page_preview=True)
+        await q.answer()
 
-    @app.on_callback_query(filters.regex(r"^menu_contact_models$"))
-    async def on_contact_models(client: Client, cq: CallbackQuery):
-        try:
-            await cq.message.edit_text("Contact a model directly:", reply_markup=_contact_models_kb(), disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text("Contact a model directly:", reply_markup=_contact_models_kb(), disable_web_page_preview=True)
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^menu_tab:(Roni|Ruby|Rin|Savy)$"))
-    async def on_tab(client: Client, cq: CallbackQuery):
-        model = cq.data.split(":", 1)[1]
-        doc = get_menu(model)
-        if not doc:
-            await cq.answer("No menu yet for " + model, show_alert=True)
+    # -------- Anonymous / Suggestions intake --------
+    async def _start_intake(q: CallbackQuery, kind: str, prompt: str):
+        u = q.from_user
+        if not u:
+            await q.answer("Cannot start input.", show_alert=True)
             return
-        text = (doc.get("text") or "").strip()
-        photo_id = doc.get("photo_id")
+        _pending[u.id] = kind
+        await q.message.reply_text(prompt, reply_markup=ForceReply(selective=True))
+        await q.answer()
 
-        if photo_id:
-            try:
-                await cq.message.delete()
-            except Exception:
-                pass
-            try:
-                await client.send_photo(cq.from_user.id, photo_id, caption=text or "", reply_markup=_back_to_tabs_kb())
-            except Exception:
-                await client.send_message(cq.from_user.id, text or "(photo unavailable)", reply_markup=_back_to_tabs_kb(), disable_web_page_preview=True)
-        else:
-            try:
-                await cq.message.edit_text(text or "(empty)", reply_markup=_back_to_tabs_kb(), disable_web_page_preview=True)
-            except Exception:
-                await cq.message.reply_text(text or "(empty)", reply_markup=_back_to_tabs_kb(), disable_web_page_preview=True)
-        await cq.answer()
+    @app.on_callback_query(filters.regex("^anon$"))
+    async def _anon(_, q: CallbackQuery):
+        await _start_intake(q, "anon", "Send your anonymous message for admins:")
+
+    @app.on_callback_query(filters.regex("^sugg_anon$"))
+    async def _sugg_anon(_, q: CallbackQuery):
+        await _start_intake(q, "sugg_anon", "Send your suggestion (anonymous):")
+
+    @app.on_callback_query(filters.regex("^sugg_named$"))
+    async def _sugg_named(_, q: CallbackQuery):
+        await _start_intake(q, "sugg_named", "Send your suggestion (your @ will be included):")
+
+    @app.on_message(filters.private & filters.reply & filters.text)
+    async def _capture(client: Client, m: Message):
+        uid = m.from_user.id if m.from_user else None
+        if not uid or uid not in _pending:
+            return
+        kind = _pending.pop(uid)
+
+        if not OWNER_ID:
+            await m.reply_text("Thanks! (Note: OWNER_ID not set, so I can’t DM the owner.)")
+            return
+
+        tag = {"anon": "Anonymous Message", "sugg_anon": "Suggestion (Anon)", "sugg_named": "Suggestion (Named)"}[kind]
+        who = "anonymous"
+        if kind == "sugg_named" and m.from_user:
+            if m.from_user.username:
+                who = f"@{m.from_user.username}"
+            else:
+                who = f"{m.from_user.first_name or 'User'} ({m.from_user.id})"
+
+        text = m.text or ""
+        header = f"📩 {tag}\nFrom: {who}\n\n"
+        await client.send_message(OWNER_ID, header + text)
+        await m.reply_text("Got it! I DM’d the admins. ✅")
