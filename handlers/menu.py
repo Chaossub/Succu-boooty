@@ -1,5 +1,6 @@
 # handlers/menu.py
 from pyrogram import Client, filters
+from pyrogram.handlers import MessageHandler, CallbackQueryHandler
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -26,9 +27,8 @@ RUBY_USERNAME = os.getenv("RUBY_USERNAME", "ruby_username_here")
 SAVY_USERNAME = os.getenv("SAVY_USERNAME", "savy_username_here")
 RIN_USERNAME  = os.getenv("RIN_USERNAME",  "rin_username_here")
 
-# Build t.me links if usernames provided (no leading @ needed)
 def _tg_link(username: str) -> str:
-    u = username.strip().lstrip("@")
+    u = (username or "").strip().lstrip("@")
     return f"https://t.me/{u}" if u else "https://t.me/"
 
 # ========= KEYBOARDS =========
@@ -95,9 +95,6 @@ def _kb_help() -> InlineKeyboardMarkup:
 def _kb_back_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Main", callback_data="back_main")]])
 
-def _kb_back_menus() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menus", callback_data="menus")]])
-
 # ========= MESSAGE SENDING HELPERS =========
 async def _safe_edit(message: Message, text: str, reply_markup: InlineKeyboardMarkup):
     try:
@@ -117,7 +114,6 @@ async def _menus(client: Client, q: CallbackQuery):
 
 async def _contact_models(client: Client, q: CallbackQuery):
     await q.answer()
-    # Show DM links 2x2; only Back to Main
     await _safe_edit(q.message, "💌 Contact Models", _kb_contact_models())
 
 async def _contact_admins(client: Client, q: CallbackQuery):
@@ -136,7 +132,6 @@ async def _find_elsewhere(client: Client, q: CallbackQuery):
 # ----- Model Menus (not DMs) -----
 async def _model_menu(client: Client, q: CallbackQuery, whom: str):
     await q.answer()
-    # Title & back target are the same for all models
     title_map = {
         "roni": "Roni’s Menu",
         "ruby": "Ruby’s Menu",
@@ -144,8 +139,7 @@ async def _model_menu(client: Client, q: CallbackQuery, whom: str):
         "rin":  "Rin’s Menu",
     }
     title = title_map.get(whom.lower(), "Model Menu")
-    # The actual buttons/content inside each model’s menu will be added later
-    # For now, present a simple placeholder 2x2 layout + Back to Menus (as requested)
+    # Placeholder 2×2 layout + Back to Menus (we'll wire real per-model menus later)
     kb = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("Book Model", callback_data=f"book:{whom}"),
@@ -157,9 +151,9 @@ async def _model_menu(client: Client, q: CallbackQuery, whom: str):
     )
     await _safe_edit(q.message, title, kb)
 
-# Placeholder callbacks for model buttons (no-op for now, per your instructions)
+# Placeholders (no-ops for now)
 async def _placeholder(client: Client, q: CallbackQuery):
-    await q.answer("Coming soon ✨ (we’ll wire menus after buttons are confirmed)", show_alert=False)
+    await q.answer("Coming soon ✨ (we’ll wire menus after buttons are confirmed)")
 
 # ----- Help content senders -----
 async def _help_rules(client: Client, q: CallbackQuery):
@@ -178,15 +172,14 @@ async def _help_games(client: Client, q: CallbackQuery):
     await q.answer()
     await _safe_edit(q.message, GAME_RULES_TEXT, _kb_back_main())
 
-# ----- Admin inbox (deliver to your DM) -----
-# For now, show simple prompts; the actual flow (collect text & forward) can be added after buttons are confirmed.
+# ----- Admin inbox placeholders -----
 async def _admin_anon(client: Client, q: CallbackQuery):
     await q.answer()
-    await _safe_edit(q.message, "✉️ Send me your anonymous message here.\n\n(Feature wiring next — for now this is a placeholder.)", _kb_back_main())
+    await _safe_edit(q.message, "✉️ Send me your anonymous message here.\n\n(Feature wiring next — placeholder.)", _kb_back_main())
 
 async def _admin_suggest(client: Client, q: CallbackQuery):
     await q.answer()
-    await _safe_edit(q.message, "💡 Send your suggestion.\n\n(Feature wiring next — for now this is a placeholder.)", _kb_back_main())
+    await _safe_edit(q.message, "💡 Send your suggestion.\n\n(Feature wiring next — placeholder.)", _kb_back_main())
 
 # ----- Back to Main (keep the welcome text visible) -----
 async def _back_main(client: Client, q: CallbackQuery):
@@ -195,37 +188,32 @@ async def _back_main(client: Client, q: CallbackQuery):
 
 # ========= REGISTRATION =========
 def register(app: Client):
-    # Commands that should open the main menu, keeping the welcome text
-    app.add_handler(filters.command(["start", "portal"]))(lambda c, m: _start(c, m))
+    # /start and /portal show welcome text + main keyboard
+    app.add_handler(MessageHandler(_start, filters.command(["start", "portal"])))
 
-    # Callback routes
-    app.add_handler(filters.callback_query("menus"))(lambda c, q: _menus(c, q))
-    app.add_handler(filters.callback_query("contact_models"))(lambda c, q: _contact_models(c, q))
-    app.add_handler(filters.callback_query("contact_admins"))(lambda c, q: _contact_admins(c, q))
-    app.add_handler(filters.callback_query("help"))(lambda c, q: _help(c, q))
-    app.add_handler(filters.callback_query("find_elsewhere"))(lambda c, q: _find_elsewhere(c, q))
-
-    # Back
-    app.add_handler(filters.callback_query("back_main"))(lambda c, q: _back_main(c, q))
+    # Callback routes (use regex patterns)
+    app.add_handler(CallbackQueryHandler(_menus,           filters.regex(r"^menus$")))
+    app.add_handler(CallbackQueryHandler(_contact_models,  filters.regex(r"^contact_models$")))
+    app.add_handler(CallbackQueryHandler(_contact_admins,  filters.regex(r"^contact_admins$")))
+    app.add_handler(CallbackQueryHandler(_help,            filters.regex(r"^help$")))
+    app.add_handler(CallbackQueryHandler(_find_elsewhere,  filters.regex(r"^find_elsewhere$")))
+    app.add_handler(CallbackQueryHandler(_back_main,       filters.regex(r"^back_main$")))
 
     # Help content pages
-    app.add_handler(filters.callback_query("help_rules"))(lambda c, q: _help_rules(c, q))
-    app.add_handler(filters.callback_query("help_requirements"))(lambda c, q: _help_requirements(c, q))
-    app.add_handler(filters.callback_query("help_member_cmds"))(lambda c, q: _help_member_cmds(c, q))
-    app.add_handler(filters.callback_query("help_games"))(lambda c, q: _help_games(c, q))
+    app.add_handler(CallbackQueryHandler(_help_rules,        filters.regex(r"^help_rules$")))
+    app.add_handler(CallbackQueryHandler(_help_requirements, filters.regex(r"^help_requirements$")))
+    app.add_handler(CallbackQueryHandler(_help_member_cmds,  filters.regex(r"^help_member_cmds$")))
+    app.add_handler(CallbackQueryHandler(_help_games,        filters.regex(r"^help_games$")))
 
-    # Admin inbox placeholders
-    app.add_handler(filters.callback_query("admin_anon"))(lambda c, q: _admin_anon(c, q))
-    app.add_handler(filters.callback_query("admin_suggest"))(lambda c, q: _admin_suggest(c, q))
+    # Admin placeholders
+    app.add_handler(CallbackQueryHandler(_admin_anon,    filters.regex(r"^admin_anon$")))
+    app.add_handler(CallbackQueryHandler(_admin_suggest, filters.regex(r"^admin_suggest$")))
 
     # Model menus
-    app.add_handler(filters.callback_query("^model_menu:roni$"))(lambda c, q: _model_menu(c, q, "roni"))
-    app.add_handler(filters.callback_query("^model_menu:ruby$"))(lambda c, q: _model_menu(c, q, "ruby"))
-    app.add_handler(filters.callback_query("^model_menu:savy$"))(lambda c, q: _model_menu(c, q, "savy"))
-    app.add_handler(filters.callback_query("^model_menu:rin$"))(lambda c, q: _model_menu(c, q, "rin"))
+    app.add_handler(CallbackQueryHandler(lambda c, q: _model_menu(c, q, "roni"), filters.regex(r"^model_menu:roni$")))
+    app.add_handler(CallbackQueryHandler(lambda c, q: _model_menu(c, q, "ruby"), filters.regex(r"^model_menu:ruby$")))
+    app.add_handler(CallbackQueryHandler(lambda c, q: _model_menu(c, q, "savy"), filters.regex(r"^model_menu:savy$")))
+    app.add_handler(CallbackQueryHandler(lambda c, q: _model_menu(c, q, "rin"),  filters.regex(r"^model_menu:rin$")))
 
-    # Placeholders for future wiring (no-op responses for now)
-    app.add_handler(filters.callback_query("^book:"))(_placeholder)
-    app.add_handler(filters.callback_query("^tip:"))(_placeholder)
-    app.add_handler(filters.callback_query("^specials:"))(_placeholder)
-    app.add_handler(filters.callback_query("^games:"))(_placeholder)
+    # Placeholder actions
+    app.add_handler(CallbackQueryHandler(_placeholder, filters.regex(r"^(book:|tip:|specials:|games:).+")))
