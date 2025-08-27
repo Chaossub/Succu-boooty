@@ -55,8 +55,13 @@ def wire_all_handlers():
     wire("handlers.contact_admins")
     wire("handlers.help_panel")
 
+    # Requirement reminders, sweeps, etc (optional if you use them)
+    wire("handlers.enforce_requirements")
+
+    # NEW: /test command to DM “test” to DM-ready users who haven’t met requirements
+    wire("handlers.test_send")
+
     # IMPORTANT: Do NOT wire handlers.dm_portal (it duplicates callbacks & /start)
-    # Remove or comment out any previous wiring of that module.
 
     # ---- Optional extras (uncomment if you actually use them) ----
     # wire("handlers.warnings")
