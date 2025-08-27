@@ -1,5 +1,6 @@
 # dm_foolproof.py
 import os
+import logging
 from typing import Optional
 
 from pyrogram import Client, filters
@@ -10,6 +11,8 @@ from pyrogram.types import (
     InlineKeyboardButton,
 )
 from pyrogram.errors import MessageNotModified
+
+log = logging.getLogger("SuccuBot")
 
 # Optional: DM-ready marker
 try:
@@ -49,7 +52,7 @@ WELCOME_TEXT = (
 )
 
 
-# ── Main keyboard (EXACT layout you requested) ────────────────────────────────
+# ── Main keyboard (EXACT layout) ──────────────────────────────────────────────
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -64,9 +67,10 @@ def kb_main() -> InlineKeyboardMarkup:
 # ── Register ──────────────────────────────────────────────────────────────────
 def register(app: Client):
 
-    # /start — this is the single portal we keep
+    # /start — this is the ONLY portal
     @app.on_message(filters.private & filters.command(["start"]))
     async def start_portal(client: Client, m: Message):
+        log.info("PORTAL: dm_foolproof /start")
         try:
             if _store and m.from_user:
                 uid = m.from_user.id
@@ -102,4 +106,3 @@ def register(app: Client):
                 reply_markup=kb_main(),
                 disable_web_page_preview=True,
             )
-
