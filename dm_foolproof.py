@@ -1,11 +1,12 @@
 # dm_foolproof.py
-# Single /start entrypoint & main portal. Robust DM-ready marking + no duplicate menus.
+# Single /start entrypoint & main portal. Robust DM-ready + no duplicate menus.
 
 from __future__ import annotations
 import os
 import time
+import json
 import logging
-from typing import Optional, Callable
+from typing import Optional, Callable, Iterable, Union
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import MessageNotModified
@@ -24,6 +25,8 @@ MODELS_LINKS_TEXT = os.getenv("FIND_MODELS_TEXT") or (
     "All verified off-platform links for our models are collected here. "
     "Check pinned messages or official posts for updates."
 )
+
+DMREADY_NOTIFY_USER = os.getenv("DMREADY_NOTIFY_USER", "1") == "1"
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
 def kb_main() -> InlineKeyboardMarkup:
@@ -49,16 +52,15 @@ async def _safe_edit(message, text, **kwargs):
                 pass
     return None
 
-# ── DM-ready backend discovery ──────────────────────────────────────────────
-# We try various stores & method names so this works across your different versions.
+# ── DM-ready backend discovery (optional) ────────────────────────────────────
 _DM_SET_FN: Optional[Callable[[int], bool]] = None
 
 def _discover_dm_store():
+    """Find any available store; otherwise we’ll still announce without persisting."""
     global _DM_SET_FN
     if _DM_SET_FN:
         return
-
-    # Try req_store.ReqStore
+    # req_store.ReqStore
     try:
         from req_store import ReqStore  # type: ignore
         store = ReqStore()
@@ -82,8 +84,7 @@ def _discover_dm_store():
             return
     except Exception:
         pass
-
-    # Try requirements_store (alt name)
+    # requirements_store
     try:
         import requirements_store as rqs  # type: ignore
         if hasattr(rqs, "set_dm_ready") and hasattr(rqs, "is_dm_ready"):
@@ -97,45 +98,33 @@ def _discover_dm_store():
             return
     except Exception:
         pass
-
-    # Try common free functions lying around
-    for mod_name in ("dm_ready", "utils.dm_ready", "utils.req_helpers"):
-        try:
-            mod = __import__(mod_name, fromlist=["*"])
-            cand_names = ("mark_dm_ready", "set_dm_ready", "add_dm_ready")
-            for n in cand_names:
-                fn = getattr(mod, n, None)
-                if callable(fn):
-                    def _fn(uid: int, _fn=fn) -> bool:  # type: ignore
-                        try:
-                            return bool(_fn(uid))
-                        except TypeError:
-                            _fn(uid)  # maybe returns None
-                            return True
-                    _DM_SET_FN = _fn
-                    log.info(f"DM-ready backend: {mod_name}.{n}")
-                    return
-        except Exception:
-            pass
-
-    # Nothing found — we’ll still broadcast but can’t persist
-    log.info("DM-ready backend: none (broadcast-only)")
+    # Fallback: none
+    log.info("DM-ready backend: none (announce-only)")
 
 _discover_dm_store()
 
-def _set_dm_ready(uid: int) -> bool:
-    """Returns True if we *changed* state to ready; False if already ready or no backend."""
-    if _DM_SET_FN:
-        try:
-            return bool(_DM_SET_FN(uid))
-        except Exception as e:
-            log.warning(f"DM-ready backend failed for {uid}: {e}")
-    # No backend — consider it 'changed' so we still announce once
-    return True
-
-# ── Broadcast (dedup per user so it won’t spam) ─────────────────────────────
+# ── Local dedupe/barebones cache (so we don’t spam announces) ────────────────
 _last_broadcast_ts = {}  # uid -> ts
 BROADCAST_WINDOW = 60.0  # seconds
+
+def _parse_group_ids(env_value: str) -> Iterable[Union[int, str]]:
+    """
+    Accepts: "-100123,-100456,@mygroup" (ints or @usernames).
+    Returns iterator of cleaned ids/usernames.
+    """
+    for raw in env_value.split(","):
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("@"):
+            yield s  # username
+            continue
+        # try int
+        try:
+            yield int(s)
+        except ValueError:
+            # accept bare username without @ as well
+            yield ("@" + s) if s and not s.startswith("@") else s
 
 async def _announce_ready(client: Client, m: Message):
     uid = m.from_user.id if m.from_user else 0
@@ -144,16 +133,29 @@ async def _announce_ready(client: Client, m: Message):
         return
     _last_broadcast_ts[uid] = now
 
-    groups = [g.strip() for g in os.getenv("SANCTUARY_GROUP_IDS", "").split(",") if g.strip()]
-    if not groups:
-        return
     name = (m.from_user.first_name if m.from_user else "Someone")
     text = f"✅ DM-ready — {name} just opened the portal."
-    for g in groups:
+
+    env = os.getenv("SANCTUARY_GROUP_IDS", "")
+    if not env:
+        return
+    for gid in _parse_group_ids(env):
         try:
-            await client.send_message(int(g), text)
-        except Exception:
-            pass
+            await client.send_message(gid, text)  # works for int id or @username
+        except Exception as e:
+            log.warning(f"DM-ready announce failed for {gid}: {e}")
+
+def _set_dm_ready(uid: int) -> bool:
+    """
+    Returns True if changed to ready (or unknown but we still want to announce).
+    """
+    if _DM_SET_FN:
+        try:
+            return bool(_DM_SET_FN(uid))
+        except Exception as e:
+            log.warning(f"DM-ready backend failed for {uid}: {e}")
+    # No backend means we still announce once.
+    return True
 
 # ── Register ─────────────────────────────────────────────────────────────────
 def register(app: Client):
@@ -166,6 +168,11 @@ def register(app: Client):
         if changed:
             log.info(f"DM-ready set for user {uid}")
             await _announce_ready(client, m)
+            if DMREADY_NOTIFY_USER:
+                try:
+                    await m.reply_text("✅ You’re DM-ready! I can message you privately now.", quote=True)
+                except Exception:
+                    pass
         await m.reply_text(WELCOME_TEXT, reply_markup=kb_main(), disable_web_page_preview=True)
 
     # /start in groups → just show portal once
