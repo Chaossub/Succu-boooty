@@ -1,4 +1,4 @@
-# main.py — clean wiring + graceful shutdown (no duplicate /start)
+# main.py — SuccuBot bootstrap
 import os
 import asyncio
 import signal
@@ -28,7 +28,7 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    plugins=None,  # we wire modules manually
+    plugins=None,  # wiring is explicit
 )
 
 # ---------- Wiring helper ----------
@@ -44,26 +44,23 @@ def wire(import_path: str):
         log.error(f"❌ Failed to wire {import_path}: {e}", exc_info=True)
 
 def wire_all():
-    # The ONLY /start portal lives in dm_foolproof.py
+    # Core entrypoint
     wire("dm_foolproof")
 
-    # Legacy shim (safe — no /start), maps old callbacks to new handlers
-    wire("handlers.dm_portal")
-
-    # Core UI
+    # Menus / admin UI
     wire("handlers.menu")
     wire("handlers.createmenu")
     wire("handlers.contact_admins")
     wire("handlers.help_panel")
 
-    # Requirements / ops
-    wire("handlers.enforce_requirements")
-    wire("handlers.req_handlers")
-    wire("handlers.test_send")
-
     # DM tools
     wire("handlers.dmnow")
     wire("handlers.dm_admin")
+
+    # Requirement checks / reminders
+    wire("handlers.enforce_requirements")
+    wire("handlers.req_handlers")
+    wire("handlers.test_send")
 
     # Flyers / schedulers
     wire("handlers.flyer")
@@ -75,10 +72,12 @@ def wire_all():
     wire("handlers.warnings")
     wire("handlers.federation")
 
-    # Misc feature sets
+    # Fun & XP
     wire("handlers.summon")
     wire("handlers.xp")
     wire("handlers.fun")
+
+    # Misc extras
     wire("handlers.hi")
     wire("handlers.warmup")
     wire("handlers.health")
@@ -86,7 +85,8 @@ def wire_all():
 
     # Admin utilities
     wire("handlers.bloop")
-    wire("handlers.whoami")  # keep only if file exists
+    wire("handlers.whoami")           # only if file exists
+    wire("handlers.dm_ready_admin")   # NEW: /dmreadylist
 
 # ---------- Graceful shutdown ----------
 _shutdown_called = False
@@ -98,7 +98,7 @@ def _graceful_stop(*_):
     _shutdown_called = True
     log.info("🛑 Stop signal received. Shutting down gracefully...")
 
-    # Stop APScheduler instances if those modules expose a scheduler
+    # Stop APScheduler jobs if present
     try:
         from handlers.flyer_scheduler import scheduler as flyer_sched
         flyer_sched.shutdown(wait=False)
