@@ -1,50 +1,85 @@
-# handlers/dm_portal.py  (callbacks only; NO /start here)
-import os
+# handlers/dm_portal.py  — legacy shim (NO /start here)
+from __future__ import annotations
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import CallbackQuery
+from pyrogram.errors import MessageNotModified
 
-# Text for the external links panel
-MODELS_LINKS_TEXT = os.getenv("MODELS_LINKS_TEXT", "").strip() or (
-    "<b>Find Our Models Elsewhere</b>\n\n"
-    "• Roni — Instagram / Fans\n"
-    "• Ruby — Instagram / Fans\n"
-    "• Rin — Instagram / Fans\n"
-    "• Savy — Instagram / Fans\n\n"
-    "Ask an admin if you need a direct link."
-)
-
-def _back_home_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Start", callback_data="dmf_home")]])
+# Small helper so we don't throw if message text didn't change
+async def _safe_edit(msg, text, **kwargs):
+    try:
+        return await msg.edit_text(text, **kwargs)
+    except MessageNotModified:
+        # try updating only the markup if text is identical
+        if "reply_markup" in kwargs and kwargs["reply_markup"] is not None:
+            try:
+                return await msg.edit_reply_markup(kwargs["reply_markup"])
+            except MessageNotModified:
+                pass
+    return None
 
 def register(app: Client):
+    """
+    Legacy callback aliases ONLY.
+    This module intentionally does NOT register /start or send any new messages.
+    It forwards old callback_data values to the new handlers.
+    """
 
-    # Open Contact Admins (panel lives in handlers.contact_admins)
-    @app.on_callback_query(filters.regex(r"^dmf_open_admins$"))
-    async def open_admins_cb(client: Client, cq: CallbackQuery):
+    # Old: "open_menu"  -> new Menus tab
+    @app.on_callback_query(filters.regex(r"^(open_menu|portal:menus)$"))
+    async def _legacy_open_menu(client: Client, cq: CallbackQuery):
         try:
-            from handlers.contact_admins import build_admins_kb, CONTACT_TEXT
-            await cq.message.edit_text(CONTACT_TEXT, reply_markup=build_admins_kb(), disable_web_page_preview=True)
+            from handlers.menu import menu_tabs_text, menu_tabs_kb
+            await _safe_edit(cq.message, menu_tabs_text(),
+                             reply_markup=menu_tabs_kb(),
+                             disable_web_page_preview=True)
         except Exception:
-            await cq.message.reply_text("Contact panel is unavailable right now.", reply_markup=_back_home_kb())
+            pass
         await cq.answer()
 
-    # Links panel
-    @app.on_callback_query(filters.regex(r"^dmf_models_links$"))
-    async def on_links(client: Client, cq: CallbackQuery):
+    # Old: "open_help"  -> new Help root
+    @app.on_callback_query(filters.regex(r"^(open_help|portal:help)$"))
+    async def _legacy_open_help(client: Client, cq: CallbackQuery):
         try:
-            await cq.message.edit_text(MODELS_LINKS_TEXT, reply_markup=_back_home_kb(), disable_web_page_preview=False)
+            from handlers.help_panel import HELP_MENU_TEXT, _help_menu_kb
+            await _safe_edit(cq.message, HELP_MENU_TEXT,
+                             reply_markup=_help_menu_kb(),
+                             disable_web_page_preview=True)
         except Exception:
-            await cq.message.reply_text(MODELS_LINKS_TEXT, reply_markup=_back_home_kb(), disable_web_page_preview=False)
+            pass
         await cq.answer()
 
-    # Help root (actual help menu lives in handlers.help_panel)
-    @app.on_callback_query(filters.regex(r"^dmf_help$"))
-    async def on_help_root(client: Client, cq: CallbackQuery):
-        # Just hand off; handlers.help_panel registers the real 'dmf_help' content
+    # Old: "open_links" -> Find Our Models Elsewhere panel
+    @app.on_callback_query(filters.regex(r"^(open_links|portal:links)$"))
+    async def _legacy_open_links(client: Client, cq: CallbackQuery):
         try:
-            from handlers.help_panel import _help_menu_kb, HELP_MENU_TEXT  # if exposed
-            await cq.message.edit_text(HELP_MENU_TEXT, reply_markup=_help_menu_kb(), disable_web_page_preview=True)
+            from dm_foolproof import MODELS_LINKS_TEXT, _back_home_kb
+            await _safe_edit(cq.message, MODELS_LINKS_TEXT,
+                             reply_markup=_back_home_kb(),
+                             disable_web_page_preview=False)
         except Exception:
-            # If help_panel handles its own 'dmf_help', it will edit this on its own
+            pass
+        await cq.answer()
+
+    # Old: "open_admins" -> Contact Admins panel
+    @app.on_callback_query(filters.regex(r"^(open_admins|portal:admins)$"))
+    async def _legacy_open_admins(client: Client, cq: CallbackQuery):
+        try:
+            from handlers.contact_admins import CONTACT_TEXT, _kb_admins
+            await _safe_edit(cq.message, CONTACT_TEXT,
+                             reply_markup=_kb_admins(),
+                             disable_web_page_preview=True)
+        except Exception:
+            pass
+        await cq.answer()
+
+    # Old: "back_home" -> Back to Start
+    @app.on_callback_query(filters.regex(r"^(back_home|portal:home)$"))
+    async def _legacy_back_home(client: Client, cq: CallbackQuery):
+        try:
+            from dm_foolproof import WELCOME_TEXT, kb_main
+            await _safe_edit(cq.message, WELCOME_TEXT,
+                             reply_markup=kb_main(),
+                             disable_web_page_preview=True)
+        except Exception:
             pass
         await cq.answer()
