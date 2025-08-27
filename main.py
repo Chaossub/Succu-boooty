@@ -1,122 +1,107 @@
+# main.py
 import os
 import logging
-from dotenv import load_dotenv
-from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from importlib import import_module
 
-# ── Load env & logging ──────────────────────────────────────────────────────────
-load_dotenv()
+from dotenv import load_dotenv
+from pyrogram import Client
+
+# ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s"
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
 )
-log = logging.getLogger("SuccuBot")
+logger = logging.getLogger("SuccuBot")
 
-# ── Telegram creds ─────────────────────────────────────────────────────────────
+# ── Env ───────────────────────────────────────────────────────────────────────
+load_dotenv()
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-if not API_ID or not API_HASH or not BOT_TOKEN:
-    raise SystemExit("Missing API_ID/API_HASH/BOT_TOKEN in environment")
+if not (API_ID and API_HASH and BOT_TOKEN):
+    logger.warning("API_ID / API_HASH / BOT_TOKEN are not fully set in the environment")
 
-# ── Create Pyrogram client ─────────────────────────────────────────────────────
-app = Client("succubot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# ── Import all handlers ───────────────────────────────────────────────────────
-import dm_foolproof
-from handlers import (
-    menu,
-    help_panel,
-    help_cmd,
-    req_handlers,
-    enforce_requirements,
-    exemptions,
-    membership_watch,
-    flyer,
-    flyer_scheduler,
-    schedulemsg,
-    warmup,
-    hi,
-    fun,
-    warnings,
-    moderation,
-    federation,
-    summon,
-    xp,
-    dmnow,
+# ── Pyrogram Client ───────────────────────────────────────────────────────────
+app = Client(
+    "succubot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workdir=os.getcwd(),
+    in_memory=True,  # keeps sessions ephemeral on hosts like Render/Heroku
 )
 
-ALL_MODULES = [
-    dm_foolproof,
-    menu,
-    help_panel,
-    help_cmd,
-    req_handlers,
-    enforce_requirements,
-    exemptions,
-    membership_watch,
-    flyer,
-    flyer_scheduler,
-    schedulemsg,
-    warmup,
-    hi,
-    fun,
-    warnings,
-    moderation,
-    federation,
-    summon,
-    xp,
-    dmnow,
-]
-
-# ── Wire handlers only once ────────────────────────────────────────────────────
-def wire_handlers_once():
-    if getattr(app, "_succubot_handlers_loaded", False):
+# ── Helper to wire modules safely ─────────────────────────────────────────────
+def wire(module_path: str, title: str | None = None) -> None:
+    """
+    Import `<module_path>`, call its `register(app)` if present,
+    and log either 'wired:' or a clear error with traceback.
+    """
+    display = title or module_path
+    try:
+        mod = import_module(module_path)
+    except Exception as e:
+        logger.error("Failed to import %s: %s", display, e, exc_info=True)
         return
-    for mod in ALL_MODULES:
-        if hasattr(mod, "register"):
-            try:
-                mod.register(app)
-                log.info(f"wired: {mod.__name__}")
-            except Exception as e:
-                log.error(f"Failed to wire {mod.__name__}: {e}")
-    setattr(app, "_succubot_handlers_loaded", True)
-    log.info("Handlers wired.")
 
-# ── Welcome banner + Main Menu ─────────────────────────────────────────────────
-WELCOME_BANNER = os.getenv("WELCOME_BANNER", "").strip() or (
-    "🔥 Welcome to Succubus Sanctuary 🔥\n"
-    "Your naughty little helper is ready. Use the buttons below. 😈"
-)
+    register = getattr(mod, "register", None)
+    if not callable(register):
+        logger.error("Failed to wire %s: no register(app) found", display)
+        return
 
-def _kb_main():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💕 Menus", callback_data="menus")],
-        [InlineKeyboardButton("💞 Contact Models", callback_data="contact_models")],
-        [InlineKeyboardButton("👑 Contact Admins", callback_data="contact_admins")],
-        [InlineKeyboardButton("🔥 Find Our Models Elsewhere", callback_data="find_elsewhere")],
-        [InlineKeyboardButton("❓ Help", callback_data="help_root")],
-    ])
+    try:
+        register(app)
+        logger.info("wired: %s", display)
+    except Exception as e:
+        logger.error("Failed to wire %s: %s", display, e, exc_info=True)
 
-@app.on_message(filters.command(["start", "portal"]))
-async def start_cmd(_, m: Message):
-    await m.reply_text(
-        WELCOME_BANNER,
-        reply_markup=_kb_main(),
-        disable_web_page_preview=True
-    )
 
-@app.on_message(filters.command("menu"))
-async def menu_cmd(_, m: Message):
-    await m.reply_text(
-        WELCOME_BANNER,
-        reply_markup=_kb_main(),
-        disable_web_page_preview=True
-    )
+# ── Wire all handlers here ────────────────────────────────────────────────────
+def wire_all_handlers() -> None:
+    """
+    Keep this list in the exact order you want handlers to be registered.
+    Nothing here uses filters.edited or on_client_started.
+    """
+    # root-level helper (per your note: dm_foolproof is at the project root)
+    wire("dm_foolproof", "dm_foolproof")
 
-# ── Entry point ────────────────────────────────────────────────────────────────
+    # primary UI / commands
+    wire("handlers.menu", "handlers.menu")
+    wire("handlers.help_panel", "handlers.help_panel")
+    wire("handlers.help_cmd", "handlers.help_cmd")
+    wire("handlers.req_handlers", "handlers.req_handlers")
+
+    # policy/automation layers
+    wire("handlers.enforce_requirements", "handlers.enforce_requirements")
+    wire("handlers.exemptions", "handlers.exemptions")
+    wire("handlers.membership_watch", "handlers.membership_watch")
+
+    # scheduled / flyer systems
+    wire("handlers.flyer", "handlers.flyer")
+    # flyer_scheduler needs to import & schedule jobs on import/register
+    wire("handlers.flyer_scheduler", "handlers.flyer_scheduler")
+
+    # scheduled messages module
+    wire("handlers.schedulemsg", "handlers.schedulemsg")
+
+    # fun & misc UX
+    wire("handlers.warmup", "handlers.warmup")
+    wire("handlers.hi", "handlers.hi")
+    wire("handlers.fun", "handlers.fun")
+    wire("handlers.warnings", "handlers.warnings")
+    wire("handlers.moderation", "handlers.moderation")
+    wire("handlers.federation", "handlers.federation")
+    wire("handlers.summon", "handlers.summon")
+    wire("handlers.xp", "handlers.xp")
+    wire("handlers.dmnow", "handlers.dmnow")
+
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    log.info("✅ Booting SuccuBot")
-    wire_handlers_once()
+    logger.info("✅ Booting SuccuBot")
+    wire_all_handlers()
+
+    # Start the bot (no @app.on_client_started, no idle() needed with run())
     app.run()
+
