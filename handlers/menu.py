@@ -1,12 +1,13 @@
 # handlers/menu.py
 from __future__ import annotations
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
-# ── Models config (RONI FIRST) ────────────────────────────────────────────────
+# ── Models (RONI FIRST) ───────────────────────────────────────────────────────
+# Set env vars WITHOUT '@': RONI_USERNAME, RUBY_USERNAME, RIN_USERNAME, SAVY_USERNAME
 MODELS: List[Dict[str, str]] = [
     {"key": "roni", "display": "Roni", "emoji": "💘", "username": os.getenv("RONI_USERNAME", "").strip("@")},
     {"key": "ruby", "display": "Ruby", "emoji": "💘", "username": os.getenv("RUBY_USERNAME", "").strip("@")},
@@ -14,13 +15,7 @@ MODELS: List[Dict[str, str]] = [
     {"key": "savy", "display": "Savy", "emoji": "💘", "username": os.getenv("SAVY_USERNAME", "").strip("@")},
 ]
 
-# ── Text blocks ───────────────────────────────────────────────────────────────
-WELCOME_ABOVE_MAIN = (
-    "🔥 <b>Welcome to SuccuBot</b>\n"
-    "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
-    "Choose an option below:"
-)
-
+# ── Text ─────────────────────────────────────────────────────────────────────
 def menu_tabs_text() -> str:
     return "💕 <b>Menus</b>\nPick a model or contact the team."
 
@@ -33,10 +28,8 @@ def contact_models_text() -> str:
 # ── Keyboards ────────────────────────────────────────────────────────────────
 def menu_tabs_kb() -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
-    # One row per model
     for m in MODELS:
         rows.append([InlineKeyboardButton(f"{m['emoji']} {m['display']}", callback_data=f"menu:model:{m['key']}")])
-    # Contact + Back
     rows.append([InlineKeyboardButton("💞 Contact Models", callback_data="menu:contact_models")])
     rows.append([InlineKeyboardButton("⬅️ Back to Main", callback_data="dmf_home")])
     return InlineKeyboardMarkup(rows)
@@ -71,7 +64,7 @@ def contact_models_kb() -> InlineKeyboardMarkup:
 def register(app: Client):
 
     # MENUS root
-    @app.on_callback_query(filters.regex(r"^menu_root$|^dmf_open_menu$"))
+    @app.on_callback_query(filters.regex(r"^menu_root$|^dmf_open_menu$|^m:menus$"))
     async def show_menus(client: Client, cq: CallbackQuery):
         await cq.message.edit_text(menu_tabs_text(), reply_markup=menu_tabs_kb(), disable_web_page_preview=True)
         await cq.answer()
@@ -96,7 +89,7 @@ def register(app: Client):
         await cq.message.edit_text(menu_tabs_text(), reply_markup=menu_tabs_kb(), disable_web_page_preview=True)
         await cq.answer()
 
-    # Alert stubs
+    # Alerts
     @app.on_callback_query(filters.regex(r"^menu:tip_coming$"))
     async def tip_coming(client: Client, cq: CallbackQuery):
         await cq.answer("Payments: Coming soon 💸", show_alert=True)
