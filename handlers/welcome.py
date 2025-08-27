@@ -31,7 +31,7 @@ WELCOME_PHOTO = os.getenv("WELCOME_PHOTO")  # file_id or URL
 GOODBYE_PHOTO = os.getenv("GOODBYE_PHOTO")  # file_id or URL
 
 # Button labels
-BTN_MENU   = os.getenv("BTN_MENU",  "💕 Menu")
+BTN_MENU   = os.getenv("BTN_MENU",  "💕 Menus")
 BTN_DM     = os.getenv("BTN_DM",    "💌 DM Now")
 BTN_RULES  = os.getenv("BTN_RULES", "‼️ Rules")
 BTN_BUYER  = os.getenv("BTN_BUYER", "✨ Buyer Requirements")
@@ -109,9 +109,9 @@ def _kb(dm_username: Optional[str]) -> InlineKeyboardMarkup:
     rows = []
     # Row 1: DM deep link (portal)
     if dm_username:
-        rows.append([InlineKeyboardButton(BTN_DM, url=f"https://t.me/{dm_username}?start=ready")])
-    # Row 2: Menu
-    rows.append([InlineKeyboardButton(BTN_MENU, callback_data="dmf_open_menu")])
+        rows.append([InlineKeyboardButton(BTN_DM, url=f"https://t.me/{dm_username}?start=portal")])
+    # Row 2: Menus (match handlers.menu)
+    rows.append([InlineKeyboardButton(BTN_MENU, callback_data="dmf_open_menus")])
     # Row 3: Rules + Buyer Requirements
     rows.append([
         InlineKeyboardButton(BTN_RULES, callback_data="dmf_rules"),
@@ -132,7 +132,10 @@ async def _send_welcome(client: Client, chat_id: int, user: Optional[User], repl
         if WELCOME_PHOTO:
             await client.send_photo(chat_id, WELCOME_PHOTO, caption=text, reply_markup=kb)
         else:
-            await client.send_message(chat_id, text, reply_markup=kb, reply_to_message_id=reply_to or 0)
+            if reply_to:
+                await client.send_message(chat_id, text, reply_markup=kb, reply_to_message_id=reply_to)
+            else:
+                await client.send_message(chat_id, text, reply_markup=kb)
     except Exception:
         await client.send_message(chat_id, text, reply_markup=kb)
 
