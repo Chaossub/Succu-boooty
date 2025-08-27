@@ -1,4 +1,5 @@
 # main.py
+# main.py
 import logging
 import os
 from pyrogram import Client
@@ -32,7 +33,7 @@ app = Client(
 
 # ---------- Utility ----------
 def wire(import_path: str):
-    """Import module and call register(app) if present."""
+    """Import module and call register(app) if present. Logs on failure, keeps going."""
     try:
         mod = __import__(import_path, fromlist=["register"])
         if hasattr(mod, "register"):
@@ -45,45 +46,53 @@ def wire(import_path: str):
 
 # ---------- Handlers ----------
 def wire_all_handlers():
-    # The ONLY /start portal (keep this as the single entry)
+    # The ONLY /start portal — keep just this one to prevent duplicates.
     wire("dm_foolproof")
 
-    # Core UI and panels
-    wire("handlers.menu")            # menus + model menus
-    wire("handlers.createmenu")      # /createmenu <model> <text>
-    wire("handlers.contact_admins")  # contact admins callbacks (no /start)
-    wire("handlers.help_panel")      # help panel buttons
+    # Core UI & panels
+    wire("handlers.menu")             # Menus UI (💕 Menus, model menus)
+    wire("handlers.createmenu")       # /createmenu <model> <text>
+    wire("handlers.contact_admins")   # Contact Admins callbacks (no /start inside)
+    wire("handlers.help_panel")       # Help buttons/panels
 
-    # Ops / requirements
-    wire("handlers.enforce_requirements")  # reqstatus/reqremind/etc
-    wire("handlers.test_send")             # /test -> DM "test" to DM-ready missing reqs
+    # Requirements / Ops
+    wire("handlers.enforce_requirements")  # /reqstatus, /reqremind, /reqreport, /reqsweep, etc.
+    wire("handlers.req_handlers")          # legacy req commands (/reqadd, /reqgame, /reqexport, ...)
+    wire("handlers.test_send")             # /test -> DM "test" to DM-ready missing requirements
 
-    # DM helper
-    wire("handlers.dmnow")          # /dmnow -> deep link + mark DM-ready
+    # DM tools
+    wire("handlers.dmnow")         # /dmnow -> deep link to DM + mark DM-ready
+    wire("handlers.dm_admin")      # /dmreadylist, /dmreadyclear
+
+    # Schedulers & Flyers
+    wire("handlers.flyer")              # /flyer, /addflyer, /deleteflyer, /flyerhelp, ...
+    wire("handlers.flyer_scheduler")    # /scheduleflyer, /listscheduledflyers, /cancelflyer, ...
+    wire("handlers.schedulemsg")        # /schedulemsg, /listmsgs, /cancelmsg
+
+    # Moderation & Federation
+    wire("handlers.moderation")    # /warn, /warns, /mute, /ban, /kick, /userinfo, ...
+    wire("handlers.warnings")      # alternate warnings module (if present)
+    wire("handlers.federation")    # /createfed, /fedban, /fedadmins, ...
+
+    # Summons / XP / Fun / Misc
+    wire("handlers.summon")        # /summon, /summonall, /trackall
+    wire("handlers.xp")            # /naughtystats, /resetxp (and XP-linked fun cmds)
+    wire("handlers.fun")           # /bite, /kiss, /spank, /tease (standalone fun)
+    wire("handlers.misc")          # /ping, etc.
+    wire("handlers.hi")            # /hi
+    wire("handlers.warmup")        # /warmup
+    wire("handlers.health")        # healthcheck if present
+    wire("handlers.welcome")       # welcome extras (should NOT own /start)
 
     # Admin utilities
-    wire("handlers.bloop")          # /bloop -> full command list (admin-only)
-    wire("handlers.whoami")         # /whoami -> show caller's Telegram ID
+    wire("handlers.bloop")         # /bloop -> full command index (admin-only)
+    wire("handlers.whoami")        # /whoami -> show caller's Telegram ID
 
-    # ❌ DO NOT wire the old portal; it duplicates /start
+    # ❌ IMPORTANT: Do NOT wire the old portal (it duplicates /start)
     # wire("handlers.dm_portal")
-
-    # Optional extras (uncomment only if you actually use them and understand overlap)
-    # wire("handlers.warnings")
-    # wire("handlers.moderation")
-    # wire("handlers.federation")
-    # wire("handlers.summon")
-    # wire("handlers.xp")
-    # wire("handlers.flyer")
-    # wire("handlers.flyer_scheduler")
-    # wire("handlers.schedulemsg")
-    # wire("handlers.req_handlers")
-    # wire("handlers.welcome")
-    # wire("handlers.health")
-    # wire("handlers.fun")
-    # wire("handlers.hi")
 
 if __name__ == "__main__":
     wire_all_handlers()
     log.info("🚀 SuccuBot starting…")
     app.run()
+
