@@ -24,10 +24,9 @@ except Exception:
 
 # In-memory dedupe for /start: (chat_id, user_id) -> last_ts
 _RECENT_STARTS: Dict[Tuple[int, int], float] = {}
-_START_DEDUP_WINDOW_SEC = 5.0  # window to ignore duplicate /start bursts
+_START_DEDUP_WINDOW_SEC = 5.0  # ignore duplicate /start bursts within this window
 
-
-# ── Safe edit helpers (NO new-message fallback) ───────────────────────────────
+# ---------- Safe edit helpers (NO new-message fallback) ----------
 async def safe_edit_text(msg, text: str, **kwargs):
     try:
         return await msg.edit_text(text, **kwargs)
@@ -40,8 +39,7 @@ async def safe_edit_text(msg, text: str, **kwargs):
                 pass
     return None
 
-
-# ── Portal copy ───────────────────────────────────────────────────────────────
+# ---------- Portal copy ----------
 WELCOME_TEXT = (
     "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
     "Your naughty little helper inside the Sanctuary — ready to keep things fun, "
@@ -49,8 +47,7 @@ WELCOME_TEXT = (
     "✨ <i>Use the menu below to navigate!</i>"
 )
 
-
-# ── Main keyboard (exact 4 buttons, “Menus” with s) ──────────────────────────
+# ---------- Main keyboard (4 buttons; “Menus” with s) ----------
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -61,8 +58,7 @@ def kb_main() -> InlineKeyboardMarkup:
         ]
     )
 
-
-# ── DM-ready helper ───────────────────────────────────────────────────────────
+# ---------- DM-ready helper ----------
 def _mark_dm_ready(uid: int) -> bool:
     if not _store or not uid:
         return False
@@ -81,18 +77,16 @@ def _mark_dm_ready(uid: int) -> bool:
         log.warning(f"DM-ready mark failed for {uid}: {e}")
     return False
 
-
-# ── Links panel text (from env: FIND_MODELS_TEXT) ─────────────────────────────
+# ---------- Links panel text (from env) ----------
 MODELS_LINKS_TEXT = os.getenv("FIND_MODELS_TEXT", "").strip() or "<b>Find Our Models Elsewhere</b>"
 
 def _back_home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Start", callback_data="dmf_home")]])
 
-
-# ── Register ──────────────────────────────────────────────────────────────────
+# ---------- Register handlers ----------
 def register(app: Client):
 
-    # /start — the ONLY portal (deduped)
+    # /start — SINGLE portal (deduped guard protects against stray duplicate handlers/processes)
     @app.on_message(filters.private & filters.command(["start"]))
     async def start_portal(client: Client, m: Message):
         if not m.from_user:
@@ -101,13 +95,11 @@ def register(app: Client):
         key = (m.chat.id, m.from_user.id)
         now = time.time()
         last = _RECENT_STARTS.get(key, 0.0)
-
-        # If another process/handler fires within the window, ignore duplicates
         if now - last < _START_DEDUP_WINDOW_SEC:
             log.info(f"/start deduped for user={key[1]} chat={key[0]}")
             return
-
         _RECENT_STARTS[key] = now
+
         log.info("PORTAL: dm_foolproof /start")
 
         # Mark DM-ready if possible
@@ -117,10 +109,10 @@ def register(app: Client):
         except Exception:
             pass
 
-        # Send the welcome once
+        # Send welcome once
         await m.reply_text(WELCOME_TEXT, reply_markup=kb_main(), disable_web_page_preview=True)
 
-        # Post a single confirmation line (not another welcome)
+        # Optional confirmation line
         if marked:
             name = m.from_user.first_name or "Someone"
             try:
@@ -155,13 +147,6 @@ def register(app: Client):
         await q.answer()
         await safe_edit_text(q.message, MODELS_LINKS_TEXT, reply_markup=_back_home_kb(), disable_web_page_preview=False)
 
-    # Help root (hand off to help_panel if available)
-    @app.on_callback_query(filters.regex(r"^dmf_help$"))
-    async def open_help(client: Client, q: CallbackQuery):
-        await q.answer()
-        try:
-            from handlers.help_panel import HELP_MENU_TEXT, _help_menu_kb
-            await safe_edit_text(q.message, HELP_MENU_TEXT, reply_markup=_help_menu_kb(), disable_web_page_preview=True)
-        except Exception:
-            await safe_edit_text(q.message, "<b>Help</b>\nChoose an option.", reply_markup=_back_home_kb(), disable_web_page_preview=True)
-
+    # Help root (handlers.help_panel owns dmf_help; keep this minimal or remove)
+    # If handlers.help_panel registers dmf_help (it does), you can omit this handler.
+    # Leaving it out avoids double-handling. Ensure main.py wires handlers.help_panel.
