@@ -1,7 +1,8 @@
 # dm_foolproof.py
 import os
+import time
 import logging
-from typing import Optional
+from typing import Optional, Dict, Tuple
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -20,6 +21,10 @@ try:
     _store: Optional["ReqStore"] = ReqStore()
 except Exception:
     _store = None
+
+# In-memory dedupe for /start: (chat_id, user_id) -> last_ts
+_RECENT_STARTS: Dict[Tuple[int, int], float] = {}
+_START_DEDUP_WINDOW_SEC = 5.0  # window to ignore duplicate /start bursts
 
 
 # ── Safe edit helpers (NO new-message fallback) ───────────────────────────────
@@ -93,21 +98,37 @@ def _back_home_kb() -> InlineKeyboardMarkup:
 # ── Register ──────────────────────────────────────────────────────────────────
 def register(app: Client):
 
-    # /start — the ONLY portal
+    # /start — the ONLY portal (deduped)
     @app.on_message(filters.private & filters.command(["start"]))
     async def start_portal(client: Client, m: Message):
+        if not m.from_user:
+            return
+
+        key = (m.chat.id, m.from_user.id)
+        now = time.time()
+        last = _RECENT_STARTS.get(key, 0.0)
+
+        # If another process/handler fires within the window, ignore duplicates
+        if now - last < _START_DEDUP_WINDOW_SEC:
+            log.info(f"/start deduped for user={key[1]} chat={key[0]}")
+            return
+
+        _RECENT_STARTS[key] = now
         log.info("PORTAL: dm_foolproof /start")
+
+        # Mark DM-ready if possible
         marked = False
         try:
-            if m.from_user:
-                marked = _mark_dm_ready(m.from_user.id)
+            marked = _mark_dm_ready(m.from_user.id)
         except Exception:
             pass
 
+        # Send the welcome once
         await m.reply_text(WELCOME_TEXT, reply_markup=kb_main(), disable_web_page_preview=True)
 
+        # Post a single confirmation line (not another welcome)
         if marked:
-            name = m.from_user.first_name if m.from_user else "Someone"
+            name = m.from_user.first_name or "Someone"
             try:
                 await m.reply_text(f"✅ DM-ready — {name} just opened the portal.")
             except Exception:
