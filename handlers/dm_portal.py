@@ -27,9 +27,12 @@ def register(app: Client):
     async def _legacy_open_menu(client: Client, cq: CallbackQuery):
         try:
             from handlers.menu import menu_tabs_text, menu_tabs_kb
-            await _safe_edit(cq.message, menu_tabs_text(),
-                             reply_markup=menu_tabs_kb(),
-                             disable_web_page_preview=True)
+            await _safe_edit(
+                cq.message,
+                menu_tabs_text(),
+                reply_markup=menu_tabs_kb(),
+                disable_web_page_preview=True,
+            )
         except Exception:
             pass
         await cq.answer()
@@ -39,9 +42,12 @@ def register(app: Client):
     async def _legacy_open_help(client: Client, cq: CallbackQuery):
         try:
             from handlers.help_panel import HELP_MENU_TEXT, _help_menu_kb
-            await _safe_edit(cq.message, HELP_MENU_TEXT,
-                             reply_markup=_help_menu_kb(),
-                             disable_web_page_preview=True)
+            await _safe_edit(
+                cq.message,
+                HELP_MENU_TEXT,
+                reply_markup=_help_menu_kb(),
+                disable_web_page_preview=True,
+            )
         except Exception:
             pass
         await cq.answer()
@@ -51,9 +57,12 @@ def register(app: Client):
     async def _legacy_open_links(client: Client, cq: CallbackQuery):
         try:
             from dm_foolproof import MODELS_LINKS_TEXT, _back_home_kb
-            await _safe_edit(cq.message, MODELS_LINKS_TEXT,
-                             reply_markup=_back_home_kb(),
-                             disable_web_page_preview=False)
+            await _safe_edit(
+                cq.message,
+                MODELS_LINKS_TEXT,
+                reply_markup=_back_home_kb(),
+                disable_web_page_preview=False,
+            )
         except Exception:
             pass
         await cq.answer()
@@ -63,9 +72,12 @@ def register(app: Client):
     async def _legacy_open_admins(client: Client, cq: CallbackQuery):
         try:
             from handlers.contact_admins import CONTACT_TEXT, _kb_admins
-            await _safe_edit(cq.message, CONTACT_TEXT,
-                             reply_markup=_kb_admins(),
-                             disable_web_page_preview=True)
+            await _safe_edit(
+                cq.message,
+                CONTACT_TEXT,
+                reply_markup=_kb_admins(),
+                disable_web_page_preview=True,
+            )
         except Exception:
             pass
         await cq.answer()
@@ -75,9 +87,12 @@ def register(app: Client):
     async def _legacy_back_home(client: Client, cq: CallbackQuery):
         try:
             from dm_foolproof import WELCOME_TEXT, kb_main
-            await _safe_edit(cq.message, WELCOME_TEXT,
-                             reply_markup=kb_main(),
-                             disable_web_page_preview=True)
+            await _safe_edit(
+                cq.message,
+                WELCOME_TEXT,
+                reply_markup=kb_main(),
+                disable_web_page_preview=True,
+            )
         except Exception:
             pass
         await cq.answer()
