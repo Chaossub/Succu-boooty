@@ -8,7 +8,6 @@ from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQ
 from pyrogram.errors import MessageNotModified
 
 # ── Models (RONI FIRST) ───────────────────────────────────────────────────────
-# Set env WITHOUT '@': RONI_USERNAME, RUBY_USERNAME, RIN_USERNAME, SAVY_USERNAME
 MODELS: List[Dict[str, str]] = [
     {"key": "roni", "display": "Roni", "emoji": "💘", "username": os.getenv("RONI_USERNAME", "").strip("@")},
     {"key": "ruby", "display": "Ruby", "emoji": "💘", "username": os.getenv("RUBY_USERNAME", "").strip("@")},
