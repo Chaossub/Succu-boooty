@@ -1,16 +1,14 @@
-# handlers/dm_portal.py  — legacy shim (NO /start here)
+# handlers/dm_portal.py — legacy shim (NO /start here)
 from __future__ import annotations
 from pyrogram import Client, filters
 from pyrogram.types import CallbackQuery
 from pyrogram.errors import MessageNotModified
 
-# Small helper so we don't throw if message text didn't change
 async def _safe_edit(msg, text, **kwargs):
     try:
         return await msg.edit_text(text, **kwargs)
     except MessageNotModified:
-        # try updating only the markup if text is identical
-        if "reply_markup" in kwargs and kwargs["reply_markup"] is not None:
+        if kwargs.get("reply_markup") is not None:
             try:
                 return await msg.edit_reply_markup(kwargs["reply_markup"])
             except MessageNotModified:
@@ -24,7 +22,7 @@ def register(app: Client):
     It forwards old callback_data values to the new handlers.
     """
 
-    # Old: "open_menu"  -> new Menus tab
+    # Old -> Menus
     @app.on_callback_query(filters.regex(r"^(open_menu|portal:menus)$"))
     async def _legacy_open_menu(client: Client, cq: CallbackQuery):
         try:
@@ -36,7 +34,7 @@ def register(app: Client):
             pass
         await cq.answer()
 
-    # Old: "open_help"  -> new Help root
+    # Old -> Help
     @app.on_callback_query(filters.regex(r"^(open_help|portal:help)$"))
     async def _legacy_open_help(client: Client, cq: CallbackQuery):
         try:
@@ -48,7 +46,7 @@ def register(app: Client):
             pass
         await cq.answer()
 
-    # Old: "open_links" -> Find Our Models Elsewhere panel
+    # Old -> Links
     @app.on_callback_query(filters.regex(r"^(open_links|portal:links)$"))
     async def _legacy_open_links(client: Client, cq: CallbackQuery):
         try:
@@ -60,7 +58,7 @@ def register(app: Client):
             pass
         await cq.answer()
 
-    # Old: "open_admins" -> Contact Admins panel
+    # Old -> Contact Admins
     @app.on_callback_query(filters.regex(r"^(open_admins|portal:admins)$"))
     async def _legacy_open_admins(client: Client, cq: CallbackQuery):
         try:
@@ -72,7 +70,7 @@ def register(app: Client):
             pass
         await cq.answer()
 
-    # Old: "back_home" -> Back to Start
+    # Old -> Back to Start
     @app.on_callback_query(filters.regex(r"^(back_home|portal:home)$"))
     async def _legacy_back_home(client: Client, cq: CallbackQuery):
         try:
