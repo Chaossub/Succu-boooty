@@ -1,21 +1,14 @@
 # handlers/bloop.py
 from __future__ import annotations
-import os
 from pyrogram import Client, filters
 from pyrogram.types import Message
-
-# ---- Access control ----
-OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").replace(" ", "").split(",") if x.isdigit()}
-SUPER_ADMIN_IDS = {int(x) for x in os.getenv("SUPER_ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}
-ADMIN_IDS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}
-ALLOWED = OWNER_IDS | SUPER_ADMIN_IDS | ADMIN_IDS
-
+from utils.admin_check import is_admin
 
 def register(app: Client):
 
     @app.on_message(filters.command(["bloop"]))
     async def bloop_help(client: Client, m: Message):
-        if not m.from_user or m.from_user.id not in ALLOWED:
+        if not m.from_user or not is_admin(m.from_user.id):
             return await m.reply_text("❌ You’re not allowed to use this command.")
 
         text = """🐰 <b>SuccuBot Command List</b> 🐰
@@ -113,5 +106,4 @@ def register(app: Client):
   /fun – fun placeholder
   /game – game command
 """
-
         await m.reply_text(text, disable_web_page_preview=True)
