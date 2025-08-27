@@ -1,17 +1,18 @@
 # dm_foolproof.py
-# Single /start entrypoint & main portal. Robust DM-ready + no duplicate menus.
+# Single /start entrypoint & main portal.
+# Marks users DM-ready (persisted), notifies OWNER_ID & any in DMREADY_NOTIFY_TO,
+# and edits menus in-place (no duplicates).
 
 from __future__ import annotations
-import os
-import time
-import json
-import logging
-from typing import Optional, Callable, Iterable, Union
+import os, time, logging
+from typing import Union
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import MessageNotModified
+from utils.dmready_store import DMReadyStore
 
 log = logging.getLogger("dm_foolproof")
+store = DMReadyStore()
 
 # ── Texts ────────────────────────────────────────────────────────────────────
 WELCOME_TEXT = (
@@ -19,14 +20,35 @@ WELCOME_TEXT = (
     "Your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
     "✨ <i>Use the menu below to navigate!</i>"
 )
-
 MODELS_LINKS_TEXT = os.getenv("FIND_MODELS_TEXT") or (
     "✨ <b>Find Our Models Elsewhere</b> ✨\n\n"
     "All verified off-platform links for our models are collected here. "
     "Check pinned messages or official posts for updates."
 )
 
-DMREADY_NOTIFY_USER = os.getenv("DMREADY_NOTIFY_USER", "1") == "1"
+# ── Notification targets ─────────────────────────────────────────────────────
+def _parse_targets(env_value: str) -> list[Union[int, str]]:
+    out = []
+    for raw in env_value.split(","):
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("@"):
+            out.append(s)
+        else:
+            try:
+                out.append(int(s))
+            except ValueError:
+                out.append("@" + s)
+    return out
+
+_notify_targets = _parse_targets(
+    os.getenv("DMREADY_NOTIFY_TO", str(os.getenv("OWNER_ID") or "").strip())
+)
+_group_targets = _parse_targets(os.getenv("SANCTUARY_GROUP_IDS", ""))
+
+_last_announce: dict[int, float] = {}
+ANNOUNCE_WINDOW = 60.0  # seconds
 
 # ── Keyboards ────────────────────────────────────────────────────────────────
 def kb_main() -> InlineKeyboardMarkup:
@@ -40,7 +62,7 @@ def kb_main() -> InlineKeyboardMarkup:
 def _back_home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Main", callback_data="dmf_home")]])
 
-# ── Safe edit helper ────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 async def _safe_edit(message, text, **kwargs):
     try:
         return await message.edit_text(text, **kwargs)
@@ -52,130 +74,44 @@ async def _safe_edit(message, text, **kwargs):
                 pass
     return None
 
-# ── DM-ready backend discovery (optional) ────────────────────────────────────
-_DM_SET_FN: Optional[Callable[[int], bool]] = None
-
-def _discover_dm_store():
-    """Find any available store; otherwise we’ll still announce without persisting."""
-    global _DM_SET_FN
-    if _DM_SET_FN:
-        return
-    # req_store.ReqStore
-    try:
-        from req_store import ReqStore  # type: ignore
-        store = ReqStore()
-        if hasattr(store, "set_dm_ready_global") and hasattr(store, "is_dm_ready_global"):
-            def _fn(uid: int) -> bool:
-                if not store.is_dm_ready_global(uid):
-                    store.set_dm_ready_global(uid, True, by_admin=False)
-                    return True
-                return False
-            _DM_SET_FN = _fn
-            log.info("DM-ready backend: req_store.ReqStore (global)")
-            return
-        if hasattr(store, "set_dm_ready") and hasattr(store, "is_dm_ready"):
-            def _fn(uid: int) -> bool:
-                if not store.is_dm_ready(uid):
-                    store.set_dm_ready(uid, True)
-                    return True
-                return False
-            _DM_SET_FN = _fn
-            log.info("DM-ready backend: req_store.ReqStore (legacy)")
-            return
-    except Exception:
-        pass
-    # requirements_store
-    try:
-        import requirements_store as rqs  # type: ignore
-        if hasattr(rqs, "set_dm_ready") and hasattr(rqs, "is_dm_ready"):
-            def _fn(uid: int) -> bool:
-                if not rqs.is_dm_ready(uid):
-                    rqs.set_dm_ready(uid, True)
-                    return True
-                return False
-            _DM_SET_FN = _fn
-            log.info("DM-ready backend: requirements_store")
-            return
-    except Exception:
-        pass
-    # Fallback: none
-    log.info("DM-ready backend: none (announce-only)")
-
-_discover_dm_store()
-
-# ── Local dedupe/barebones cache (so we don’t spam announces) ────────────────
-_last_broadcast_ts = {}  # uid -> ts
-BROADCAST_WINDOW = 60.0  # seconds
-
-def _parse_group_ids(env_value: str) -> Iterable[Union[int, str]]:
-    """
-    Accepts: "-100123,-100456,@mygroup" (ints or @usernames).
-    Returns iterator of cleaned ids/usernames.
-    """
-    for raw in env_value.split(","):
-        s = raw.strip()
-        if not s:
-            continue
-        if s.startswith("@"):
-            yield s  # username
-            continue
-        # try int
+async def _notify_all(client: Client, text: str):
+    for tgt in _notify_targets:
         try:
-            yield int(s)
-        except ValueError:
-            # accept bare username without @ as well
-            yield ("@" + s) if s and not s.startswith("@") else s
-
-async def _announce_ready(client: Client, m: Message):
-    uid = m.from_user.id if m.from_user else 0
-    now = time.time()
-    if uid in _last_broadcast_ts and now - _last_broadcast_ts[uid] < BROADCAST_WINDOW:
-        return
-    _last_broadcast_ts[uid] = now
-
-    name = (m.from_user.first_name if m.from_user else "Someone")
-    text = f"✅ DM-ready — {name} just opened the portal."
-
-    env = os.getenv("SANCTUARY_GROUP_IDS", "")
-    if not env:
-        return
-    for gid in _parse_group_ids(env):
-        try:
-            await client.send_message(gid, text)  # works for int id or @username
+            await client.send_message(tgt, text)
         except Exception as e:
-            log.warning(f"DM-ready announce failed for {gid}: {e}")
+            log.warning(f"DM-ready notify failed for {tgt}: {e}")
 
-def _set_dm_ready(uid: int) -> bool:
-    """
-    Returns True if changed to ready (or unknown but we still want to announce).
-    """
-    if _DM_SET_FN:
+async def _announce_groups(client: Client, text: str):
+    for tgt in _group_targets:
         try:
-            return bool(_DM_SET_FN(uid))
+            await client.send_message(tgt, text)
         except Exception as e:
-            log.warning(f"DM-ready backend failed for {uid}: {e}")
-    # No backend means we still announce once.
-    return True
+            log.warning(f"Group announce failed for {tgt}: {e}")
 
 # ── Register ─────────────────────────────────────────────────────────────────
 def register(app: Client):
 
-    # /start in PRIVATE → mark DM-ready + portal
+    # /start in PRIVATE → mark & notify if NEW
     @app.on_message(filters.private & filters.command("start"))
     async def start_private(client: Client, m: Message):
         uid = m.from_user.id if m.from_user else 0
-        changed = _set_dm_ready(uid)
-        if changed:
-            log.info(f"DM-ready set for user {uid}")
-            await _announce_ready(client, m)
-            if DMREADY_NOTIFY_USER:
-                try:
-                    await m.reply_text("✅ You’re DM-ready! I can message you privately now.", quote=True)
-                except Exception:
-                    pass
+        name = (m.from_user.first_name if m.from_user else "Someone")
+        uname = ("@" + m.from_user.username) if (m.from_user and m.from_user.username) else ""
+
+        is_new = store.add(uid, first_name=name, username=(m.from_user.username if m.from_user else None))
+        if is_new:
+            log.info(f"DM-ready NEW user {uid} ({name})")
+            now = time.time()
+            if uid not in _last_announce or now - _last_announce[uid] > ANNOUNCE_WINDOW:
+                _last_announce[uid] = now
+                msg = f"✅ DM-ready — {name} {uname}".strip()
+                await _notify_all(client, msg)
+                if _group_targets:
+                    await _announce_groups(client, msg)
+
         await m.reply_text(WELCOME_TEXT, reply_markup=kb_main(), disable_web_page_preview=True)
 
-    # /start in groups → just show portal once
+    # /start in groups → just show portal
     @app.on_message(~filters.private & filters.command("start"))
     async def start_group(client: Client, m: Message):
         await m.reply_text(WELCOME_TEXT, reply_markup=kb_main(), disable_web_page_preview=True)
