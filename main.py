@@ -1,125 +1,60 @@
 # main.py
-import os
 import logging
-import inspect
-from importlib import import_module
-from typing import Optional, Callable
+import os
 
-from dotenv import load_dotenv
 from pyrogram import Client
+from dotenv import load_dotenv
 
-# ── Logging ────────────────────────────────────────────────────────────────────
+# Load environment variables from .env if present
+load_dotenv()
+
+# Set up logging
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
+    level=logging.INFO
 )
 log = logging.getLogger("SuccuBot")
 
-# ── Env ───────────────────────────────────────────────────────────────────────
-load_dotenv()
-API_ID = int(os.getenv("API_ID", "0"))
+# Bot token and API credentials
+API_ID = int(os.getenv("API_ID", "12345"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-if not (API_ID and API_HASH and BOT_TOKEN):
-    log.warning("API_ID / API_HASH / BOT_TOKEN are not fully set in the environment")
-
-# ── Pyrogram Client ───────────────────────────────────────────────────────────
+# Initialize Pyrogram client
 app = Client(
-    "succubot",
+    "SuccuBot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workdir=os.getcwd(),
-    in_memory=True,
+    plugins=None  # we wire handlers manually
 )
 
-# ── Flexible module wiring ────────────────────────────────────────────────────
-CANDIDATE_FUNCS = ("register", "setup", "bootstrap", "init", "wire", "attach")
-
-def _call_initializer(fn: Callable, module_name: str) -> bool:
-    """Call fn with (app) if it accepts one; else with no args."""
+# Utility to wire a handler module
+def wire(name: str, import_path: str):
     try:
-        sig = inspect.signature(fn)
-        if len(sig.parameters) >= 1:
-            fn(app)
+        module = __import__(import_path, fromlist=["register"])
+        if hasattr(module, "register"):
+            module.register(app)
+            log.info(f"✅ Wired handlers from {import_path}")
         else:
-            fn()
-        log.info("wired: %s", module_name)
-        return True
+            log.warning(f"⚠️ No register() in {import_path}")
     except Exception as e:
-        log.error("Failed to wire %s: %s", module_name, e, exc_info=True)
-        return False
+        log.error(f"❌ Failed to wire {import_path}: {e}", exc_info=True)
 
-def wire(module_path: str, title: Optional[str] = None) -> None:
-    """Import module and call one of the accepted initializer names."""
-    display = title or module_path
-    try:
-        mod = import_module(module_path)
-    except Exception as e:
-        log.error("Failed to import %s: %s", display, e, exc_info=True)
-        return
 
-    # Try any of the common initializer names
-    for name in CANDIDATE_FUNCS:
-        fn = getattr(mod, name, None)
-        if callable(fn):
-            if _call_initializer(fn, display):
-                return
-
-    # If the module exposes a factory called get_handlers() returning callables,
-    # attach each to the app (optional convenience).
-    gh = getattr(mod, "get_handlers", None)
-    if callable(gh):
-        try:
-            handlers = gh()
-            attached = 0
-            for h in handlers or []:
-                # Each handler should already be a pyrogram Handler added inside get_handlers,
-                # but in case they return callables, call them with app.
-                if callable(h):
-                    try:
-                        sig = inspect.signature(h)
-                        if len(sig.parameters) >= 1:
-                            h(app)
-                        else:
-                            h()
-                        attached += 1
-                    except Exception:
-                        pass
-            if attached:
-                log.info("wired: %s (via get_handlers, %d handlers)", display, attached)
-                return
-        except Exception as e:
-            log.error("Failed to wire %s via get_handlers: %s", display, e, exc_info=True)
-            return
-
-    # Nothing matched
-    log.error("Failed to wire %s: no register/setup/bootstrap/init/wire/attach found", display)
-
-# ── Wire all handlers (order preserved) ───────────────────────────────────────
-def wire_all_handlers() -> None:
-    log.info("✅ Booting SuccuBot")
-
-    # NOTE: dm_foolproof is at project root and may not have register(app),
-    # so the flexible loader above will try setup()/init()/etc.
+def wire_all_handlers():
+    # The ONLY /start portal
     wire("dm_foolproof", "dm_foolproof")
 
+    # Menus + panels
     wire("handlers.menu", "handlers.menu")
+    wire("handlers.contact_admins", "handlers.contact_admins")
     wire("handlers.help_panel", "handlers.help_panel")
-    wire("handlers.help_cmd", "handlers.help_cmd")
-    wire("handlers.req_handlers", "handlers.req_handlers")
 
-    wire("handlers.enforce_requirements", "handlers.enforce_requirements")
-    wire("handlers.exemptions", "handlers.exemptions")
-    wire("handlers.membership_watch", "handlers.membership_watch")
+    # dm_portal kept ONLY for callbacks (admins, links, help) — /start removed
+    wire("handlers.dm_portal", "handlers.dm_portal")
 
-    wire("handlers.flyer", "handlers.flyer")
-    wire("handlers.flyer_scheduler", "handlers.flyer_scheduler")
-
-    wire("handlers.schedulemsg", "handlers.schedulemsg")
-
-    wire("handlers.warmup", "handlers.warmup")
+    # Other features
     wire("handlers.hi", "handlers.hi")
     wire("handlers.fun", "handlers.fun")
     wire("handlers.warnings", "handlers.warnings")
@@ -128,8 +63,17 @@ def wire_all_handlers() -> None:
     wire("handlers.summon", "handlers.summon")
     wire("handlers.xp", "handlers.xp")
     wire("handlers.dmnow", "handlers.dmnow")
+    wire("handlers.flyer", "handlers.flyer")
+    wire("handlers.flyer_scheduler", "handlers.flyer_scheduler")
+    wire("handlers.schedulemsg", "handlers.schedulemsg")
+    wire("handlers.exemptions", "handlers.exemptions")
+    wire("handlers.req_handlers", "handlers.req_handlers")
+    wire("handlers.enforce_requirements", "handlers.enforce_requirements")
+    wire("handlers.welcome", "handlers.welcome")
+    wire("handlers.health", "handlers.health")
 
-# ── Entrypoint ────────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     wire_all_handlers()
+    log.info("🚀 SuccuBot is starting...")
     app.run()
