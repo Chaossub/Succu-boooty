@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os, json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Iterable
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
@@ -11,12 +11,27 @@ from pyrogram.types import Message
 DATA_PATH = Path(os.getenv("MODEL_MENU_DATA", "data/model_menus.json"))
 DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-# Who can run /createmenu
-OWNER_IDS = {int(x) for x in os.getenv("OWNER_IDS", "").replace(" ", "").split(",") if x.isdigit()}
-SUPER_ADMIN_IDS = {int(x) for x in os.getenv("SUPER_ADMIN_IDS", "").replace(" ", "").split(",") if x.isdigit()}
-ADMIN_IDS = OWNER_IDS | SUPER_ADMIN_IDS
-
 MODEL_KEYS = {"roni", "ruby", "rin", "savy"}
+
+
+# -------- Admin detection (accept many env names) -----------------------------
+def _parse_ids(raw: str) -> Iterable[int]:
+    for token in (raw or "").replace(";", ",").replace(" ", "").split(","):
+        if token.isdigit():
+            yield int(token)
+
+def _get_admin_ids() -> set[int]:
+    admin_vars = [
+        "OWNER_IDS", "OWNERS", "OWNER_ID",
+        "SUPER_ADMIN_IDS", "SUPER_ADMINS", "ADMINS",
+    ]
+    ids: set[int] = set()
+    for var in admin_vars:
+        ids.update(_parse_ids(os.getenv(var, "")))
+    return ids
+
+ADMIN_IDS = _get_admin_ids()
+
 
 def _load() -> Dict[str, dict]:
     try:
@@ -34,27 +49,31 @@ def _ensure_entry(d: Dict[str, dict], model: str) -> Dict[str, dict]:
         d[model] = {}
     return d
 
+
 def register(app: Client):
 
-    @app.on_message(filters.private & filters.command(["createmenu"]))
+    # NOTE: allow command in private or groups
+    @app.on_message(filters.command(["createmenu"]))
     async def createmenu(client: Client, m: Message):
         # auth
-        if not m.from_user or m.from_user.id not in ADMIN_IDS:
+        user_id = m.from_user.id if m.from_user else 0
+        if user_id not in ADMIN_IDS:
             return await m.reply_text("You are not authorized to use this command.")
 
         # Expect: /createmenu roni <menu text>
-        parts = (m.text or "").split(None, 2)
-        if len(parts) < 3:
+        # Works with `/createmenu@YourBot`
+        raw = (m.text or "").split(None, 2)  # ['/createmenu', 'roni', '<menu text>']
+        if len(raw) < 3:
             return await m.reply_text(
                 "Usage:\n<code>/createmenu roni &lt;menu text&gt;</code>\n"
                 "Models: roni, ruby, rin, savy"
             )
 
-        model = parts[1].strip().lower()
+        model = raw[1].split("@", 1)[0].strip().lower()  # handle '/createmenu@bot roni ...' too
         if model not in MODEL_KEYS:
             return await m.reply_text("Unknown model. Use: roni, ruby, rin, savy")
 
-        menu_text = parts[2].strip()
+        menu_text = raw[2].strip()
         data = _load()
         data = _ensure_entry(data, model)
         data[model]["menu_text"] = menu_text
