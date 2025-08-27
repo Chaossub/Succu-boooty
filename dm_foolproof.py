@@ -82,15 +82,9 @@ def _mark_dm_ready(uid: int) -> bool:
     return False
 
 
-# ── Links panel text ─────────────────────────────────────────────────────────
-MODELS_LINKS_TEXT = os.getenv("MODELS_LINKS_TEXT", "").strip() or (
-    "<b>Find Our Models Elsewhere</b>\n\n"
-    "• Roni — Instagram / Fans\n"
-    "• Ruby — Instagram / Fans\n"
-    "• Rin — Instagram / Fans\n"
-    "• Savy — Instagram / Fans\n\n"
-    "Ask an admin if you need a direct link."
-)
+# ── Links panel text (from env: FIND_MODELS_TEXT) ─────────────────────────────
+MODELS_LINKS_TEXT = os.getenv("FIND_MODELS_TEXT", "").strip() or "<b>Find Our Models Elsewhere</b>"
+
 def _back_home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Start", callback_data="dmf_home")]])
 
@@ -134,13 +128,13 @@ def register(app: Client):
             except Exception:
                 pass
 
-    # Back to Main
+    # Back to Main (edit in place)
     @app.on_callback_query(filters.regex(r"^dmf_home$"))
     async def back_home(client: Client, q: CallbackQuery):
         await q.answer()
         await safe_edit_text(q.message, WELCOME_TEXT, reply_markup=kb_main(), disable_web_page_preview=True)
 
-    # Menus
+    # Menus (delegates to handlers.menu; edit in place)
     @app.on_callback_query(filters.regex(r"^m:menus$"))
     async def open_menus(client: Client, q: CallbackQuery):
         await q.answer()
@@ -155,13 +149,13 @@ def register(app: Client):
         except Exception:
             pass
 
-    # Links panel
+    # Links panel (uses FIND_MODELS_TEXT)
     @app.on_callback_query(filters.regex(r"^dmf_models_links$"))
     async def open_links(client: Client, q: CallbackQuery):
         await q.answer()
         await safe_edit_text(q.message, MODELS_LINKS_TEXT, reply_markup=_back_home_kb(), disable_web_page_preview=False)
 
-    # Help root
+    # Help root (hand off to help_panel if available)
     @app.on_callback_query(filters.regex(r"^dmf_help$"))
     async def open_help(client: Client, q: CallbackQuery):
         await q.answer()
@@ -170,3 +164,4 @@ def register(app: Client):
             await safe_edit_text(q.message, HELP_MENU_TEXT, reply_markup=_help_menu_kb(), disable_web_page_preview=True)
         except Exception:
             await safe_edit_text(q.message, "<b>Help</b>\nChoose an option.", reply_markup=_back_home_kb(), disable_web_page_preview=True)
+
