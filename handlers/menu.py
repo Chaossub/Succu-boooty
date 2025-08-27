@@ -1,344 +1,284 @@
 # handlers/menu.py
-
 import os
-from typing import Dict
-
 from pyrogram import filters
-from pyrogram.types import (
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    Message,
-    CallbackQuery,
-)
-from pyrogram.errors import MessageNotModified
-from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from pyrogram.client import Client
 
-# ==========
-# ENV / CONFIG
-# ==========
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+# =========================
+# ENV EXPECTATIONS
+# =========================
+# Usernames (without @) for DM links
+#   RONI_USERNAME, RUBY_USERNAME, RIN_USERNAME, SAVY_USERNAME
+#
+# Per-model menu texts
+#   MENU_RONI, MENU_RUBY, MENU_RIN, MENU_SAVY
+#
+# Misc content
+#   WELCOME_TEXT
+#   MODELS_ELSEWHERE_TEXT
+#   BUYER_RULES_TEXT
+#   BUYER_REQUIREMENTS_TEXT
+#   GAME_RULES_TEXT
+#   COMMANDS_HELP_TEXT
+#
+# Everything is optional; sensible defaults are provided if missing.
 
-# Model usernames for DM links (book buttons & Contact Models grid)
-RONI_USERNAME = os.getenv("RONI_USERNAME", "RoniUsername")
-RUBY_USERNAME = os.getenv("RUBY_USERNAME", "RubyUsername")
-RIN_USERNAME  = os.getenv("RIN_USERNAME",  "RinUsername")
-SAVY_USERNAME = os.getenv("SAVY_USERNAME", "SavyUsername")
+_WIRED = False  # idempotent guard so we don't register twice
 
-# Model menu texts (displayed above Book/Tip)
-MENU_RONI = os.getenv("MENU_RONI", "Roni’s menu goes here.")
-MENU_RUBY = os.getenv("MENU_RUBY", "Ruby’s menu goes here.")
-MENU_RIN  = os.getenv("MENU_RIN",  "Rin’s menu goes here.")
-MENU_SAVY = os.getenv("MENU_SAVY", "Savy’s menu goes here.")
 
-# Text blobs from ENV
-FIND_MODELS_TEXT      = os.getenv("FIND_MODELS_TEXT", "Links & profiles for our models elsewhere.")
-BUYER_RULES_TEXT      = os.getenv("BUYER_RULES_TEXT", "Buyer Rules are not set in ENV.")
-BUYER_REQUIREMENTS_TX = os.getenv("BUYER_REQUIREMENTS_TEXT", "Buyer Requirements are not set in ENV.")
-GAME_RULES_TEXT       = os.getenv("GAME_RULES_TEXT", "Game Rules are not set in ENV.")
+# ---------- helpers ----------
 
-# ==========
-# CONSTANT TEXTS
-# ==========
-WELCOME_TEXT = (
-    "🔥 Welcome to SuccuBot 🔥\n"
-    "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing."
-)
+def _t(name: str, default: str = "") -> str:
+    val = os.environ.get(name)
+    if val is None or str(val).strip() == "":
+        return default
+    return val
 
-# Commands (non-admin) shown in Help → Commands
-COMMANDS_TEXT = (
-    "🤖 **Member Commands**\n"
-    "• /start – open the portal\n"
-    "• /portal – open the portal\n"
-    "• Use menus to browse models, book, and more."
-)
+def _dm_url(username_var: str) -> str | None:
+    u = os.environ.get(username_var)
+    if not u:
+        return None
+    u = u.lstrip("@")
+    return f"https://t.me/{u}"
 
-# ==========
-# STATE (for Anonymous / Suggestions flows)
-# ==========
-STATE_AWAITING: Dict[int, str] = {}  # user_id -> "anon" | "suggest"
-
-# ==========
-# CALLBACK DATA KEYS
-# ==========
-CB_MAIN           = "main"
-CB_MENUS          = "menus"
-CB_MODEL_RONI     = "model_roni"
-CB_MODEL_RUBY     = "model_ruby"
-CB_MODEL_RIN      = "model_rin"
-CB_MODEL_SAVY     = "model_savy"
-CB_CONTACT_MODELS = "contact_models"
-CB_CONTACT_ADMINS = "contact_admins"
-CB_FIND_ELSEWHERE = "find_elsewhere"
-CB_HELP           = "help_menu"
-CB_BUYER_RULES    = "buyer_rules"
-CB_BUYER_REQS     = "buyer_reqs"
-CB_GAME_RULES     = "game_rules"
-CB_COMMANDS       = "commands"
-CB_TIP_SOON       = "tip_soon"
-CB_BACK_MAIN      = "back_main"
-CB_BACK_MENUS     = "back_menus"
-CB_ANON           = "anon"
-CB_SUGGEST        = "suggest"
-
-# ==========
-# KEYBOARDS
-# ==========
-
-def _kb_main() -> InlineKeyboardMarkup:
-    # Single column (one per row), as requested
-    rows = [
-        [InlineKeyboardButton("📜 Menus", callback_data=CB_MENUS)],
-        [InlineKeyboardButton("🌐 Contact Our Models Elsewhere", callback_data=CB_FIND_ELSEWHERE)],
-        [InlineKeyboardButton("🛠 Contact Admins", callback_data=CB_CONTACT_ADMINS)],
-        [InlineKeyboardButton("❓ Help", callback_data=CB_HELP)],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def _kb_menus() -> InlineKeyboardMarkup:
-    # 2x2 models grid, then Contact Models, then Back to Main
-    rows = [
-        [InlineKeyboardButton("🍷 Roni", callback_data=CB_MODEL_RONI),
-         InlineKeyboardButton("💎 Ruby", callback_data=CB_MODEL_RUBY)],
-        [InlineKeyboardButton("🍑 Rin", callback_data=CB_MODEL_RIN),
-         InlineKeyboardButton("🔥 Savy", callback_data=CB_MODEL_SAVY)],
-        [InlineKeyboardButton("📞 Contact Models", callback_data=CB_CONTACT_MODELS)],
-        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data=CB_BACK_MAIN)],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def _kb_model_menu(model_name: str, username: str) -> InlineKeyboardMarkup:
-    # Book (DM url), Tip (coming soon), Back to Menus
-    rows = [
-        [InlineKeyboardButton(f"📖 Book {model_name}", url=f"https://t.me/{username}")],
-        [InlineKeyboardButton(f"💸 Tip {model_name} (Coming Soon)", callback_data=CB_TIP_SOON)],
-        [InlineKeyboardButton("🔙 Back to Menus", callback_data=CB_BACK_MENUS)],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def _kb_contact_models() -> InlineKeyboardMarkup:
-    # 2x2 grid of DM links; Back to Main ONLY
-    rows = [
-        [InlineKeyboardButton("📩 Roni", url=f"https://t.me/{RONI_USERNAME}"),
-         InlineKeyboardButton("📩 Ruby", url=f"https://t.me/{RUBY_USERNAME}")],
-        [InlineKeyboardButton("📩 Rin",  url=f"https://t.me/{RIN_USERNAME}"),
-         InlineKeyboardButton("📩 Savy", url=f"https://t.me/{SAVY_USERNAME}")],
-        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data=CB_BACK_MAIN)],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def _kb_contact_admins() -> InlineKeyboardMarkup:
-    # 2x2 (Message Roni, Message Ruby) (Anonymous, Suggestions), then Back to Main
-    rows = [
-        [InlineKeyboardButton("📩 Message Roni", url=f"https://t.me/{RONI_USERNAME}"),
-         InlineKeyboardButton("📩 Message Ruby", url=f"https://t.me/{RUBY_USERNAME}")],
-        [InlineKeyboardButton("📢 Anonymous Message", callback_data=CB_ANON),
-         InlineKeyboardButton("💡 Suggestions", callback_data=CB_SUGGEST)],
-        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data=CB_BACK_MAIN)],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def _kb_find_elsewhere() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data=CB_BACK_MAIN)]
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def _kb_help_root() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("📜 Buyer Rules", callback_data=CB_BUYER_RULES)],
-        [InlineKeyboardButton("✅ Buyer Requirements", callback_data=CB_BUYER_REQS)],
-        [InlineKeyboardButton("🎮 Game Rules", callback_data=CB_GAME_RULES)],
-        [InlineKeyboardButton("🤖 Commands", callback_data=CB_COMMANDS)],
-        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data=CB_BACK_MAIN)],
-    ]
-    return InlineKeyboardMarkup(rows)
-
-def _kb_back_main() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Main Menu", callback_data=CB_BACK_MAIN)]])
-
-def _kb_back_menus() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Menus", callback_data=CB_BACK_MENUS)]])
-
-# ==========
-# RENDER HELPERS WITH SAFE EDIT
-# ==========
-
-async def _safe_edit_text(msg_obj, text: str, reply_markup: InlineKeyboardMarkup):
+async def _safe_edit(msg: Message, text: str, reply_markup: InlineKeyboardMarkup | None = None):
     try:
-        await msg_obj.edit_text(text, reply_markup=reply_markup, disable_web_page_preview=True)
-    except MessageNotModified:
-        # Ignore harmless "not modified" errors to prevent loops/crashes
-        pass
+        await msg.edit_text(text, reply_markup=reply_markup, disable_web_page_preview=True)
+    except Exception as e:
+        # Ignore MESSAGE_NOT_MODIFIED or similar benign errors
+        if "MESSAGE_NOT_MODIFIED" not in str(e):
+            raise
 
-# ==========
-# VIEW RENDERERS
-# ==========
+def _is_pm(q: CallbackQuery) -> bool:
+    # Inlined convenience if you ever want to branch later
+    return q.message and q.message.chat and q.message.chat.type in ("private",)
 
-async def show_main_menu(m: Message | CallbackQuery):
-    if isinstance(m, CallbackQuery):
-        await _safe_edit_text(m.message, WELCOME_TEXT, _kb_main())
-        await m.answer()
+# ---------- text blocks ----------
+
+WELCOME = _t(
+    "WELCOME_TEXT",
+    "👑 Welcome to **Succubus Sanctuary** 👑\n\n"
+    "Tap a button below to browse menus, contact admins, or get help."
+)
+
+# Per-model menu text defaults
+MENU_TEXT = {
+    "roni": _t("MENU_RONI", "🍓 **Roni's Menu**\n(Your custom menu text goes here.)"),
+    "ruby": _t("MENU_RUBY", "💎 **Ruby's Menu**\n(Your custom menu text goes here.)"),
+    "rin":  _t("MENU_RIN",  "🌙 **Rin's Menu**\n(Your custom menu text goes here.)"),
+    "savy": _t("MENU_SAVY", "🔥 **Savy's Menu**\n(Your custom menu text goes here.)"),
+}
+
+MODELS_ELSEWHERE_TEXT = _t(
+    "MODELS_ELSEWHERE_TEXT",
+    "🌐 **Find Our Models Elsewhere**\n(Links/content from ENV will appear here.)"
+)
+
+BUYER_RULES_TEXT = _t(
+    "BUYER_RULES_TEXT",
+    "📜 **Buyer Rules**\n(Your rules text from ENV will appear here.)"
+)
+
+BUYER_REQUIREMENTS_TEXT = _t(
+    "BUYER_REQUIREMENTS_TEXT",
+    "🧾 **Buyer Requirements**\n(Your requirements text from ENV will appear here.)"
+)
+
+GAME_RULES_TEXT = _t(
+    "GAME_RULES_TEXT",
+    "🎲 **Game Rules & Extras**\n(Your games text from ENV will appear here.)"
+)
+
+COMMANDS_HELP_TEXT = _t(
+    "COMMANDS_HELP_TEXT",
+    "❓ **Member Commands**\n(Only the commands members can use.)"
+)
+
+# ---------- keyboards ----------
+
+def kb_main() -> InlineKeyboardMarkup:
+    # Single-column main menu (exactly as requested)
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🗂️ Menus", callback_data="menus")],
+            [InlineKeyboardButton("🔎 Find our models elsewhere", callback_data="elsewhere")],
+            [InlineKeyboardButton("🛎️ Contact Admins", callback_data="admins")],
+            [InlineKeyboardButton("🆘 Help", callback_data="help")],
+        ]
+    )
+
+def kb_menus() -> InlineKeyboardMarkup:
+    # 2x2 for model names, then Contact Models (full), then Back to Main (full)
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Roni", callback_data="model:roni"),
+             InlineKeyboardButton("Ruby", callback_data="model:ruby")],
+            [InlineKeyboardButton("Rin", callback_data="model:rin"),
+             InlineKeyboardButton("Savy", callback_data="model:savy")],
+            [InlineKeyboardButton("✉️ Contact Models", callback_data="contact_models")],
+            [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main")],
+        ]
+    )
+
+def kb_model(name_key: str) -> InlineKeyboardMarkup:
+    # Two buttons beneath the menu: Book (DM link) + Tip (coming soon)
+    dm_map = {
+        "roni": "RONI_USERNAME",
+        "ruby": "RUBY_USERNAME",
+        "rin":  "RIN_USERNAME",
+        "savy": "SAVY_USERNAME",
+    }
+    dm = _dm_url(dm_map[name_key])
+    book_btn = InlineKeyboardButton(f"📩 Book {name_key.capitalize()}", url=dm) if dm else InlineKeyboardButton(
+        f"📩 Book {name_key.capitalize()} (setup needed)", callback_data="noop")
+    tip_btn = InlineKeyboardButton(f"💖 Tip {name_key.capitalize()} (coming soon)", callback_data=f"tip:{name_key}")
+
+    return InlineKeyboardMarkup(
+        [
+            [book_btn, tip_btn],
+            [InlineKeyboardButton("⬅️ Back to Menus", callback_data="menus")],
+            [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main")],
+        ]
+    )
+
+def kb_contact_models() -> InlineKeyboardMarkup:
+    # 2x2 DM links; only Back to Main at bottom (as requested)
+    pairs = []
+    row = []
+    for key, envvar in [("Roni", "RONI_USERNAME"),
+                        ("Ruby", "RUBY_USERNAME"),
+                        ("Rin",  "RIN_USERNAME"),
+                        ("Savy", "SAVY_USERNAME")]:
+        url = _dm_url(envvar)
+        btn = InlineKeyboardButton(key, url=url) if url else InlineKeyboardButton(f"{key} (setup needed)", callback_data="noop")
+        row.append(btn)
+        if len(row) == 2:
+            pairs.append(row)
+            row = []
+    if row:
+        pairs.append(row)
+
+    pairs.append([InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main")])
+    return InlineKeyboardMarkup(pairs)
+
+def kb_admins() -> InlineKeyboardMarkup:
+    # 2x2 grid: Message Roni, Message Ruby, Suggestions, Anonymous
+    roni = _dm_url("RONI_USERNAME")
+    ruby = _dm_url("RUBY_USERNAME")
+
+    roni_btn = InlineKeyboardButton("💬 Message Roni", url=roni) if roni else InlineKeyboardButton("💬 Message Roni (setup)", callback_data="noop")
+    ruby_btn = InlineKeyboardButton("💬 Message Ruby", url=ruby) if ruby else InlineKeyboardButton("💬 Message Ruby (setup)", callback_data="noop")
+
+    grid = [
+        [roni_btn, ruby_btn],
+        [InlineKeyboardButton("💡 Suggestions", callback_data="suggestions"),
+         InlineKeyboardButton("🕵️ Anonymous Message", callback_data="anon")],
+        [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main")],
+    ]
+    return InlineKeyboardMarkup(grid)
+
+def kb_help() -> InlineKeyboardMarkup:
+    # 2x2 for four items, then Back to Main
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📜 Buyer Rules", callback_data="help:rules"),
+             InlineKeyboardButton("🧾 Requirements", callback_data="help:reqs")],
+            [InlineKeyboardButton("🎲 Game Rules", callback_data="help:games"),
+             InlineKeyboardButton("❓ Commands Help", callback_data="help:cmds")],
+            [InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main")],
+        ]
+    )
+
+def kb_back_to_main() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="main")]])
+
+
+# ---------- callbacks ----------
+
+async def _show_main(msg: Message):
+    await _safe_edit(msg, WELCOME, kb_main())
+
+async def _on_start(client: Client, message: Message):
+    # /start and /portal should show the Main Menu + Welcome text
+    await message.reply_text(WELCOME, reply_markup=kb_main(), disable_web_page_preview=True)
+
+async def _cb_main(client: Client, q: CallbackQuery):
+    await q.answer()
+    await _show_main(q.message)
+
+async def _cb_menus(client: Client, q: CallbackQuery):
+    await q.answer()
+    await _safe_edit(q.message, "🗂️ Menus", kb_menus())
+
+async def _cb_model(client: Client, q: CallbackQuery):
+    await q.answer()
+    key = q.data.split(":", 1)[1]
+    text = MENU_TEXT.get(key, f"**{key.capitalize()}'s Menu**")
+    await _safe_edit(q.message, text, kb_model(key))
+
+async def _cb_contact_models(client: Client, q: CallbackQuery):
+    await q.answer()
+    await _safe_edit(q.message, "✉️ Contact Models", kb_contact_models())
+
+async def _cb_elsewhere(client: Client, q: CallbackQuery):
+    await q.answer()
+    await _safe_edit(q.message, MODELS_ELSEWHERE_TEXT, kb_back_to_main())
+
+async def _cb_admins(client: Client, q: CallbackQuery):
+    await q.answer()
+    await _safe_edit(q.message, "🛎️ Contact Admins", kb_admins())
+
+async def _cb_help_home(client: Client, q: CallbackQuery):
+    await q.answer()
+    await _safe_edit(q.message, "🆘 Help", kb_help())
+
+async def _cb_help_leaf(client: Client, q: CallbackQuery):
+    await q.answer()
+    leaf = q.data.split(":", 1)[1]
+    if leaf == "rules":
+        await _safe_edit(q.message, BUYER_RULES_TEXT, kb_back_to_main())
+    elif leaf == "reqs":
+        await _safe_edit(q.message, BUYER_REQUIREMENTS_TEXT, kb_back_to_main())
+    elif leaf == "games":
+        await _safe_edit(q.message, GAME_RULES_TEXT, kb_back_to_main())
+    elif leaf == "cmds":
+        await _safe_edit(q.message, COMMANDS_HELP_TEXT, kb_back_to_main())
     else:
-        await m.reply_text(WELCOME_TEXT, reply_markup=_kb_main(), disable_web_page_preview=True)
+        await _safe_edit(q.message, "Coming soon.", kb_back_to_main())
 
-async def show_menus(q: CallbackQuery):
-    await _safe_edit_text(q.message, "📜 Menus", _kb_menus())
-    await q.answer()
+async def _cb_tip(client: Client, q: CallbackQuery):
+    await q.answer("Coming soon 💖", show_alert=False)
 
-async def show_model_menu(q: CallbackQuery, model: str):
-    # route text + keyboard
-    if model == "Roni":
-        text = f"🍷 Roni’s Menu 🍷\n{MENU_RONI}"
-        kb = _kb_model_menu("Roni", RONI_USERNAME)
-    elif model == "Ruby":
-        text = f"💎 Ruby’s Menu 💎\n{MENU_RUBY}"
-        kb = _kb_model_menu("Ruby", RUBY_USERNAME)
-    elif model == "Rin":
-        text = f"🍑 Rin’s Menu 🍑\n{MENU_RIN}"
-        kb = _kb_model_menu("Rin", RIN_USERNAME)
-    else:
-        text = f"🔥 Savy’s Menu 🔥\n{MENU_SAVY}"
-        kb = _kb_model_menu("Savy", SAVY_USERNAME)
+async def _cb_noop(client: Client, q: CallbackQuery):
+    await q.answer("Not configured yet.", show_alert=False)
 
-    await _safe_edit_text(q.message, text, kb)
-    await q.answer()
 
-async def show_contact_models(q: CallbackQuery):
-    await _safe_edit_text(q.message, "📞 Contact Models", _kb_contact_models())
-    await q.answer()
+# ---------- public register ----------
 
-async def show_contact_admins(q: CallbackQuery):
-    await _safe_edit_text(q.message, "🛠 Contact Admins", _kb_contact_admins())
-    await q.answer()
+def register(app: Client):
+    global _WIRED
+    if _WIRED:
+        return
+    _WIRED = True
 
-async def show_find_elsewhere(q: CallbackQuery):
-    await _safe_edit_text(q.message, f"🌐 Find Our Models Elsewhere\n\n{FIND_MODELS_TEXT}", _kb_find_elsewhere())
-    await q.answer()
+    # Commands to open the portal
+    app.add_handler(
+        handler=app.on_message(filters.command(["start", "portal"]))(  # no filters.edited here
+            _on_start
+        ).handler
+    )
 
-async def show_help_root(q: CallbackQuery):
-    await _safe_edit_text(q.message, "❓ Help", _kb_help_root())
-    await q.answer()
+    # Callback routes
+    app.add_handler(app.on_callback_query(filters.regex(r"^main$"))(_cb_main).handler)
+    app.add_handler(app.on_callback_query(filters.regex(r"^menus$"))(_cb_menus).handler)
+    app.add_handler(app.on_callback_query(filters.regex(r"^model:(roni|ruby|rin|savy)$"))(_cb_model).handler)
+    app.add_handler(app.on_callback_query(filters.regex(r"^contact_models$"))(_cb_contact_models).handler)
 
-async def show_help_blob(q: CallbackQuery, which: str):
-    if which == "rules":
-        text = f"📜 Buyer Rules\n\n{BUYER_RULES_TEXT}"
-    elif which == "reqs":
-        text = f"✅ Buyer Requirements\n\n{BUYER_REQUIREMENTS_TX}"
-    elif which == "games":
-        text = f"🎮 Games & Extras\n\n{GAME_RULES_TEXT}"
-    else:
-        text = COMMANDS_TEXT
+    app.add_handler(app.on_callback_query(filters.regex(r"^elsewhere$"))(_cb_elsewhere).handler)
 
-    await _safe_edit_text(q.message, text, _kb_back_main())
-    await q.answer()
+    app.add_handler(app.on_callback_query(filters.regex(r"^admins$"))(_cb_admins).handler)
+    app.add_handler(app.on_callback_query(filters.regex(r"^help$"))(_cb_help_home).handler)
+    app.add_handler(app.on_callback_query(filters.regex(r"^help:(rules|reqs|games|cmds)$"))(_cb_help_leaf).handler)
 
-# ==========
-# ANON / SUGGEST FLOWS
-# ==========
-
-async def start_anon(q: CallbackQuery):
-    STATE_AWAITING[q.from_user.id] = "anon"
-    await q.answer("Send me the anonymous message now. I’ll deliver it to the owner’s DMs.", show_alert=False)
-    # Also update the panel to remind user what to do:
-    await _safe_edit_text(q.message, "📢 Anonymous Message\n\nPlease send your anonymous message now. I’m listening…", _kb_back_main())
-
-async def start_suggest(q: CallbackQuery):
-    STATE_AWAITING[q.from_user.id] = "suggest"
-    await q.answer("Send me your suggestion now. I’ll deliver it to the owner’s DMs.", show_alert=False)
-    await _safe_edit_text(q.message, "💡 Suggestions\n\nPlease send your suggestion now. I’m listening…", _kb_back_main())
-
-async def capture_user_message_and_forward(app, m: Message):
-    user_id = m.from_user.id if m.from_user else 0
-    mode = STATE_AWAITING.get(user_id)
-    if not mode:
-        return  # Not in anon/suggest flow; ignore here.
-
-    title = "Anonymous Message" if mode == "anon" else "Suggestion"
-    sender = m.from_user.mention if m.from_user else "Unknown"
-    text = f"📥 {title} received\n\nFrom: {sender} (id: {user_id})\n\nMessage:\n{m.text or m.caption or ''}"
-
-    if OWNER_ID:
-        try:
-            await app.send_message(OWNER_ID, text, disable_web_page_preview=True)
-        except Exception:
-            # swallow any DM errors to avoid breaking user flow
-            pass
-
-    try:
-        await m.reply_text("✅ Got it. I’ve delivered your message to the owner’s DMs.", disable_web_page_preview=True, reply_markup=_kb_main())
-    except Exception:
-        pass
-
-    # Clear state
-    STATE_AWAITING.pop(user_id, None)
-
-# ==========
-# TIP PLACEHOLDER
-# ==========
-
-async def tip_soon(q: CallbackQuery):
-    await q.answer("💸 Tips are coming soon!", show_alert=True)
-
-# ==========
-# PUBLIC REGISTER
-# ==========
-
-def register(app):
-    """
-    Wire up all handlers for menus & navigation.
-    Call this once from main.py:  handlers.menu.register(app)
-    """
-
-    # /start and /portal -> Welcome + Main Menu (always)
-    async def _start_portal_handler(client, message: Message):
-        await show_main_menu(message)
-
-    app.add_handler(MessageHandler(_start_portal_handler, filters.command(["start", "portal"]) & ~filters.edited))
-
-    # Capture anon/suggest free-form messages
-    async def _free_text_capture(client, message: Message):
-        await capture_user_message_and_forward(app, message)
-
-    app.add_handler(MessageHandler(_free_text_capture, filters.text & ~filters.command(["start", "portal"])))
-
-    # Callback router
-    async def _on_cb(client, q: CallbackQuery):
-        data = q.data or ""
-        if data in (CB_MAIN, CB_BACK_MAIN):
-            await show_main_menu(q)
-        elif data in (CB_MENUS, CB_BACK_MENUS):
-            await show_menus(q)
-        elif data == CB_MODEL_RONI:
-            await show_model_menu(q, "Roni")
-        elif data == CB_MODEL_RUBY:
-            await show_model_menu(q, "Ruby")
-        elif data == CB_MODEL_RIN:
-            await show_model_menu(q, "Rin")
-        elif data == CB_MODEL_SAVY:
-            await show_model_menu(q, "Savy")
-        elif data == CB_CONTACT_MODELS:
-            await show_contact_models(q)
-        elif data == CB_CONTACT_ADMINS:
-            await show_contact_admins(q)
-        elif data == CB_FIND_ELSEWHERE:
-            await show_find_elsewhere(q)
-        elif data == CB_HELP:
-            await show_help_root(q)
-        elif data == CB_BUYER_RULES:
-            await show_help_blob(q, "rules")
-        elif data == CB_BUYER_REQS:
-            await show_help_blob(q, "reqs")
-        elif data == CB_GAME_RULES:
-            await show_help_blob(q, "games")
-        elif data == CB_COMMANDS:
-            await show_help_blob(q, "cmds")
-        elif data == CB_TIP_SOON:
-            await tip_soon(q)
-        elif data == CB_ANON:
-            await start_anon(q)
-        elif data == CB_SUGGEST:
-            await start_suggest(q)
-        else:
-            await q.answer()  # no-op
-
-    app.add_handler(CallbackQueryHandler(_on_cb))
+    app.add_handler(app.on_callback_query(filters.regex(r"^tip:(roni|ruby|rin|savy)$"))(_cb_tip).handler)
+    app.add_handler(app.on_callback_query(filters.regex(r"^noop$"))(_cb_noop).handler)
