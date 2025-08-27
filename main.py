@@ -49,21 +49,25 @@ def wire_all_handlers():
     # The ONLY /start portal (do not wire any other module that registers /start)
     wire("dm_foolproof")
 
-    # Menus UI + admin menu text command + panels
+    # Menus UI + per-model custom menu text + panels
     wire("handlers.menu")
     wire("handlers.createmenu")
     wire("handlers.contact_admins")
     wire("handlers.help_panel")
 
-    # Requirement reminders, sweeps, etc (optional if you use them)
+    # Requirements suite (original repo)
     wire("handlers.enforce_requirements")
 
-    # NEW: /test command to DM “test” to DM-ready users who haven’t met requirements
+    # DM “test” to DM-ready users missing requirements
     wire("handlers.test_send")
 
-    # IMPORTANT: Do NOT wire handlers.dm_portal (it duplicates callbacks & /start)
+    # Admin-only one-shot full command list (/bloop)
+    wire("handlers.bloop")
 
-    # ---- Optional extras (uncomment if you actually use them) ----
+    # IMPORTANT: Do NOT wire handlers.dm_portal (duplicates callbacks & /start)
+    # Remove any previous wiring of that module.
+
+    # ---- Optional extras (uncomment only if you actually use them) ----
     # wire("handlers.warnings")
     # wire("handlers.moderation")
     # wire("handlers.federation")
@@ -75,7 +79,6 @@ def wire_all_handlers():
     # wire("handlers.schedulemsg")
     # wire("handlers.exemptions")
     # wire("handlers.req_handlers")
-    # wire("handlers.enforce_requirements")
     # wire("handlers.welcome")
     # wire("handlers.health")
     # wire("handlers.fun")
