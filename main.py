@@ -1,10 +1,11 @@
-# main.py
-import logging
+# main.py — clean wiring + graceful shutdown (no duplicate /start)
 import os
-from pyrogram import Client
+import asyncio
+import signal
+import logging
 from dotenv import load_dotenv
+from pyrogram import Client
 
-# Load environment
 load_dotenv()
 
 # ---------- Logging ----------
@@ -14,14 +15,14 @@ logging.basicConfig(
 )
 log = logging.getLogger("SuccuBot")
 
-# ---------- Bot credentials ----------
+# ---------- Credentials ----------
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 if not (API_ID and API_HASH and BOT_TOKEN):
-    raise RuntimeError("API_ID, API_HASH, and BOT_TOKEN must be set.")
+    raise RuntimeError("API_ID, API_HASH, BOT_TOKEN must be set")
 
-# ---------- Pyrogram client ----------
+# ---------- Client ----------
 app = Client(
     "SuccuBot",
     api_id=API_ID,
@@ -30,9 +31,8 @@ app = Client(
     plugins=None,  # we wire modules manually
 )
 
-# ---------- Utility ----------
+# ---------- Wiring helper ----------
 def wire(import_path: str):
-    """Import module and call register(app) if present. Logs on failure, keeps going."""
     try:
         mod = __import__(import_path, fromlist=["register"])
         if hasattr(mod, "register"):
@@ -43,18 +43,20 @@ def wire(import_path: str):
     except Exception as e:
         log.error(f"❌ Failed to wire {import_path}: {e}", exc_info=True)
 
-# ---------- Handlers ----------
-def wire_all_handlers():
-    # The ONLY /start portal — keep just this one to prevent duplicates.
+def wire_all():
+    # The ONLY /start portal lives in dm_foolproof.py
     wire("dm_foolproof")
 
-    # Core UI & panels
+    # Legacy shim (safe — no /start), maps old callbacks to new handlers
+    wire("handlers.dm_portal")
+
+    # Core UI
     wire("handlers.menu")
     wire("handlers.createmenu")
     wire("handlers.contact_admins")
     wire("handlers.help_panel")
 
-    # Requirements / Ops
+    # Requirements / ops
     wire("handlers.enforce_requirements")
     wire("handlers.req_handlers")
     wire("handlers.test_send")
@@ -63,17 +65,17 @@ def wire_all_handlers():
     wire("handlers.dmnow")
     wire("handlers.dm_admin")
 
-    # Schedulers & Flyers
+    # Flyers / schedulers
     wire("handlers.flyer")
     wire("handlers.flyer_scheduler")
     wire("handlers.schedulemsg")
 
-    # Moderation & Federation
+    # Moderation + federation
     wire("handlers.moderation")
     wire("handlers.warnings")
     wire("handlers.federation")
 
-    # Summons / XP / Fun / Misc
+    # Misc feature sets
     wire("handlers.summon")
     wire("handlers.xp")
     wire("handlers.fun")
@@ -84,12 +86,42 @@ def wire_all_handlers():
 
     # Admin utilities
     wire("handlers.bloop")
-    wire("handlers.whoami")  # safe to keep if you add whoami.py
+    wire("handlers.whoami")  # keep only if file exists
 
-    # ❌ DO NOT wire the old portal; it duplicates /start
-    # wire("handlers.dm_portal")
+# ---------- Graceful shutdown ----------
+_shutdown_called = False
 
+def _graceful_stop(*_):
+    global _shutdown_called
+    if _shutdown_called:
+        return
+    _shutdown_called = True
+    log.info("🛑 Stop signal received. Shutting down gracefully...")
+
+    # Stop APScheduler instances if those modules expose a scheduler
+    try:
+        from handlers.flyer_scheduler import scheduler as flyer_sched
+        flyer_sched.shutdown(wait=False)
+    except Exception:
+        pass
+    try:
+        from handlers.schedulemsg import scheduler as msg_sched
+        msg_sched.shutdown(wait=False)
+    except Exception:
+        pass
+
+    # Stop Pyrogram
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(app.stop())
+    except Exception:
+        pass
+
+signal.signal(signal.SIGTERM, _graceful_stop)
+signal.signal(signal.SIGINT, _graceful_stop)
+
+# ---------- Run ----------
 if __name__ == "__main__":
-    wire_all_handlers()
+    wire_all()
     log.info("🚀 SuccuBot starting…")
     app.run()
