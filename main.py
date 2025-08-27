@@ -1,5 +1,4 @@
 # main.py
-# main.py
 import logging
 import os
 from pyrogram import Client
@@ -50,49 +49,47 @@ def wire_all_handlers():
     wire("dm_foolproof")
 
     # Core UI & panels
-    wire("handlers.menu")             # Menus UI (💕 Menus, model menus)
-    wire("handlers.createmenu")       # /createmenu <model> <text>
-    wire("handlers.contact_admins")   # Contact Admins callbacks (no /start inside)
-    wire("handlers.help_panel")       # Help buttons/panels
+    wire("handlers.menu")
+    wire("handlers.createmenu")
+    wire("handlers.contact_admins")
+    wire("handlers.help_panel")
 
     # Requirements / Ops
-    wire("handlers.enforce_requirements")  # /reqstatus, /reqremind, /reqreport, /reqsweep, etc.
-    wire("handlers.req_handlers")          # legacy req commands (/reqadd, /reqgame, /reqexport, ...)
-    wire("handlers.test_send")             # /test -> DM "test" to DM-ready missing requirements
+    wire("handlers.enforce_requirements")
+    wire("handlers.req_handlers")
+    wire("handlers.test_send")
 
     # DM tools
-    wire("handlers.dmnow")         # /dmnow -> deep link to DM + mark DM-ready
-    wire("handlers.dm_admin")      # /dmreadylist, /dmreadyclear
+    wire("handlers.dmnow")
+    wire("handlers.dm_admin")
 
     # Schedulers & Flyers
-    wire("handlers.flyer")              # /flyer, /addflyer, /deleteflyer, /flyerhelp, ...
-    wire("handlers.flyer_scheduler")    # /scheduleflyer, /listscheduledflyers, /cancelflyer, ...
-    wire("handlers.schedulemsg")        # /schedulemsg, /listmsgs, /cancelmsg
+    wire("handlers.flyer")
+    wire("handlers.flyer_scheduler")
+    wire("handlers.schedulemsg")
 
     # Moderation & Federation
-    wire("handlers.moderation")    # /warn, /warns, /mute, /ban, /kick, /userinfo, ...
-    wire("handlers.warnings")      # alternate warnings module (if present)
-    wire("handlers.federation")    # /createfed, /fedban, /fedadmins, ...
+    wire("handlers.moderation")
+    wire("handlers.warnings")
+    wire("handlers.federation")
 
     # Summons / XP / Fun / Misc
-    wire("handlers.summon")        # /summon, /summonall, /trackall
-    wire("handlers.xp")            # /naughtystats, /resetxp (and XP-linked fun cmds)
-    wire("handlers.fun")           # /bite, /kiss, /spank, /tease (standalone fun)
-    wire("handlers.misc")          # /ping, etc.
-    wire("handlers.hi")            # /hi
-    wire("handlers.warmup")        # /warmup
-    wire("handlers.health")        # healthcheck if present
-    wire("handlers.welcome")       # welcome extras (should NOT own /start)
+    wire("handlers.summon")
+    wire("handlers.xp")
+    wire("handlers.fun")
+    wire("handlers.hi")
+    wire("handlers.warmup")
+    wire("handlers.health")
+    wire("handlers.welcome")
 
     # Admin utilities
-    wire("handlers.bloop")         # /bloop -> full command index (admin-only)
-    wire("handlers.whoami")        # /whoami -> show caller's Telegram ID
+    wire("handlers.bloop")
+    wire("handlers.whoami")  # safe to keep if you add whoami.py
 
-    # ❌ IMPORTANT: Do NOT wire the old portal (it duplicates /start)
+    # ❌ DO NOT wire the old portal; it duplicates /start
     # wire("handlers.dm_portal")
 
 if __name__ == "__main__":
     wire_all_handlers()
     log.info("🚀 SuccuBot starting…")
     app.run()
-
