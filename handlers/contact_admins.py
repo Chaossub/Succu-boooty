@@ -1,13 +1,14 @@
 # handlers/contact_admins.py
 from __future__ import annotations
 import os
-from typing import List, Optional
+from typing import Optional, List
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import MessageNotModified
 
-# ---- Helpers to build links from env (username or numeric id) ----------------
+CONTACT_TEXT = os.getenv("CONTACT_ADMINS_TEXT", "").strip() or "How would you like to reach us?"
+
 def _to_user_link(username_env: str, id_env: str) -> Optional[str]:
     uname = os.getenv(username_env, "").strip().lstrip("@")
     uid   = os.getenv(id_env, "").strip()
@@ -17,37 +18,33 @@ def _to_user_link(username_env: str, id_env: str) -> Optional[str]:
         return f"tg://user?id={uid}"
     return None
 
-def _maybe_btn(text: str, username_env: str, id_env: str):
-    url = _to_user_link(username_env, id_env)
-    if url:
-        return InlineKeyboardButton(text, url=url)
-    return None
-
-# ---- Panel text (you can override with CONTACT_ADMINS_TEXT in env) -----------
-CONTACT_TEXT = os.getenv("CONTACT_ADMINS_TEXT", "").strip() or "How would you like to reach us?"
+def _dm_button(label: str, link: Optional[str], missing_cb: str) -> InlineKeyboardButton:
+    # Always show the button. If link is present, make it a URL; else a toast callback.
+    if link:
+        return InlineKeyboardButton(label + " ↗", url=link)
+    return InlineKeyboardButton(label, callback_data=missing_cb)
 
 def build_admins_kb() -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = []
 
-    # Direct DM buttons (Roni / Ruby). Add more if you want.
-    roni_btn = _maybe_btn("💌 Message Roni ↗", "RONI_USERNAME", "RONI_ID")
-    ruby_btn = _maybe_btn("💌 Message Ruby ↗", "RUBY_USERNAME", "RUBY_ID")
-    if roni_btn or ruby_btn:
-        pair = [b for b in (roni_btn, ruby_btn) if b]
-        rows.append(pair)
+    # Roni & Ruby always visible
+    roni = _to_user_link("RONI_USERNAME", "RONI_ID")
+    ruby = _to_user_link("RUBY_USERNAME", "RUBY_ID")
+    rows.append([
+        _dm_button("💌 Message Roni", roni, "admins:missing:roni"),
+        _dm_button("💌 Message Ruby", ruby, "admins:missing:ruby"),
+    ])
 
-    # Anonymous & suggestion (callbacks you already handle elsewhere or simple notes)
+    # You can add more admin contacts in pairs the same way ↑
+
     rows.append([InlineKeyboardButton("🙈 Send anonymous message to admins", callback_data="admins:anon")])
     rows.append([InlineKeyboardButton("💡 Send a suggestion", callback_data="admins:suggest")])
-
-    # Back to Start
     rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_home")])
 
     return InlineKeyboardMarkup(rows)
 
 def register(app: Client):
 
-    # Open Contact Admins — EDIT IN PLACE (no reply_text)
     @app.on_callback_query(filters.regex(r"^dmf_open_admins$"))
     async def open_admins(client: Client, cq: CallbackQuery):
         try:
@@ -56,7 +53,17 @@ def register(app: Client):
             pass
         await cq.answer()
 
-    # Optional: simple toasts for anon/suggest until you wire full flows
+    @app.on_callback_query(filters.regex(r"^admins:missing:(?P<who>roni|ruby)$"))
+    async def missing_link(client: Client, cq: CallbackQuery):
+        who = cq.matches[0].group("who")
+        env_user = "RONI_USERNAME" if who == "roni" else "RUBY_USERNAME"
+        env_id   = "RONI_ID"       if who == "roni" else "RUBY_ID"
+        await cq.answer(
+            f"Set a contact for {who.title()}.\n"
+            f"Env options:\n• {env_user} (username w/o @)\n• {env_id} (numeric ID)",
+            show_alert=True
+        )
+
     @app.on_callback_query(filters.regex(r"^admins:anon$"))
     async def anon_msg(client: Client, cq: CallbackQuery):
         await cq.answer("Anon inbox coming soon. An admin will enable this.", show_alert=True)
