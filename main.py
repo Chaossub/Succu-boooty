@@ -51,8 +51,8 @@ def wire_all():
     wire("handlers.help_panel")
 
     # DM helpers / admin DM-ready tools
-    wire("handlers.dmnow")             # (if you still keep this separate)
-    wire("handlers.dm_admin")          # /dmnow deep-link
+    wire("handlers.dmnow")             # <-- THIS FILE
+    wire("handlers.dm_admin")          # (your existing deep-link utility, if still used elsewhere)
     wire("handlers.dm_ready_admin")    # /dmreadylist, remove/clear/debug
 
     # Requirements / reminders
