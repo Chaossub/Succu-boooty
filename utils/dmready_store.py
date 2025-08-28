@@ -1,72 +1,71 @@
 # utils/dmready_store.py
-# JSON-backed, restart-safe store for DM-ready users.
-from __future__ import annotations
-import os, json, time, tempfile, shutil
-from typing import Dict, List
-
-DB_PATH = os.getenv("DMREADY_DB", "data/dm_ready.json")
-
-def _ensure_dir_for(path: str):
-    d = os.path.dirname(path) or "."
-    os.makedirs(d, exist_ok=True)
+import json, os, time, threading
+from typing import Dict, List, Optional
 
 class DMReadyStore:
-    def __init__(self, path: str | None = None):
-        self.path = path or DB_PATH
-        _ensure_dir_for(self.path)
-        self._db: Dict[str, Dict] = {}
+    """
+    Very small JSON-backed store:
+    {
+      "users": { "<user_id>": { "username": "...", "first_name": "...", "ts": 1693000000 } },
+      "notified": { "<user_id>": 1693000000 }
+    }
+    """
+    def __init__(self, path: str = "data/dmready.json"):
+        self.path = path
+        self._lock = threading.RLock()
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        self._data = {"users": {}, "notified": {}}
         self._load()
 
+    # --------------- internal ---------------
     def _load(self):
         try:
             with open(self.path, "r", encoding="utf-8") as f:
-                self._db = json.load(f)
-        except FileNotFoundError:
-            self._db = {}
+                self._data = json.load(f)
         except Exception:
-            self._db = {}
+            self._data = {"users": {}, "notified": {}}
 
     def _save(self):
-        _ensure_dir_for(self.path)
-        fd, tmp = tempfile.mkstemp(prefix="dmready_", suffix=".json")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self._db, f, ensure_ascii=False, indent=2)
-            shutil.move(tmp, self.path)
-        finally:
-            try: os.remove(tmp)
-            except Exception: pass
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.path)
 
-    def add(self, user_id: int, first_name: str = "", username: str | None = None) -> bool:
-        key = str(user_id)
-        if key in self._db:
-            return False
-        self._db[key] = {
-            "id": user_id,
-            "first_name": first_name or "",
-            "username": username or "",
-            "ts": int(time.time()),
-        }
-        self._save()
-        return True
-
-    def is_ready(self, user_id: int) -> bool:
-        return str(user_id) in self._db
-
-    def list_all(self) -> List[Dict]:
-        return sorted(self._db.values(), key=lambda r: r.get("ts", 0), reverse=True)
-
-    def remove(self, user_id: int) -> bool:
-        key = str(user_id)
-        if key in self._db:
-            self._db.pop(key, None)
+    # --------------- public API ---------------
+    def set_dm_ready_global(self, user_id: int, username: Optional[str], first_name: Optional[str]) -> bool:
+        """Returns True if it was newly set; False if already present."""
+        with self._lock:
+            users = self._data.setdefault("users", {})
+            if str(user_id) in users:
+                return False
+            users[str(user_id)] = {
+                "username": username or "",
+                "first_name": first_name or "",
+                "ts": int(time.time())
+            }
             self._save()
             return True
-        return False
 
-    def clear(self):
-        self._db = {}
-        self._save()
+    def clear_dm_ready(self, user_id: int) -> None:
+        with self._lock:
+            self._data.get("users", {}).pop(str(user_id), None)
+            self._save()
 
-# Singleton used everywhere
-global_store = DMReadyStore()
+    def get_all_dm_ready_global(self) -> List[Dict]:
+        with self._lock:
+            items = []
+            for uid, meta in self._data.get("users", {}).items():
+                items.append({"user_id": int(uid), **meta})
+            items.sort(key=lambda x: x["ts"])
+            return items
+
+    # owner notification de-dupe
+    def should_notify_owner(self, user_id: int) -> bool:
+        with self._lock:
+            notified = self._data.setdefault("notified", {})
+            key = str(user_id)
+            if key in notified:
+                return False
+            notified[key] = int(time.time())
+            self._save()
+            return True
