@@ -27,7 +27,6 @@ app = Client(
 )
 
 def wire(import_path: str):
-    """Import a module and call register(app) if present."""
     try:
         mod = __import__(import_path, fromlist=["register"])
         if hasattr(mod, "register"):
@@ -41,49 +40,38 @@ def wire(import_path: str):
         log.exception("❌ Failed to wire %s: %s", import_path, e)
 
 if __name__ == "__main__":
-    # Core: start + menus + admin contact + help
-    wire("dm_foolproof")                  # /start, DM-ready mark, main menu
-    wire("handlers.menu")
-    wire("handlers.createmenu")
-    wire("handlers.contact_admins")
-    wire("handlers.help_panel")
+    # Core portal: /start + panels (keep this the ONLY /start handler)
+    wire("dm_foolproof")
 
-    # Requirements / reminders toolchain
+    # Menus (command to create/update saved menus)
+    wire("handlers.createmenu")
+
+    # DM helper tools
+    wire("handlers.dmnow")
+    wire("handlers.dm_admin")
+
+    # DM-ready auto-cleanup on leave/kick/ban in Sanctuary group(s)
+    wire("handlers.dmready_cleanup")
+
+    # Your existing feature stack (these should NOT register /start)
     wire("handlers.enforce_requirements")
     wire("handlers.req_handlers")
     wire("handlers.test_send")
-
-    # DM helper tools
-    wire("handlers.dmnow")                # /dmnow deep-link button
-    wire("handlers.dm_admin")             # /dmreadylist, /dmreadyclear, etc.
-
-    # Flyers / scheduling
     wire("handlers.flyer")
     wire("handlers.flyer_scheduler")
     wire("handlers.schedulemsg")
-
-    # Moderation suite
     wire("handlers.moderation")
     wire("handlers.warnings")
     wire("handlers.federation")
-
-    # Misc feature set
     wire("handlers.summon")
     wire("handlers.xp")
     wire("handlers.fun")
     wire("handlers.hi")
     wire("handlers.warmup")
     wire("handlers.health")
-
-    # Group joins/leaves (separate from /start)
     wire("handlers.welcome")
-
-    # NEW: remove DM-ready when someone leaves/kicked/banned from your group(s)
-    wire("handlers.dmready_watch")
-
-    # Admin-only command index and optional whoami
     wire("handlers.bloop")
-    wire("handlers.whoami")               # optional, if present
+    wire("handlers.whoami")
 
     log.info("🚀 SuccuBot starting…")
     app.run()
