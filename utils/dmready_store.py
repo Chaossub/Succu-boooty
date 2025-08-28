@@ -17,7 +17,6 @@ class DMReadyStore:
         self._db: Dict[str, Dict] = {}
         self._load()
 
-    # ---------- IO ----------
     def _load(self):
         try:
             with open(self.path, "r", encoding="utf-8") as f:
@@ -33,16 +32,12 @@ class DMReadyStore:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(self._db, f, ensure_ascii=False, indent=2)
-            shutil.move(tmp, self.path)      # atomic replace
+            shutil.move(tmp, self.path)
         finally:
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
+            try: os.remove(tmp)
+            except Exception: pass
 
-    # ---------- API ----------
     def add(self, user_id: int, first_name: str = "", username: str | None = None) -> bool:
-        """Add a user; return True if it was newly added."""
         key = str(user_id)
         if key in self._db:
             return False
@@ -73,5 +68,5 @@ class DMReadyStore:
         self._db = {}
         self._save()
 
-# --- Singleton shared across modules ---
+# Singleton used everywhere
 global_store = DMReadyStore()
