@@ -1,61 +1,56 @@
 # handlers/dm_admin.py
+# Admin DM helper:
+#   /dmnow – post a deep-link that opens a DM with this bot.
+# NOTE: DM-ready listing lives in handlers/dm_ready_admin.py.
+
+from __future__ import annotations
 import os
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-try:
-    from req_store import ReqStore
-    _store = ReqStore()
-except Exception:
-    _store = None
+def _is_allowed(uid: int) -> bool:
+    # Prefer your project helper if present
+    try:
+        from utils.admin_check import is_admin_or_owner  # type: ignore
+        return bool(is_admin_or_owner(uid))
+    except Exception:
+        pass
+    owner = (os.getenv("OWNER_ID") or "").strip()
+    supers = [s.strip() for s in (os.getenv("SUPER_ADMINS") or "").split(",") if s.strip()]
+    return str(uid) == owner or str(uid) in supers
 
-OWNER_ID        = int(os.getenv("OWNER_ID", "0")) or None
-SUPER_ADMIN_ID  = int(os.getenv("SUPER_ADMIN_ID", "0")) or None
-ADMIN_IDS = {i for i in (OWNER_ID, SUPER_ADMIN_ID) if i}
-
-def _is_admin(uid: int) -> bool:
-    return uid in ADMIN_IDS
+def _bot_link(username: str) -> str:
+    return f"https://t.me/{username}?start=ready"
 
 def register(app: Client):
 
-    @app.on_message(filters.private & filters.command("dmreadylist"))
-    async def dmready_list(client: Client, m: Message):
-        if not _is_admin(m.from_user.id):
-            return await m.reply_text("🚫 Admin only.")
-        if not _store:
-            return await m.reply_text("❌ DM-ready storage is not configured.")
-
-        docs = _store.get_all_dm_ready_global()
-        if not docs:
-            return await m.reply_text("📋 Nobody is DM-ready yet.")
-
-        lines = []
-        for d in docs:
-            uid = d.get("user_id")
-            lines.append(f"✅ <a href='tg://user?id={uid}'>User {uid}</a>")
-        await m.reply_text("📋 <b>DM-ready users</b>:\n\n" + "\n".join(lines), disable_web_page_preview=True)
-
-    @app.on_message(filters.private & filters.command("dmreadyclear"))
-    async def dmready_clear(client: Client, m: Message):
-        """ /dmreadyclear        → clear all
-            /dmreadyclear <id>   → clear one
-            (or reply to user’s message in DM and use /dmreadyclear)
+    @app.on_message(filters.command("dmnow"))
+    async def dmnow(client: Client, m: Message):
         """
-        if not _is_admin(m.from_user.id):
-            return await m.reply_text("🚫 Admin only.")
-        if not _store:
-            return await m.reply_text("❌ DM-ready storage is not configured.")
+        Usage:
+          • reply to a user's message with /dmnow
+          • or /dmnow @username
+          • or /dmnow <user_id>
+        """
+        uid = m.from_user.id if m.from_user else 0
+        if not _is_allowed(uid):
+            return await m.reply_text("❌ You’re not allowed to use this command.")
 
-        args = (m.text or "").split()
-        target = None
-        if len(args) >= 2 and args[1].isdigit():
-            target = int(args[1])
-        elif m.reply_to_message and m.reply_to_message.from_user:
-            target = m.reply_to_message.from_user.id
+        me = await client.get_me()
+        url = _bot_link(me.username)
 
-        if target is None:
-            count = _store.clear_dm_ready_global(None)
-            return await m.reply_text(f"🧹 Cleared DM-ready for <b>{count}</b> users.")
+        target_text = None
+        if m.reply_to_message and m.reply_to_message.from_user:
+            u = m.reply_to_message.from_user
+            at = ("@" + u.username) if u.username else f"<code>{u.id}</code>"
+            target_text = f"{u.first_name} {at}"
+        elif m.text and len(m.text.split()) > 1:
+            target_text = m.text.split(maxsplit=1)[1].strip()
+
+        if target_text:
+            msg = f"💌 Tap to open a DM with the bot for {target_text}:\n{url}"
         else:
-            count = _store.clear_dm_ready_global(target)
-            return await m.reply_text("🧹 Cleared." if count else "Nothing to clear.")
+            msg = f"💌 Tap to open a DM with the bot:\n{url}"
+
+        # DM-ready is marked after they press Start in DM (handled in dm_foolproof.py)
+        await m.reply_text(msg, disable_web_page_preview=True)
