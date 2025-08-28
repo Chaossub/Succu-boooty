@@ -1,6 +1,5 @@
 # handlers/dm_ready_admin.py
-# /dmreadylist (aliases) + optional maintenance commands.
-
+# Admin tools to view/maintain DM-ready users.
 from __future__ import annotations
 import os, logging
 from pyrogram import Client, filters
@@ -20,6 +19,7 @@ def _env_owner_and_supers() -> set[str]:
     return s
 
 def _is_allowed(uid: int) -> bool:
+    # Prefer your project helper if present
     try:
         from utils.admin_check import is_admin_or_owner  # type: ignore
         if is_admin_or_owner(uid):
@@ -32,20 +32,19 @@ def register(app: Client):
 
     @app.on_message(filters.command(["dmreadylist", "dmreadys", "dmready_list"]))
     async def dmready_list(client: Client, m: Message):
-        try:
-            uid = m.from_user.id if m.from_user else 0
-            if not _is_allowed(uid):
-                return await m.reply_text("❌ You’re not allowed to use this command.")
+        uid = m.from_user.id if m.from_user else 0
+        if not _is_allowed(uid):
+            return await m.reply_text("❌ You’re not allowed to use this command.")
 
+        try:
             users = store.list_all()
             if not users:
                 return await m.reply_text("ℹ️ No one is marked DM-ready yet.")
 
             lines = []
-            for i, u in enumerate(users[:300], start=1):
-                name = u.get("first_name") or "User"
+            for i, u in enumerate(users[:400], start=1):
                 uname = ("@" + u["username"]) if u.get("username") else ""
-                lines.append(f"{i}. {name} {uname} — <code>{u.get('id')}</code>")
+                lines.append(f"{i}. {u.get('first_name','User')} {uname} — <code>{u.get('id')}</code>")
             await m.reply_text("✅ <b>DM-ready users</b>\n" + "\n".join(lines), disable_web_page_preview=True)
         except Exception as e:
             log.exception("dmreadylist failed")
@@ -58,11 +57,12 @@ def register(app: Client):
             return await m.reply_text("❌ You’re not allowed to use this command.")
         path = os.getenv("DMREADY_DB", "data/dm_ready.json")
         users = store.list_all()
+        preview = users[0] if users else "—"
         await m.reply_text(
             "🧪 <b>DM-ready debug</b>\n"
             f"• File: <code>{path}</code>\n"
             f"• Count: <code>{len(users)}</code>\n"
-            f"• First entry: <code>{users[0] if users else '—'}</code>",
+            f"• First: <code>{preview}</code>",
             disable_web_page_preview=True
         )
 
@@ -71,27 +71,20 @@ def register(app: Client):
         uid = m.from_user.id if m.from_user else 0
         if not _is_allowed(uid):
             return await m.reply_text("❌ You’re not allowed to use this command.")
+        parts = (m.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            return await m.reply_text("Usage: <code>/dmreadyremove &lt;user_id&gt;</code>")
         try:
-            parts = (m.text or "").split(maxsplit=1)
-            if len(parts) < 2:
-                return await m.reply_text("Usage: <code>/dmreadyremove &lt;user_id&gt;</code>")
             target = int(parts[1].strip())
-            ok = store.remove(target)
-            await m.reply_text("✅ Removed." if ok else "ℹ️ That user wasn’t in the list.")
-        except Exception as e:
-            await m.reply_text(f"⚠️ {e}")
+        except ValueError:
+            return await m.reply_text("Please provide a numeric user_id.")
+        ok = store.remove(target)
+        await m.reply_text("✅ Removed." if ok else "ℹ️ That user wasn’t in the list.")
 
     @app.on_message(filters.command("dmreadyclear"))
     async def dmready_clear(client: Client, m: Message):
         uid = m.from_user.id if m.from_user else 0
         if not _is_allowed(uid):
             return await m.reply_text("❌ You’re not allowed to use this command.")
-        try:
-            path = os.getenv("DMREADY_DB", "data/dm_ready.json")
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write("{}")
-            globals()["store"] = DMReadyStore()
-            await m.reply_text("🧹 Cleared DM-ready list.")
-        except Exception as e:
-            await m.reply_text(f"⚠️ {e}")
+        store.clear()
+        await m.reply_text("🧹 Cleared DM-ready list.")
