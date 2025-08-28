@@ -1,85 +1,63 @@
 # handlers/createmenu.py
-from __future__ import annotations
-import os, json
-from pathlib import Path
-from typing import Dict, Iterable
+# /createmenu <model> <menu text>  (admins/owner/superadmins only)
 
+import os
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Where menu overrides are stored (persisted as JSON)
-DATA_PATH = Path(os.getenv("MODEL_MENU_DATA", "data/model_menus.json"))
-DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+from utils.menu_store import MenuStore
 
-MODEL_KEYS = {"roni", "ruby", "rin", "savy"}
+try:
+    from utils.admin_check import is_owner_or_admin_id
+    def _allowed(client: Client, user_id: int) -> bool:
+        return is_owner_or_admin_id(user_id)
+except Exception:
+    OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
+    SUPER_ADMINS = {int(x) for x in os.getenv("SUPER_ADMINS","").replace(",", " ").split() if x.strip().isdigit()}
+    def _allowed(client: Client, user_id: int) -> bool:
+        return (user_id == OWNER_ID) or (user_id in SUPER_ADMINS)
 
+MODEL_KEYS = ["roni", "ruby", "rin", "savy"]
 
-# -------- Admin detection (accept many env names) -----------------------------
-def _parse_ids(raw: str) -> Iterable[int]:
-    for token in (raw or "").replace(";", ",").replace(" ", "").split(","):
-        if token.isdigit():
-            yield int(token)
+def _env_name_to_key(name: str):
+    name = (name or "").strip().lower()
+    mapping = {}
+    for k in MODEL_KEYS:
+        env_name = os.getenv(f"{k.upper()}_NAME", "").strip().lower()
+        if env_name:
+            mapping[env_name] = k
+    return mapping.get(name)
 
-def _get_admin_ids() -> set[int]:
-    admin_vars = [
-        "OWNER_IDS", "OWNERS", "OWNER_ID",
-        "SUPER_ADMIN_IDS", "SUPER_ADMINS", "ADMINS",
-    ]
-    ids: set[int] = set()
-    for var in admin_vars:
-        ids.update(_parse_ids(os.getenv(var, "")))
-    return ids
-
-ADMIN_IDS = _get_admin_ids()
-
-
-def _load() -> Dict[str, dict]:
-    try:
-        if DATA_PATH.is_file():
-            return json.loads(DATA_PATH.read_text() or "{}")
-    except Exception:
-        pass
-    return {}
-
-def _save(d: Dict[str, dict]):
-    DATA_PATH.write_text(json.dumps(d, indent=2, ensure_ascii=False))
-
-def _ensure_entry(d: Dict[str, dict], model: str) -> Dict[str, dict]:
-    if model not in d:
-        d[model] = {}
-    return d
-
+def _normalize_model(word: str):
+    word = (word or "").strip().lower()
+    if word in MODEL_KEYS:
+        return word
+    env_key = _env_name_to_key(word)
+    return env_key
 
 def register(app: Client):
+    store = MenuStore()
 
-    # NOTE: allow command in private or groups
-    @app.on_message(filters.command(["createmenu"]))
-    async def createmenu(client: Client, m: Message):
-        # auth
-        user_id = m.from_user.id if m.from_user else 0
-        if user_id not in ADMIN_IDS:
-            return await m.reply_text("You are not authorized to use this command.")
+    @app.on_message(filters.private & filters.command("createmenu"))
+    async def create_menu(client: Client, m: Message):
+        uid = m.from_user.id if m.from_user else 0
+        if not _allowed(client, uid):
+            await m.reply_text("❌ You’re not allowed to use this command.")
+            return
 
-        # Expect: /createmenu roni <menu text>
-        # Works with `/createmenu@YourBot`
-        raw = (m.text or "").split(None, 2)  # ['/createmenu', 'roni', '<menu text>']
-        if len(raw) < 3:
-            return await m.reply_text(
-                "Usage:\n<code>/createmenu roni &lt;menu text&gt;</code>\n"
-                "Models: roni, ruby, rin, savy"
-            )
+        parts = m.text.split(maxsplit=2)
+        if len(parts) < 3:
+            await m.reply_text("Usage:\n<code>/createmenu roni &lt;menu text&gt;</code>")
+            return
 
-        model = raw[1].split("@", 1)[0].strip().lower()  # handle '/createmenu@bot roni ...' too
-        if model not in MODEL_KEYS:
-            return await m.reply_text("Unknown model. Use: roni, ruby, rin, savy")
+        model_word = parts[1]
+        text = parts[2].strip()
 
-        menu_text = raw[2].strip()
-        data = _load()
-        data = _ensure_entry(data, model)
-        data[model]["menu_text"] = menu_text
-        _save(data)
+        key = _normalize_model(model_word)
+        if not key:
+            await m.reply_text("Unknown model. Try one of: " + ", ".join(MODEL_KEYS))
+            return
 
-        return await m.reply_text(
-            f"✅ Saved menu text for <b>{model.title()}</b>:\n\n<blockquote>{menu_text}</blockquote>\n\n"
-            "Open Menus → that model to see it live."
-        )
+        store.set_menu(key, text)
+        display = os.getenv(f"{key.upper()}_NAME", key.capitalize())
+        await m.reply_text(f"✅ Saved menu for <b>{display}</b>.\nOpen <b>Menus</b> → {display} to see it.")
