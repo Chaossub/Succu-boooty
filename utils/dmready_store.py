@@ -1,18 +1,19 @@
 # utils/dmready_store.py
-# Small JSON-backed store for DM-ready users (persists across restarts).
+# JSON-backed, restart-safe store for DM-ready users.
 from __future__ import annotations
 import os, json, time, tempfile, shutil
 from typing import Dict, List
 
-_DB_PATH = os.getenv("DMREADY_DB", "data/dm_ready.json")
+DB_PATH = os.getenv("DMREADY_DB", "data/dm_ready.json")
 
-def _ensure_dir(path: str):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+def _ensure_dir_for(path: str):
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
 
 class DMReadyStore:
     def __init__(self, path: str | None = None):
-        self.path = path or _DB_PATH
-        _ensure_dir(self.path)
+        self.path = path or DB_PATH
+        _ensure_dir_for(self.path)
         self._db: Dict[str, Dict] = {}
         self._load()
 
@@ -27,12 +28,12 @@ class DMReadyStore:
             self._db = {}
 
     def _save(self):
-        _ensure_dir(self.path)
+        _ensure_dir_for(self.path)
         fd, tmp = tempfile.mkstemp(prefix="dmready_", suffix=".json")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(self._db, f, ensure_ascii=False, indent=2)
-            shutil.move(tmp, self.path)  # atomic replace
+            shutil.move(tmp, self.path)      # atomic replace
         finally:
             try:
                 os.remove(tmp)
@@ -41,7 +42,7 @@ class DMReadyStore:
 
     # ---------- API ----------
     def add(self, user_id: int, first_name: str = "", username: str | None = None) -> bool:
-        """Add a user; return True if newly added."""
+        """Add a user; return True if it was newly added."""
         key = str(user_id)
         if key in self._db:
             return False
@@ -71,3 +72,6 @@ class DMReadyStore:
     def clear(self):
         self._db = {}
         self._save()
+
+# --- Singleton shared across modules ---
+global_store = DMReadyStore()
