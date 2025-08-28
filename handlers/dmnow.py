@@ -1,4 +1,6 @@
 # handlers/dmnow.py
+# /dmnow → deep-link button to your bot (no side-effects)
+
 import os
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
