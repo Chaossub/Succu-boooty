@@ -31,26 +31,22 @@ def kb_main() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(BTN_HELP,   callback_data="dmf_help")],
     ])
 
-# ---------------------------------------------------------------------------
-# Dedupe: avoid double execution from any race/duplicate update delivery
-# key=(chat_id, message_id, 'start')  / also per-user short window
+# -------- Dedup guards (avoid double /start) --------
 _recent: Dict[Tuple[int, int, str], float] = {}
 _last_by_user: Dict[int, float] = {}
-DEDUP_MSG_WINDOW = 5.0    # seconds per same message id
-DEDUP_USER_WINDOW = 3.0   # seconds per user
+DEDUP_MSG_WINDOW = 5.0
+DEDUP_USER_WINDOW = 3.0
 
 def _seen(chat_id: int, message_id: int, user_id: int) -> bool:
     now = time.time()
     k = (chat_id, message_id, "start")
-    # same message again?
     if now - _recent.get(k, 0.0) < DEDUP_MSG_WINDOW:
         return True
     _recent[k] = now
-    # too soon for same user?
     if now - _last_by_user.get(user_id, 0.0) < DEDUP_USER_WINDOW:
         return True
     _last_by_user[user_id] = now
-    # garbage collect old entries
+    # prune
     for kk, ts in list(_recent.items()):
         if now - ts > 5 * DEDUP_MSG_WINDOW:
             _recent.pop(kk, None)
@@ -58,7 +54,7 @@ def _seen(chat_id: int, message_id: int, user_id: int) -> bool:
         if now - ts > 5 * DEDUP_USER_WINDOW:
             _last_by_user.pop(uid, None)
     return False
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------
 
 def register(app: Client):
 
@@ -68,12 +64,9 @@ def register(app: Client):
         if not u:
             return
 
-        # Dedupe guard — if this exact message (or same user within a tight window)
-        # was already processed, bail out.
         if _seen(m.chat.id, m.id or 0, u.id):
             return
 
-        # Mark once (persisted)
         newly = store.add(u.id, u.first_name, u.username)
         if newly:
             log.info(f"DM-ready NEW user {u.id} ({u.first_name})")
@@ -84,7 +77,6 @@ def register(app: Client):
                 except Exception as e:
                     log.warning(f"Owner notify failed: {e}")
 
-        # Send/refresh the DM portal
         try:
             await m.reply_text(
                 f"{WELCOME_TITLE}\n{WELCOME_BODY}",
