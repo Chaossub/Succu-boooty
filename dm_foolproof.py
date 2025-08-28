@@ -1,157 +1,112 @@
 # dm_foolproof.py
-# Private DM portal, DM-ready marking, and /start deep-link handling
-from __future__ import annotations
-import os, time, logging
-from typing import Dict, Optional
+# Private portal + DM-ready tracking and edit-in-place menus
+
+import os, time, logging, contextlib
+from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from pyrogram.enums import ChatType
+from pyrogram.enums import ParseMode
+
+from utils.dmready_store import DMReadyStore
 
 log = logging.getLogger("dm_foolproof")
 
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-SANCTUARY_GROUP_IDS = [
-    int(x.strip()) for x in (os.getenv("SANCTUARY_GROUP_IDS", "") or "").split(",") if x.strip()
-]
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
+# group where you want a public “DM-ready — Name” notice (optional)
+ANNOUNCE_GROUP_ID = int(os.getenv("DMREADY_ANNOUNCE_GROUP_ID", "0") or "0")
 
-# Button labels
-BTN_MENUS  = os.getenv("BTN_MENUS", "💕 Menus")
-BTN_ADMINS = os.getenv("BTN_CONTACT_ADMINS", "👑 Contact Admins")
-BTN_FIND   = os.getenv("BTN_FIND_MODELS", "🔥 Find Our Models Elsewhere")
-BTN_HELP   = os.getenv("BTN_HELP", "❓ Help")
-BTN_BACK   = os.getenv("BTN_BACK_MAIN", "⬅️ Back to Main")
-
-# Static texts
-FIND_MODELS_TEXT = os.getenv("FIND_MODELS_TEXT", "All verified off-platform links are collected here.")
-WELCOME_COPY = (
-    "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
+# main panel strings
+WELCOME_TITLE = "🔥 <b>Welcome to SuccuBot</b> 🔥"
+WELCOME_BODY  = (
     "Your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
     "✨ <i>Use the menu below to navigate!</i>"
 )
 
-# ---------- de-dupe state (per-user) ----------
-_last_start_ts: Dict[int, float] = {}
-_last_portal_msg: Dict[int, int] = {}   # chat_id -> message_id
-DEDUP_WINDOW = 2.0  # seconds
+BTN_MENUS   = os.getenv("BTN_MENUS", "💕 Menus")
+BTN_ADMINS  = os.getenv("BTN_ADMINS", "👑 Contact Admins")
+BTN_FIND    = os.getenv("BTN_FIND",  "🔥 Find Our Models Elsewhere")
+BTN_HELP    = os.getenv("BTN_HELP",  "❓ Help")
+
+FIND_MODELS_TEXT = os.getenv("FIND_MODELS_TEXT", "✨ Find Our Models Elsewhere ✨\n\nAll verified off-platform links for our models are here.")
+
+# de-dupe guard (same chat, same user, within window)
+_last_start: dict[tuple[int, int], float] = {}
+DEDUP_WINDOW = 1.2  # seconds
+
+_store = DMReadyStore()  # persistent
 
 def _kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(BTN_MENUS, callback_data="dmf_main_menus")],
-            [InlineKeyboardButton(BTN_ADMINS, callback_data="dmf_contact_admins")],
-            [InlineKeyboardButton(BTN_FIND, callback_data="dmf_find_elsewhere")],
-            [InlineKeyboardButton(BTN_HELP, callback_data="dmf_help")],
+            [InlineKeyboardButton(BTN_MENUS, callback_data="menu_open")],
+            [InlineKeyboardButton(BTN_ADMINS, callback_data="contact_admins")],
+            [InlineKeyboardButton(BTN_FIND, callback_data="find_elsewhere")],
+            [InlineKeyboardButton(BTN_HELP, callback_data="help_panel")],
         ]
     )
 
-def _kb_back() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton(BTN_BACK, callback_data="dmf_back_main")]])
+def _kb_back_to_main() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Main", callback_data="open_main")]])
 
-async def _send_or_edit_portal(client: Client, chat_id: int) -> None:
-    """Send the single main portal block—or edit the previous one if we have it."""
-    text = WELCOME_COPY
-    kb = _kb_main()
-    msg_id = _last_portal_msg.get(chat_id)
-    if msg_id:
-        try:
-            await client.edit_message_text(chat_id, msg_id, text, reply_markup=kb, disable_web_page_preview=True)
+async def _send_or_edit_main(m: Message):
+    text = f"{WELCOME_TITLE}\n{WELCOME_BODY}"
+    try:
+        # try to edit the message we're replying to (prevents duplicates)
+        if m.reply_to_message and m.reply_to_message.from_user and m.reply_to_message.from_user.is_bot:
+            await m.reply_to_message.edit_text(text, reply_markup=_kb_main(), disable_web_page_preview=True)
             return
+    except Exception:
+        pass
+    await m.reply_text(text, reply_markup=_kb_main(), disable_web_page_preview=True, parse_mode=ParseMode.HTML)
+
+async def _announce_dm_ready_once(client: Client, user: Optional["User"]):
+    if not user:
+        return
+    # persist; only True if new
+    created = _store.set_dm_ready_global(user.id, user.username, user.first_name)
+    if created and OWNER_ID and _store.should_notify_owner(user.id):
+        try:
+            uname = f"@{user.username}" if user.username else "(no username)"
+            await client.send_message(OWNER_ID, f"✅ DM-ready — <b>{user.first_name}</b> {uname}", parse_mode=ParseMode.HTML)
         except Exception:
-            # message might be gone or identical; fall through and send fresh
             pass
-    m = await client.send_message(chat_id, text, reply_markup=kb, disable_web_page_preview=True)
-    _last_portal_msg[chat_id] = m.id
+        # optional public announce
+        if ANNOUNCE_GROUP_ID:
+            with contextlib.suppress(Exception):
+                uname = f"@{user.username}" if user.username else ""
+                await client.send_message(ANNOUNCE_GROUP_ID, f"✅ DM-ready — {user.first_name} {uname}")
 
 def register(app: Client):
 
-    # ---------- /start handler (private only) ----------
+    # /start in private
     @app.on_message(filters.private & filters.command("start"))
     async def start_portal(client: Client, m: Message):
-        # re-entrancy/dup guard
-        if not m.from_user:
-            return
-        uid = m.from_user.id
+        # hard de-dupe
+        k = (m.chat.id, m.from_user.id if m.from_user else 0)
         now = time.time()
-        if now - _last_start_ts.get(uid, 0.0) < DEDUP_WINDOW:
+        if now - _last_start.get(k, 0) < DEDUP_WINDOW:
             return
-        _last_start_ts[uid] = now
+        _last_start[k] = now
 
-        # Deep-link payload: /start ready (mark DM-ready)
-        payload = ""
-        try:
-            payload = (m.command[1] if len(m.command) > 1 else "").strip().lower()
-        except Exception:
-            payload = ""
+        # mark DM-ready & notify owner once
+        await _announce_dm_ready_once(client, m.from_user)
 
-        if payload == "ready":
-            try:
-                # mark DM-ready in your ReqStore (if present)
-                from utils.req_store import ReqStore  # your existing store
-                store = ReqStore()
-                if store.set_dm_ready_global(uid, True):
-                    # announce once to owner
-                    uname = f"@{m.from_user.username}" if m.from_user.username else ""
-                    try:
-                        await client.send_message(
-                            OWNER_ID,
-                            f"✅ DM-ready — {m.from_user.first_name} {uname}"
-                        )
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+        await _send_or_edit_main(m)
 
-        # Show portal (single message)
-        await _send_or_edit_portal(client, m.chat.id)
+    # main menu open / back
+    @app.on_callback_query(filters.regex(r"^(open_main|dmf_open_menu)$"))
+    async def cb_open_main(client: Client, q):
+        text = f"{WELCOME_TITLE}\n{WELCOME_BODY}"
+        with contextlib.suppress(Exception):
+            await q.message.edit_text(text, reply_markup=_kb_main(), disable_web_page_preview=True, parse_mode=ParseMode.HTML)
+        with contextlib.suppress(Exception):
+            await q.answer()
 
-    # ---------- Main menu callbacks ----------
-    @app.on_callback_query(filters.regex("^dmf_back_main$"))
-    async def cb_back_main(client: Client, q):
-        await q.answer()
-        await _send_or_edit_portal(client, q.message.chat.id)
-
-    @app.on_callback_query(filters.regex("^dmf_main_menus$"))
-    async def cb_open_menus(client: Client, q):
-        await q.answer()
-        kb = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("💘 Roni", callback_data="dmf_model_roni"),
-                 InlineKeyboardButton("💘 Ruby", callback_data="dmf_model_ruby")],
-                [InlineKeyboardButton("💘 Rin",  callback_data="dmf_model_rin"),
-                 InlineKeyboardButton("💘 Savy", callback_data="dmf_model_savy")],
-                [InlineKeyboardButton("💞 Contact Models", callback_data="dmf_contact_models")],
-                [InlineKeyboardButton(BTN_BACK, callback_data="dmf_back_main")],
-            ]
-        )
-        await q.message.edit_text("💕 <b>Menus</b>\nPick a model or contact the team.", reply_markup=kb)
-
-    @app.on_callback_query(filters.regex("^dmf_contact_admins$"))
-    async def cb_admins(client: Client, q):
-        await q.answer()
-        kb = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("👑 Message Roni", url=f"https://t.me/{os.getenv('RONI_USERNAME','')}")],
-                [InlineKeyboardButton("👑 Message Ruby", url=f"https://t.me/{os.getenv('RUBY_USERNAME','')}")],
-                [InlineKeyboardButton("🕵️ Anonymous Message", callback_data="dmf_anon")],
-                [InlineKeyboardButton("💡 Suggestion Box", callback_data="dmf_suggest")],
-                [InlineKeyboardButton(BTN_BACK, callback_data="dmf_back_main")],
-            ]
-        )
-        await q.message.edit_text("How would you like to reach us?", reply_markup=kb)
-
-    @app.on_callback_query(filters.regex("^dmf_find_elsewhere$"))
+    # “Find our models elsewhere”
+    @app.on_callback_query(filters.regex("^find_elsewhere$"))
     async def cb_find_elsewhere(client: Client, q):
-        await q.answer()
-        await q.message.edit_text(
-            f"✨ <b>Find Our Models Elsewhere</b> ✨\n\n{FIND_MODELS_TEXT}",
-            reply_markup=_kb_back(),
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex("^dmf_help$"))
-    async def cb_help(client: Client, q):
-        await q.answer()
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton(BTN_BACK, callback_data="dmf_back_main")]])
-        await q.message.edit_text("Help\nChoose an option.", reply_markup=kb)
-
+        with contextlib.suppress(Exception):
+            await q.message.edit_text(FIND_MODELS_TEXT, reply_markup=_kb_back_to_main(), disable_web_page_preview=True)
+        with contextlib.suppress(Exception):
+            await q.answer()
