@@ -74,8 +74,15 @@ if __name__ == "__main__":
     wire("handlers.hi")
     wire("handlers.warmup")
     wire("handlers.health")
-    wire("handlers.welcome")              # group joins/leaves (NOT /start)
-    wire("handlers.bloop")                # admin-only command index
+
+    # Group joins/leaves (separate from /start)
+    wire("handlers.welcome")
+
+    # NEW: remove DM-ready when someone leaves/kicked/banned from your group(s)
+    wire("handlers.dmready_watch")
+
+    # Admin-only command index and optional whoami
+    wire("handlers.bloop")
     wire("handlers.whoami")               # optional, if present
 
     log.info("🚀 SuccuBot starting…")
