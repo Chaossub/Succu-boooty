@@ -1,93 +1,49 @@
 # handlers/dmnow.py
+# /dmnow → reply with a deep-link BUTTON to open a DM with this bot.
 from __future__ import annotations
-import logging
-
+import os
 from pyrogram import Client, filters
-from pyrogram.types import (
-    Message,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
-log = logging.getLogger("dmnow")
-
-# ---- Optional ReqStore integration (marks DM-ready) -------------------------
-try:
-    from req_store import ReqStore
-    _store = ReqStore()
-except Exception:
-    _store = None
-
-
-def _set_dm_ready(uid: int) -> bool:
-    """
-    Best-effort: mark user as DM-ready.
-    Returns True if we changed it from False->True, False if it was already True or failed.
-    """
-    if not _store or not uid:
-        return False
+# ----- auth gate --------------------------------------------------------------
+def _is_allowed(uid: int) -> bool:
+    # Prefer your project's helper if present
     try:
-        # Prefer global API if present
-        if hasattr(_store, "is_dm_ready_global") and hasattr(_store, "set_dm_ready_global"):
-            if not _store.is_dm_ready_global(uid):
-                _store.set_dm_ready_global(uid, True, by_admin=False)
-                return True
-            return False
-        # Fallback older API
-        if hasattr(_store, "is_dm_ready") and hasattr(_store, "set_dm_ready"):
-            if not _store.is_dm_ready(uid):
-                _store.set_dm_ready(uid, True)
-                return True
-            return False
-    except Exception as e:
-        log.warning(f"Failed to set dm-ready for {uid}: {e}")
-    return False
+        from utils.admin_check import is_admin_or_owner  # type: ignore
+        return bool(is_admin_or_owner(uid))
+    except Exception:
+        pass
+    owner = (os.getenv("OWNER_ID") or "").strip()
+    supers = [s.strip() for s in (os.getenv("SUPER_ADMINS") or "").split(",") if s.strip()]
+    return str(uid) == owner or str(uid) in supers
 
-
-def _open_dm_kb(bot_username: str) -> InlineKeyboardMarkup:
-    # Deep-link to open bot DM and land on our portal
-    url = f"https://t.me/{bot_username}?start=portal"
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("💬 Open DM with SuccuBot", url=url)]]
-    )
-
+# Optional env overrides
+BTN_DMNOW = os.getenv("BTN_DMNOW", "💌 DM Now")
+BOT_USERNAME_ENV = os.getenv("BOT_USERNAME", "").strip()  # e.g., SuccuBot (no @)
 
 def register(app: Client):
 
-    @app.on_message(filters.command(["dmnow"]))
-    async def dmnow(client: Client, m: Message):
-        """
-        /dmnow — Give the user a button to open the bot DM, and mark them DM-ready.
-        Safe in groups or DMs. No duplicate messages; DM-ready is set now so the
-        /start portal won't announce it again.
-        """
-        if not m.from_user:
-            return
+    @app.on_message(filters.command("dmnow"))
+    async def dmnow_button(client: Client, m: Message):
+        # Gate: only owner/superadmins/admins
+        uid = m.from_user.id if m.from_user else 0
+        if not _is_allowed(uid):
+            return await m.reply_text("❌ You’re not allowed to use this command.")
 
-        uid = m.from_user.id
-
-        # Mark DM-ready *first*, so when they /start in DM we won't re-announce
-        changed = _set_dm_ready(uid)
-        # Get bot username (prefer cached; fetch if needed)
-        try:
+        # Resolve bot username (env first, then API)
+        if BOT_USERNAME_ENV:
+            bot_username = BOT_USERNAME_ENV
+        else:
             me = await client.get_me()
             bot_username = me.username or ""
-        except Exception:
-            bot_username = ""
-
         if not bot_username:
-            # Fallback text if bot username is somehow missing
-            return await m.reply_text(
-                "I couldn't determine my @username to build the DM link. "
-                "Please set the bot username in BotFather."
-            )
+            return await m.reply_text("⚠️ Bot username is missing. Set one via @BotFather.")
 
-        # Build keyboard and reply
-        kb = _open_dm_kb(bot_username)
-        msg = "Tap below to open a private chat with me.\n\n" \
-              "Once you open the DM, press <b>Start</b> to enter the portal."
-        if changed:
-            # Quietly note we marked them; keeps behavior clear during testing
-            msg += "\n\n✅ You’re marked DM-ready."
+        deep_link = f"https://t.me/{bot_username}?start=ready"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(BTN_DMNOW, url=deep_link)]])
 
-        await m.reply_text(msg, reply_markup=kb, disable_web_page_preview=True)
+        await m.reply_text(
+            "Tap to open a private chat with the bot:",
+            reply_markup=kb,
+            disable_web_page_preview=True
+        )
