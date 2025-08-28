@@ -1,56 +1,59 @@
 # utils/dmready_store.py
-import json, os, time
-from typing import Dict, List, Optional
+# Persistent JSON store for DM-ready users.
 
-_DEFAULT_PATH = os.getenv("DMREADY_PATH", "state/dmready.json")
-os.makedirs(os.path.dirname(_DEFAULT_PATH), exist_ok=True)
+import json, os, time, threading
+from typing import Dict, Optional, List
+
+_PATH = os.getenv("DMREADY_JSON_PATH", "data/dmready.json")
 
 class DMReadyStore:
-    def __init__(self, path: str = _DEFAULT_PATH):
+    def __init__(self, path: str = _PATH):
         self.path = path
-        self._data: Dict[str, Dict] = {}
-        self._load()
+        self._lock = threading.RLock()
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        if not os.path.exists(self.path):
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump({}, f)
 
-    def _load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                self._data = json.load(f)
-        except Exception:
-            self._data = {}
+    def _load(self) -> Dict[str, dict]:
+        with self._lock:
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    return json.load(f) or {}
+            except Exception:
+                return {}
 
-    def _save(self):
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.path)
+    def _save(self, data: Dict[str, dict]) -> None:
+        with self._lock:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
 
-    def set_dm_ready_global(self, user_id: int, username: Optional[str], first: Optional[str]) -> bool:
+    def set_dm_ready_global(self, user_id: int, username: Optional[str] = None, first_name: Optional[str] = None) -> bool:
         key = str(user_id)
-        existed = key in self._data
-        self._data[key] = {
-            "user_id": user_id,
-            "username": username or "",
-            "first_name": first or "",
-            "since": self._data.get(key, {}).get("since") or int(time.time()),
-            "updated": int(time.time()),
+        data = self._load()
+        new = key not in data
+        data[key] = {
+            "id": user_id,
+            "username": (username or None),
+            "first_name": (first_name or None),
+            "ts": int(time.time()),
         }
-        self._save()
-        return not existed
+        self._save(data)
+        return new
 
-    def is_dm_ready_global(self, user_id: int) -> bool:
-        return str(user_id) in self._data
-
-    def get_all_dm_ready_global(self) -> List[Dict]:
-        return sorted(self._data.values(), key=lambda d: d.get("since", 0))
-
-    def remove_dm_ready_global(self, user_id: int) -> bool:
+    def unset_dm_ready_global(self, user_id: int) -> bool:
         key = str(user_id)
-        if key in self._data:
-            self._data.pop(key)
-            self._save()
+        data = self._load()
+        if key in data:
+            data.pop(key, None)
+            self._save(data)
             return True
         return False
 
-    def clear_dm_ready_global(self) -> None:
-        self._data = {}
-        self._save()
+    def is_dm_ready_global(self, user_id: int) -> bool:
+        return str(user_id) in self._load()
+
+    def list_all(self) -> List[dict]:
+        return list(self._load().values())
