@@ -14,7 +14,6 @@ class DMReadyStore:
         self._db: Dict[str, Dict] = {}
         self._load()
 
-    # ---------- IO ----------
     def _load(self):
         try:
             with open(self.path, "r", encoding="utf-8") as f:
@@ -26,20 +25,18 @@ class DMReadyStore:
 
     def _save(self):
         _ensure_dir(self.path)
-        tmp_fd, tmp_name = tempfile.mkstemp(prefix="dmready_", suffix=".json")
+        fd, tmp = tempfile.mkstemp(prefix="dmready_", suffix=".json")
         try:
-            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(self._db, f, ensure_ascii=False, indent=2)
-            shutil.move(tmp_name, self.path)  # atomic replace
+            shutil.move(tmp, self.path)
         finally:
             try:
-                os.remove(tmp_name)
+                os.remove(tmp)
             except Exception:
                 pass
 
-    # ---------- API ----------
     def add(self, user_id: int, first_name: str = "", username: str | None = None) -> bool:
-        """Returns True if it was newly added."""
         key = str(user_id)
         if key in self._db:
             return False
