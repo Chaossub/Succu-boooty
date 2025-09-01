@@ -1,82 +1,92 @@
-# handlers/dm_foolproof.py
-# Handles /start deep-link and marks DM-ready (once, persisted).
-import os
-import logging
-from typing import Optional
+# dm_foolproof.py
+# Single source of truth for /start + DM-ready marking & owner alert.
 
+import os, json, time, logging
+from typing import Optional, List
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from utils.dmready_store import DMReadyStore
 
 log = logging.getLogger("dm_foolproof")
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
-DMREADY_ECHO_IN_DM = os.getenv("DMREADY_ECHO_IN_DM", "0") == "1"
+# Comma-separated or single id (negative for supergroups)
+_SANCTUARY_IDS = os.getenv("SANCTUARY_GROUP_IDS") or os.getenv("SANCTUARY_CHAT_ID") or ""
+SANCTUARY_GROUP_IDS: List[int] = []
+for part in _SANCTUARY_IDS.replace(" ", "").split(","):
+    if part:
+        try:
+            SANCTUARY_GROUP_IDS.append(int(part))
+        except ValueError:
+            pass
 
-# Optional: announce to a sanctuary log chat (not the public group)
-SANCTUARY_LOG_CHAT_ID = int(os.getenv("SANCTUARY_CHAT_ID", "0") or "0")
+# Button labels (keep in sync with your other handlers)
+BTN_MENU   = os.getenv("BTN_MENU",  "💕 Menus")
+BTN_ADMINS = os.getenv("BTN_ADMINS","👑 Contact Admins")
+BTN_FIND   = os.getenv("BTN_FIND",  "🔥 Find Our Models Elsewhere")
+BTN_HELP   = os.getenv("BTN_HELP",  "❓ Help")
 
+# Callback IDs expected by your existing handlers
+CB_MENU   = os.getenv("CB_MENU",   "open_menu")
+CB_ADMINS = os.getenv("CB_ADMINS", "contact_admins")
+CB_FIND   = os.getenv("CB_FIND",   "find_elsewhere")
+CB_HELP   = os.getenv("CB_HELP",   "help_panel")
 
-def _dm_portal_keyboard(bot_username: Optional[str]) -> InlineKeyboardMarkup:
-    rows = []
-    if bot_username:
-        rows.append([InlineKeyboardButton("💌 Open Portal", url=f"https://t.me/{bot_username}?start=ready")])
-    return InlineKeyboardMarkup(rows) if rows else None  # type: ignore[return-value]
+store = DMReadyStore()  # persists to data/dm_ready.json
 
+def _kb_portal() -> InlineKeyboardMarkup:
+    # Buttons are callbacks to your already-wired handlers
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(BTN_MENU,   callback_data=CB_MENU)],
+        [InlineKeyboardButton(BTN_ADMINS, callback_data=CB_ADMINS)],
+        [InlineKeyboardButton(BTN_FIND,   callback_data=CB_FIND)],
+        [InlineKeyboardButton(BTN_HELP,   callback_data=CB_HELP)],
+    ])
 
-def register(app: Client) -> None:
-    store = DMReadyStore()
+WELCOME_TEXT = (
+    "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
+    "Your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+    "✨ <i>Use the menu below to navigate!</i>"
+)
+
+def _format_user(u) -> str:
+    handle = f"@{u.username}" if u and u.username else ""
+    name = (u.first_name or "there")
+    return f"{name} {handle}".strip()
+
+async def _announce_owner_if_new(app: Client, user_id: int, user) -> None:
+    if OWNER_ID <= 0:
+        return
+    if store.was_just_marked(user_id):  # only on first mark
+        try:
+            text = f"✅ <b>DM-ready</b> — {_format_user(user)}"
+            await app.send_message(OWNER_ID, text)
+        except Exception as e:
+            log.warning("Owner DM-ready notify failed: %s", e)
+
+def register(app: Client):
 
     @app.on_message(filters.private & filters.command("start"))
-    async def start_mark_ready(client: Client, m: Message):
-        # Mark user DM-ready if new
-        user = m.from_user
-        if not user:
-            return
+    async def start_portal(client: Client, m: Message):
+        # Deep-link payloads: "d" means came from /dmnow button; anything else behaves the same
+        payload: Optional[str] = None
+        try:
+            if m.text and " " in m.text:
+                payload = m.text.split(" ", 1)[1].strip()
+        except Exception:
+            payload = None
 
-        is_new, doc = store.set_ready(
-            user_id=user.id,
-            username=(user.username or None),
-            first_name=(user.first_name or None),
-        )
+        u = m.from_user
+        uid = u.id if u else 0
 
-        # Optionally echo in the DM (off by default to avoid "duplicates")
-        if DMREADY_ECHO_IN_DM and is_new:
-            try:
-                await m.reply_text(
-                    f"✅ <b>DM-ready</b> — {user.first_name or 'User'}"
-                    + (f" @{user.username}" if user.username else ""),
-                    quote=False,
-                )
-            except Exception:
-                pass
+        # Mark DM-ready exactly once (persists)
+        if uid and not store.is_ready(uid):
+            store.set_ready(uid, username=u.username, first_name=u.first_name)
+            log.info("DM-ready NEW user %s (%s)", uid, _format_user(u))
+            await _announce_owner_if_new(client, uid, u)
 
-        # Notify OWNER_ID once, when new
-        if is_new and OWNER_ID:
-            try:
-                uname = f"@{user.username}" if user.username else "(no username)"
-                await client.send_message(
-                    OWNER_ID,
-                    f"✅ <b>DM-ready</b> — {user.first_name or 'User'} {uname} — <code>{user.id}</code>",
-                )
-            except Exception as e:
-                log.warning("Failed DM-ready owner notify: %s", e)
-
-        # Optional sanctuary log chat
-        if is_new and SANCTUARY_LOG_CHAT_ID:
-            try:
-                uname = f"@{user.username}" if user.username else "(no username)"
-                await client.send_message(
-                    SANCTUARY_LOG_CHAT_ID,
-                    f"✅ DM-ready — {user.first_name or 'User'} {uname}",
-                )
-            except Exception as e:
-                log.warning("Group announce failed for %s: %s", SANCTUARY_LOG_CHAT_ID, e)
-
-        # If you want to always present a portal button here, uncomment:
-        # me = await client.get_me()
-        # kb = _dm_portal_keyboard(me.username)
-        # if kb:
-        #     with contextlib.suppress(Exception):
-        #         await m.reply_text("Tap to reopen your portal anytime:", reply_markup=kb, quote=False)
+        # Reply with the portal (buttons only; no second handler touches /start)
+        try:
+            await m.reply_text(WELCOME_TEXT, reply_markup=_kb_portal(), disable_web_page_preview=True)
+        except Exception:
+            await client.send_message(m.chat.id, WELCOME_TEXT, reply_markup=_kb_portal(), disable_web_page_preview=True)
