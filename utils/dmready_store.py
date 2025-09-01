@@ -1,59 +1,75 @@
 # utils/dmready_store.py
-# Persistent JSON store for DM-ready users.
+from __future__ import annotations
+import os
+import time
+from typing import List, Dict, Optional, Tuple
 
-import json, os, time, threading
-from typing import Dict, Optional, List
+from pymongo import MongoClient, ASCENDING
+from pymongo.collection import Collection
 
-_PATH = os.getenv("DMREADY_JSON_PATH", "data/dmready.json")
 
 class DMReadyStore:
-    def __init__(self, path: str = _PATH):
-        self.path = path
-        self._lock = threading.RLock()
-        os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        if not os.path.exists(self.path):
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump({}, f)
+    """
+    Mongo-backed DM-ready registry.
+    Collection schema (dm_ready):
+      { _id: user_id (int),
+        user_id: int,
+        username: str | None,
+        first_name: str | None,
+        created_at: float (epoch),
+        updated_at: float (epoch)
+      }
+    """
+    def __init__(self) -> None:
+        uri = os.getenv("MONGODB_URI")
+        if not uri:
+            raise RuntimeError("MONGODB_URI is not set")
+        db_name = os.getenv("MONGO_DB", "succubot")
+        client = MongoClient(uri)
+        db = client[db_name]
+        self.col: Collection = db["dm_ready"]
+        # Ensure unique on user_id (used as _id too)
+        self.col.create_index([("_id", ASCENDING)], unique=True)
 
-    def _load(self) -> Dict[str, dict]:
-        with self._lock:
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    return json.load(f) or {}
-            except Exception:
-                return {}
+    # ── Writes ──────────────────────────────────────────────────────────────────
+    def set_ready(self, user_id: int, username: Optional[str], first_name: Optional[str]) -> Tuple[bool, Dict]:
+        """
+        Upsert user. Returns (is_new, doc).
+        """
+        now = time.time()
+        res = self.col.find_one_and_update(
+            {"_id": int(user_id)},
+            {"$setOnInsert": {"created_at": now},
+             "$set": {
+                "user_id": int(user_id),
+                "username": username,
+                "first_name": first_name,
+                "updated_at": now
+             }},
+            upsert=True,
+            return_document=True  # type: ignore[arg-type]
+        )
+        # find_one_and_update with return_document=True returns the post-update doc,
+        # but we still need to know if it existed before:
+        is_new = res and abs(res.get("created_at", now) - now) < 1e-6
+        # If this heuristic is too tight, explicitly re-check with a prior find.
+        return bool(is_new), res or {}
 
-    def _save(self, data: Dict[str, dict]) -> None:
-        with self._lock:
-            tmp = self.path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, self.path)
+    def clear(self, user_id: int) -> bool:
+        d = self.col.delete_one({"_id": int(user_id)})
+        return d.deleted_count > 0
 
-    def set_dm_ready_global(self, user_id: int, username: Optional[str] = None, first_name: Optional[str] = None) -> bool:
-        key = str(user_id)
-        data = self._load()
-        new = key not in data
-        data[key] = {
-            "id": user_id,
-            "username": (username or None),
-            "first_name": (first_name or None),
-            "ts": int(time.time()),
-        }
-        self._save(data)
-        return new
+    def clear_all(self) -> int:
+        d = self.col.delete_many({})
+        return d.deleted_count
 
-    def unset_dm_ready_global(self, user_id: int) -> bool:
-        key = str(user_id)
-        data = self._load()
-        if key in data:
-            data.pop(key, None)
-            self._save(data)
-            return True
-        return False
+    # ── Reads ───────────────────────────────────────────────────────────────────
+    def is_ready(self, user_id: int) -> bool:
+        return self.col.count_documents({"_id": int(user_id)}, limit=1) > 0
 
-    def is_dm_ready_global(self, user_id: int) -> bool:
-        return str(user_id) in self._load()
+    def get_all(self) -> List[Dict]:
+        return list(self.col.find({}, sort=[("created_at", ASCENDING)]))
 
-    def list_all(self) -> List[dict]:
-        return list(self._load().values())
+    def count(self) -> int:
+        return self.col.estimated_document_count()
+
