@@ -16,16 +16,22 @@ MONGO_DB_NAME        = os.getenv("MONGO_DB_NAME", "succubot")
 DM_READY_COLLECTION  = os.getenv("DM_READY_COLLECTION", "dm_ready")
 
 # ---- DB ----
-client = MongoClient(MONGO_URI) if MONGO_URI else None
+client = None
 col = None
-if client:
-    db = client[MONGO_DB_NAME]
-    col = db[DM_READY_COLLECTION]
-    # Unique user_id so duplicates across restarts/processes are prevented
-    try:
-        col.create_index("user_id", unique=True)
-    except Exception:
-        pass
+try:
+    if MONGO_URI:
+        client = MongoClient(MONGO_URI)
+        db = client[MONGO_DB_NAME]
+        col = db[DM_READY_COLLECTION]
+        # Unique user_id so duplicates across restarts/processes are prevented
+        try:
+            col.create_index("user_id", unique=True, name="uniq_user_id")
+        except Exception:
+            pass
+except Exception:
+    # If connection fails at import time, we'll behave conservatively below
+    client = None
+    col = None
 
 def _fmt(u):
     return f"{u.first_name or 'Someone'}" + (f" @{u.username}" if u.username else "")
@@ -34,10 +40,11 @@ async def _mark_once(uid: int, name: str, username: str) -> bool:
     """
     Returns True only the first time we ever see this user.
     Persists to Mongo so it survives restarts/deploys and works across replicas.
+    If DB isn't available, return False (conservative: avoid spamming).
     """
-    if not col:
-        # No DB configured -> fallback (will NOT survive restarts)
-        return True
+    if col is None:
+        # No DB configured or connection failed -> don't spam; treat as seen
+        return False
 
     try:
         col.insert_one({
@@ -50,7 +57,7 @@ async def _mark_once(uid: int, name: str, username: str) -> bool:
     except errors.DuplicateKeyError:
         return False  # seen before
     except Exception:
-        # If DB is temporarily down, act conservative (avoid spam)
+        # DB hiccup -> avoid duplicate spam
         return False
 
 def register(app: Client):
@@ -75,10 +82,10 @@ def register(app: Client):
         ph = await m.reply_text("…")
         await render_main(ph)
 
-    # Optional: owner-only test/reset helpers
+    # Optional: owner-only helpers
     @app.on_message(filters.private & filters.command("dmready_reset"))
     async def _reset_one(c: Client, m: Message):
-        if not col or m.from_user.id != OWNER_ID:
+        if col is None or m.from_user.id != OWNER_ID:
             return
         parts = (m.text or "").split(maxsplit=1)
         if len(parts) < 2:
@@ -94,6 +101,6 @@ def register(app: Client):
 
     @app.on_message(filters.private & filters.command("dmready_count"))
     async def _count(c: Client, m: Message):
-        if not col or m.from_user.id != OWNER_ID:
+        if col is None or m.from_user.id != OWNER_ID:
             return
         await m.reply_text(f"📊 DM-ready unique users: <b>{col.estimated_document_count()}</b>")
