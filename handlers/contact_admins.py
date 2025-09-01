@@ -1,75 +1,79 @@
-# Contact Admins panel + anonymous relay
+# handlers/contact_admins.py
 import os
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 
-RONI_ID  = int(os.getenv("RONI_ID", "0") or "0")
-RUBY_ID  = int(os.getenv("RUBY_ID", "0") or "0")
-RONI_N   = os.getenv("RONI_NAME", "Roni")
-RUBY_N   = os.getenv("RUBY_NAME", "Ruby")
+RONI_ID   = int(os.getenv("RONI_ID", "0") or "0")
+RUBY_ID   = int(os.getenv("RUBY_ID", "0") or "0")
+RONI_NAME = os.getenv("RONI_NAME", "Roni")
+RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
 
 BTN_BACK = os.getenv("BTN_BACK", "⬅️ Back to Main")
 
-_ANON_GATES = set()  # message_ids that act as anon prompts
+def _panel_text() -> str:
+    return (
+        "👑 <b>Contact Admins</b>\n\n"
+        "• Tap an admin to open their profile.\n"
+        "• Or send feedback or an anonymous message via the bot."
+    )
 
-def _kb_contact() -> InlineKeyboardMarkup:
+def _kb() -> InlineKeyboardMarkup:
     rows = []
     if RONI_ID:
-        rows.append([InlineKeyboardButton(f"👑 Contact {RONI_N}", url=f"tg://user?id={RONI_ID}")])
+        rows.append([InlineKeyboardButton(f"💌 DM {RONI_NAME}", url=f"tg://user?id={RONI_ID}")])
     if RUBY_ID:
-        rows.append([InlineKeyboardButton(f"👑 Contact {RUBY_N}", url=f"tg://user?id={RUBY_ID}")])
-    rows.append([InlineKeyboardButton("✉️ Send anonymous message", callback_data="anon_open")])
-    rows.append([InlineKeyboardButton(BTN_BACK, callback_data="panel_back_main")])
+        rows.append([InlineKeyboardButton(f"💌 DM {RUBY_NAME}", url=f"tg://user?id={RUBY_ID}")])
+    rows.append([
+        InlineKeyboardButton("💭 Suggestions / Feedback", callback_data="contact_admins_suggest"),
+        InlineKeyboardButton("🕵️ Anonymous Message", callback_data="contact_admins_anon"),
+    ])
+    rows.append([InlineKeyboardButton(BTN_BACK, callback_data="dmf_main")])
     return InlineKeyboardMarkup(rows)
 
 def register(app: Client):
-    # Hub button → this panel
-    @app.on_callback_query(filters.regex(r"^open_contact_admins$"))
-    async def open_panel(_, cq: CallbackQuery):
-        text = (
-            "👑 <b>Contact Admins</b>\n\n"
-            "• Tag an admin in chat\n"
-            "• Or send an anonymous note via the bot."
-        )
-        await cq.message.edit_text(text, reply_markup=_kb_contact(), disable_web_page_preview=True)
+
+    # Button from main panel
+    @app.on_callback_query(filters.regex("^contact_admins_open$"))
+    async def open_panel(client: Client, cq: CallbackQuery):
+        await cq.message.edit_text(_panel_text(), reply_markup=_kb(), disable_web_page_preview=True)
         await cq.answer()
 
-    # Optional text command to open the same panel
-    @app.on_message(filters.command(["contactadmins", "contact", "admins"]))
-    async def cmd_panel(_, m: Message):
-        await m.reply_text(
-            "👑 <b>Contact Admins</b>\n\n• Tag an admin in chat\n• Or send an anonymous note via the bot.",
-            reply_markup=_kb_contact(),
-            disable_web_page_preview=True,
+    # Suggestions flow
+    @app.on_callback_query(filters.regex("^contact_admins_suggest$"))
+    async def ask_suggest(client: Client, cq: CallbackQuery):
+        await cq.answer()
+        await cq.message.reply_text(
+            "💭 Send me your suggestion/feedback as the next message.\n"
+            "I'll forward it to the admins."
+        )
+        # tag user state by replying; simplest: wait for their next message and forward
+        # We’ll use a quick one-shot filter: command-like keyword
+        # Users will just type; we detect with reply-to
+    @app.on_message(filters.private & filters.reply & ~filters.command(["start","menu","help"]))
+    async def catch_reply(client: Client, m: Message):
+        if m.reply_to_message and "Suggestions / Feedback" in (m.reply_to_message.text or ""):
+            if OWNER_ID:
+                await client.send_message(
+                    OWNER_ID,
+                    f"💭 <b>Suggestion</b> from <a href='tg://user?id={m.from_user.id}'>{m.from_user.first_name}</a>:\n\n{m.text}"
+                )
+            await m.reply_text("✅ Sent to admins. Thanks!")
+
+    # Anonymous flow
+    @app.on_callback_query(filters.regex("^contact_admins_anon$"))
+    async def ask_anon(client: Client, cq: CallbackQuery):
+        await cq.answer()
+        await cq.message.reply_text(
+            "🕵️ Send your anonymous message now. I will forward it without your name."
         )
 
-    # Open anonymous gate
-    @app.on_callback_query(filters.regex(r"^anon_open$"))
-    async def anon_open(_, cq: CallbackQuery):
-        msg = await cq.message.reply_text(
-            "🕊️ <b>Anonymous message</b>\n"
-            "Reply to this message with your note and I’ll forward it privately to the owner.",
-            quote=True,
-        )
-        _ANON_GATES.add(msg.id)
-        await cq.answer("Okay! Reply to the new message I just sent.")
-
-    # Catch replies to the anon prompt and relay to owner
-    @app.on_message(filters.reply)
-    async def anon_relay(app: Client, m: Message):
-        if not m.reply_to_message or m.reply_to_message.id not in _ANON_GATES:
-            return
-        text = m.text or (m.caption or "")
-        if not text.strip():
-            return await m.reply("Please send text.")
-        try:
-            await app.send_message(
-                OWNER_ID,
-                f"🔔 <b>Anonymous message</b>\n\n{text}",
-                disable_web_page_preview=True,
-            )
-            await m.reply("✅ Sent anonymously to the owner.")
-        finally:
-            _ANON_GATES.discard(m.reply_to_message.id)
+    @app.on_message(filters.private & ~filters.command(["start","menu","help"]))
+    async def catch_anon(client: Client, m: Message):
+        # detect if they were prompted for anon (best-effort: look at last bot message text)
+        last = m.reply_to_message
+        if last and last.from_user and last.from_user.is_bot and "anonymous" in (last.text or "").lower():
+            if OWNER_ID:
+                await client.send_message(OWNER_ID, f"🕵️ <b>Anonymous message</b>:\n\n{m.text}")
+            await m.reply_text("✅ Sent anonymously.")
