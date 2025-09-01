@@ -1,67 +1,69 @@
-# handlers/help_panel.py
-# Restores the Help panel with Buyer Rules / Buyer Requirements / Game Rules.
-
+# Help panel with Buyer Rules / Requirements / Game Rules / Exemptions
 import os
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
-# pull long texts from env (you can keep them in .env or change here)
-RULES_TEXT = os.getenv("RULES_TEXT", "No rules text set.")
-BUYER_REQ_TEXT = os.getenv("BUYER_REQ_TEXT", "No buyer requirements set.")
-GAME_RULES_TEXT = os.getenv("GAME_RULES_TEXT", "No game rules set.")
+BTN_BACK = os.getenv("BTN_BACK", "⬅️ Back to Main")
 
-def _kb_help() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+# Pull text from env (use your existing keys; fallbacks are short but safe)
+BUYER_RULES_TEXT = os.getenv("RULES_TEXT") or "Buyer & House Rules are not configured yet."
+BUYER_REQS_TEXT  = os.getenv("BUYER_REQUIREMENTS_TEXT") or "Buyer requirements are not configured yet."
+GAME_RULES_TEXT  = os.getenv("GAME_RULES_TEXT") or "Game rules are not configured yet."
+EXEMPTIONS_TEXT  = os.getenv("EXEMPTIONS_TEXT") or "Exemptions: one every 6 months unless specified otherwise."
+
+def _main_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("💕 Menus", callback_data="open_menus")],
+        [InlineKeyboardButton("👑 Contact Admins", callback_data="open_contact_admins")],
+        [InlineKeyboardButton("🔥 Find Our Models Elsewhere", callback_data="open_models_links")],
+        [InlineKeyboardButton("❓ Help", callback_data="open_help")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def _kb_help_home() -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton("‼️ Buyer Rules", callback_data="help_rules")],
-        [InlineKeyboardButton("✨ Buyer Requirements", callback_data="help_breq")],
-        [InlineKeyboardButton("🎲 Game Rules", callback_data="help_game")],
-        [InlineKeyboardButton("⬅️ Back to Main", callback_data="dmf_start")],
-    ])
+        [InlineKeyboardButton("✨ Buyer Requirements", callback_data="help_requirements")],
+        [InlineKeyboardButton("🎲 Game Rules", callback_data="help_games")],
+        [InlineKeyboardButton("🧾 Exemptions", callback_data="help_exemptions")],
+        [InlineKeyboardButton(BTN_BACK, callback_data="panel_back_main")],
+    ]
+    return InlineKeyboardMarkup(rows)
 
-async def _open_help(client: Client, chat_id: int, mid: int | None = None):
-    text = "❓ <b>Help</b>\nPick a section below."
-    if mid:
-        await client.edit_message_text(chat_id, mid, text, reply_markup=_kb_help(), disable_web_page_preview=True)
-    else:
-        await client.send_message(chat_id, text, reply_markup=_kb_help(), disable_web_page_preview=True)
+def _kb_back_to_help() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Help", callback_data="open_help")]])
 
 def register(app: Client):
-
-    # open Help from your Start panel button
-    @app.on_callback_query(filters.regex("^dmf_help$"))
-    async def _open_from_menu(c: Client, q: CallbackQuery):
-        await _open_help(c, q.message.chat.id, q.message.id)
-        await q.answer()
-
-    # optional slash alias in private
-    @app.on_message(filters.private & filters.command(["help"]))
-    async def _cmd(c: Client, m: Message):
-        await _open_help(c, m.chat.id)
-
-    # subpages
-    @app.on_callback_query(filters.regex("^help_rules$"))
-    async def _rules(c: Client, q: CallbackQuery):
-        await c.edit_message_text(
-            q.message.chat.id, q.message.id,
-            f"‼️ <b>Buyer Rules</b>\n{RULES_TEXT}",
-            reply_markup=_kb_help(), disable_web_page_preview=True
+    @app.on_callback_query(filters.regex(r"^(open_help|help_open)$"))
+    async def open_help(_, cq: CallbackQuery):
+        await cq.message.edit_text(
+            "❓ <b>Help</b>\nPick a topic below.",
+            reply_markup=_kb_help_home(),
+            disable_web_page_preview=True,
         )
-        await q.answer()
+        await cq.answer()
 
-    @app.on_callback_query(filters.regex("^help_breq$"))
-    async def _breq(c: Client, q: CallbackQuery):
-        await c.edit_message_text(
-            q.message.chat.id, q.message.id,
-            f"✨ <b>Buyer Requirements</b>\n{BUYER_REQ_TEXT}",
-            reply_markup=_kb_help(), disable_web_page_preview=True
-        )
-        await q.answer()
+    @app.on_callback_query(filters.regex(r"^help_rules$"))
+    async def help_rules(_, cq: CallbackQuery):
+        await cq.message.edit_text(f"‼️ <b>Buyer Rules</b>\n\n{BUYER_RULES_TEXT}", reply_markup=_kb_back_to_help(), disable_web_page_preview=True)
+        await cq.answer()
 
-    @app.on_callback_query(filters.regex("^help_game$"))
-    async def _game(c: Client, q: CallbackQuery):
-        await c.edit_message_text(
-            q.message.chat.id, q.message.id,
-            f"🎲 <b>Game Rules</b>\n{GAME_RULES_TEXT}",
-            reply_markup=_kb_help(), disable_web_page_preview=True
-        )
-        await q.answer()
+    @app.on_callback_query(filters.regex(r"^help_requirements$"))
+    async def help_reqs(_, cq: CallbackQuery):
+        await cq.message.edit_text(f"✨ <b>Buyer Requirements</b>\n\n{BUYER_REQS_TEXT}", reply_markup=_kb_back_to_help(), disable_web_page_preview=True)
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex(r"^help_games$"))
+    async def help_games(_, cq: CallbackQuery):
+        await cq.message.edit_text(f"🎲 <b>Game Rules</b>\n\n{GAME_RULES_TEXT}", reply_markup=_kb_back_to_help(), disable_web_page_preview=True)
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex(r"^help_exemptions$"))
+    async def help_exemptions(_, cq: CallbackQuery):
+        await cq.message.edit_text(f"🧾 <b>Exemptions</b>\n\n{EXEMPTIONS_TEXT}", reply_markup=_kb_back_to_help(), disable_web_page_preview=True)
+        await cq.answer()
+
+    # Slash shortcut in case someone types /help
+    @app.on_message(filters.command(["help"]) & ~filters.edited)
+    async def cmd_help(_, m: Message):
+        await m.reply_text("❓ <b>Help</b>\nPick a topic below.", reply_markup=_kb_help_home(), disable_web_page_preview=True)
