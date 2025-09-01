@@ -1,79 +1,104 @@
 # handlers/contact_admins.py
-import os
+# Contact Roni / Ruby + Suggestions + Anonymous message to OWNER_ID.
+
+import os, logging
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
+from pyrogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+)
+
+log = logging.getLogger("contact_admins")
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
-
-RONI_ID   = int(os.getenv("RONI_ID", "0") or "0")
-RUBY_ID   = int(os.getenv("RUBY_ID", "0") or "0")
+RONI_ID  = os.getenv("RONI_ID")
+RUBY_ID  = os.getenv("RUBY_ID")
 RONI_NAME = os.getenv("RONI_NAME", "Roni")
 RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
+SUGGESTIONS_URL = os.getenv("SUGGESTIONS_URL", "")  # optional link
 
-BTN_BACK = os.getenv("BTN_BACK", "⬅️ Back to Main")
+BTN_BACK = "⬅️ Back to Main"
 
-def _panel_text() -> str:
-    return (
-        "👑 <b>Contact Admins</b>\n\n"
-        "• Tap an admin to open their profile.\n"
-        "• Or send feedback or an anonymous message via the bot."
-    )
+# Small in-memory state for anonymous messages
+_PENDING_ANON = set()
 
-def _kb() -> InlineKeyboardMarkup:
+CONTACT_COPY = (
+    "👑 <b>Contact Admins</b>\n\n"
+    "• Tag an admin in chat\n"
+    "• Or send an anonymous message via the bot."
+)
+
+def _kb_contact(bot_username: str) -> InlineKeyboardMarkup:
     rows = []
+    # Deep-link DM buttons (open the bot with a tag prefilled)
     if RONI_ID:
-        rows.append([InlineKeyboardButton(f"💌 DM {RONI_NAME}", url=f"tg://user?id={RONI_ID}")])
+        rows.append([InlineKeyboardButton(f"👑 Contact {RONI_NAME}", url=f"https://t.me/{bot_username}?start=dmnow")])
     if RUBY_ID:
-        rows.append([InlineKeyboardButton(f"💌 DM {RUBY_NAME}", url=f"tg://user?id={RUBY_ID}")])
-    rows.append([
-        InlineKeyboardButton("💭 Suggestions / Feedback", callback_data="contact_admins_suggest"),
-        InlineKeyboardButton("🕵️ Anonymous Message", callback_data="contact_admins_anon"),
-    ])
-    rows.append([InlineKeyboardButton(BTN_BACK, callback_data="dmf_main")])
+        rows.append([InlineKeyboardButton(f"👑 Contact {RUBY_NAME}", url=f"https://t.me/{bot_username}?start=dmnow")])
+    if SUGGESTIONS_URL:
+        rows.append([InlineKeyboardButton("💡 Suggestions", url=SUGGESTIONS_URL)])
+    rows.append([InlineKeyboardButton("🕵️ Anonymous Message", callback_data="contact:anon")])
+    rows.append([InlineKeyboardButton(BTN_BACK, callback_data="portal:home")])
     return InlineKeyboardMarkup(rows)
+
+def _kb_back() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(BTN_BACK, callback_data="portal:home")]])
+
+async def render_contact(client: Client, target_message: Message, edit: bool = True):
+    me = await client.get_me()
+    kb = _kb_contact(me.username)
+    if edit:
+        try:
+            await target_message.edit_text(CONTACT_COPY, reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await client.send_message(target_message.chat.id, CONTACT_COPY, reply_markup=kb)
 
 def register(app: Client):
 
-    # Button from main panel
-    @app.on_callback_query(filters.regex("^contact_admins_open$"))
-    async def open_panel(client: Client, cq: CallbackQuery):
-        await cq.message.edit_text(_panel_text(), reply_markup=_kb(), disable_web_page_preview=True)
-        await cq.answer()
+    # command (optional)
+    @app.on_message(filters.private & filters.command(["contactadmins","contact","admins"]))
+    async def cmd_contact(client: Client, m: Message):
+        await render_contact(client, m.reply_to_message or m, edit=False)
 
-    # Suggestions flow
-    @app.on_callback_query(filters.regex("^contact_admins_suggest$"))
-    async def ask_suggest(client: Client, cq: CallbackQuery):
-        await cq.answer()
-        await cq.message.reply_text(
-            "💭 Send me your suggestion/feedback as the next message.\n"
-            "I'll forward it to the admins."
-        )
-        # tag user state by replying; simplest: wait for their next message and forward
-        # We’ll use a quick one-shot filter: command-like keyword
-        # Users will just type; we detect with reply-to
-    @app.on_message(filters.private & filters.reply & ~filters.command(["start","menu","help"]))
-    async def catch_reply(client: Client, m: Message):
-        if m.reply_to_message and "Suggestions / Feedback" in (m.reply_to_message.text or ""):
-            if OWNER_ID:
-                await client.send_message(
-                    OWNER_ID,
-                    f"💭 <b>Suggestion</b> from <a href='tg://user?id={m.from_user.id}'>{m.from_user.first_name}</a>:\n\n{m.text}"
-                )
-            await m.reply_text("✅ Sent to admins. Thanks!")
+    # open anon prompt
+    @app.on_callback_query(filters.regex(r"^contact:anon$"))
+    async def anon_begin(client: Client, q: CallbackQuery):
+        _PENDING_ANON.add(q.from_user.id)
+        try:
+            await q.message.edit_text(
+                "🕵️ <b>Anonymous Message</b>\n"
+                "Send me the message now (text only). I’ll forward it anonymously to the owner.",
+                reply_markup=_kb_back()
+            )
+        except Exception:
+            await q.message.reply_text(
+                "🕵️ <b>Anonymous Message</b>\n"
+                "Send me the message now (text only). I’ll forward it anonymously to the owner.",
+                reply_markup=_kb_back()
+            )
+        await q.answer()
 
-    # Anonymous flow
-    @app.on_callback_query(filters.regex("^contact_admins_anon$"))
-    async def ask_anon(client: Client, cq: CallbackQuery):
-        await cq.answer()
-        await cq.message.reply_text(
-            "🕵️ Send your anonymous message now. I will forward it without your name."
-        )
+    # collect anon text (next message)
+    @app.on_message(filters.private & filters.text)
+    async def anon_collect(client: Client, m: Message):
+        if m.from_user.id not in _PENDING_ANON:
+            return
+        if OWNER_ID <= 0:
+            await m.reply_text("Owner is not configured.")
+            _PENDING_ANON.discard(m.from_user.id)
+            return
+        try:
+            await client.send_message(
+                OWNER_ID,
+                f"🕵️ Anonymous message:\n\n{m.text}"
+            )
+            await m.reply_text("✅ Sent anonymously.", reply_markup=_kb_back())
+        except Exception as e:
+            log.warning("Anonymous forward failed: %s", e)
+            await m.reply_text("❌ Couldn’t send right now.")
+        finally:
+            _PENDING_ANON.discard(m.from_user.id)
 
-    @app.on_message(filters.private & ~filters.command(["start","menu","help"]))
-    async def catch_anon(client: Client, m: Message):
-        # detect if they were prompted for anon (best-effort: look at last bot message text)
-        last = m.reply_to_message
-        if last and last.from_user and last.from_user.is_bot and "anonymous" in (last.text or "").lower():
-            if OWNER_ID:
-                await client.send_message(OWNER_ID, f"🕵️ <b>Anonymous message</b>:\n\n{m.text}")
-            await m.reply_text("✅ Sent anonymously.")
+    log.info("contact_admins wired")
