@@ -1,5 +1,4 @@
-# dm_foolproof.py
-import os, json, asyncio, tempfile
+import os, json, asyncio, tempfile, time
 from pathlib import Path
 from datetime import datetime
 from pyrogram import Client, filters
@@ -11,55 +10,66 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DM_FILE = DATA_DIR / "dm_ready.json"
-_lock = asyncio.Lock()            # process-level debounce
-_seen = set()                     # in-memory debounce during one run
 
-def _load():
+# Cross-process lock
+LOCK_FILE = DATA_DIR / "dm_ready.lock"
+
+def _acquire_lock(timeout=5):
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            return fd
+        except FileExistsError:
+            time.sleep(0.05)
+    return None
+
+def _release_lock(fd):
     try:
-        if DM_FILE.exists():
-            return json.loads(DM_FILE.read_text(encoding="utf-8"))
+        os.close(fd)
+        os.remove(LOCK_FILE)
     except Exception:
         pass
-    return {"users": {}}
 
-def _atomic_save(payload: dict):
-    tmp = DM_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(DM_FILE)
-
-async def _mark_once(user_id: int, name: str, username: str|None) -> bool:
-    async with _lock:
-        store = _load()
-        key = str(user_id)
-        if key in store["users"]:
+async def _mark_once(uid: int, name: str, username: str):
+    fd = _acquire_lock()
+    try:
+        data = {}
+        if DM_FILE.exists():
+            try:
+                data = json.loads(DM_FILE.read_text())
+            except Exception:
+                data = {}
+        if str(uid) in data:
             return False
-        store["users"][key] = {
+        data[str(uid)] = {
             "name": name,
-            "username": username or "",
-            "since": datetime.utcnow().isoformat() + "Z",
+            "username": username,
+            "ts": datetime.utcnow().isoformat()
         }
-        _atomic_save(store)
+        DM_FILE.write_text(json.dumps(data, indent=2))
         return True
+    finally:
+        if fd is not None:
+            _release_lock(fd)
 
-def _fmt(u): return f"{u.first_name or 'Someone'}" + (f" @{u.username}" if u.username else "")
+def _fmt(u): 
+    return f"{u.first_name or 'Someone'}" + (f" @{u.username}" if u.username else "")
 
 def register(app: Client):
-
     @app.on_message(filters.private & filters.command("start"))
     async def _start(c: Client, m: Message):
         u = m.from_user
-        new = False
-        # in-memory fast path (prevents double-fire in same second)
-        if u.id not in _seen:
-            _seen.add(u.id)
-            new = await _mark_once(u.id, u.first_name or "Someone", u.username)
+        new = await _mark_once(u.id, u.first_name or "Someone", u.username)
 
         if new:
             await m.reply_text(f"✅ DM-ready — {_fmt(u)}")
             if OWNER_ID:
                 try:
-                    await c.send_message(OWNER_ID,
-                        f"✅ DM-ready NEW user\n• {u.first_name or ''} @{u.username or ''}\n• id: <code>{u.id}</code>")
+                    await c.send_message(
+                        OWNER_ID,
+                        f"✅ DM-ready NEW user\n• {u.first_name or ''} @{u.username or ''}\n• id: <code>{u.id}</code>"
+                    )
                 except Exception:
                     pass
 
