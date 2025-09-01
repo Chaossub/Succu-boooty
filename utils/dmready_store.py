@@ -1,75 +1,67 @@
 # utils/dmready_store.py
-from __future__ import annotations
-import os
-import time
-from typing import List, Dict, Optional, Tuple
+# Tiny JSON-backed store that survives restarts.
 
-from pymongo import MongoClient, ASCENDING
-from pymongo.collection import Collection
+import os, json, time, threading
+from typing import Dict, Any, List
 
+_DATA_DIR = os.getenv("DATA_DIR", "data")
+os.makedirs(_DATA_DIR, exist_ok=True)
+_PATH = os.path.join(_DATA_DIR, "dm_ready.json")
+_LOCK = threading.RLock()
 
 class DMReadyStore:
-    """
-    Mongo-backed DM-ready registry.
-    Collection schema (dm_ready):
-      { _id: user_id (int),
-        user_id: int,
-        username: str | None,
-        first_name: str | None,
-        created_at: float (epoch),
-        updated_at: float (epoch)
-      }
-    """
-    def __init__(self) -> None:
-        uri = os.getenv("MONGODB_URI")
-        if not uri:
-            raise RuntimeError("MONGODB_URI is not set")
-        db_name = os.getenv("MONGO_DB", "succubot")
-        client = MongoClient(uri)
-        db = client[db_name]
-        self.col: Collection = db["dm_ready"]
-        # Ensure unique on user_id (used as _id too)
-        self.col.create_index([("_id", ASCENDING)], unique=True)
+    def __init__(self, path: str = _PATH):
+        self.path = path
+        if not os.path.exists(self.path):
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump({"users": {}, "recent_mark": {}}, f)
 
-    # ── Writes ──────────────────────────────────────────────────────────────────
-    def set_ready(self, user_id: int, username: Optional[str], first_name: Optional[str]) -> Tuple[bool, Dict]:
-        """
-        Upsert user. Returns (is_new, doc).
-        """
-        now = time.time()
-        res = self.col.find_one_and_update(
-            {"_id": int(user_id)},
-            {"$setOnInsert": {"created_at": now},
-             "$set": {
-                "user_id": int(user_id),
-                "username": username,
-                "first_name": first_name,
-                "updated_at": now
-             }},
-            upsert=True,
-            return_document=True  # type: ignore[arg-type]
-        )
-        # find_one_and_update with return_document=True returns the post-update doc,
-        # but we still need to know if it existed before:
-        is_new = res and abs(res.get("created_at", now) - now) < 1e-6
-        # If this heuristic is too tight, explicitly re-check with a prior find.
-        return bool(is_new), res or {}
+    def _load(self) -> Dict[str, Any]:
+        with _LOCK:
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return {"users": {}, "recent_mark": {}}
 
-    def clear(self, user_id: int) -> bool:
-        d = self.col.delete_one({"_id": int(user_id)})
-        return d.deleted_count > 0
+    def _save(self, data: Dict[str, Any]) -> None:
+        with _LOCK:
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.path)
 
-    def clear_all(self) -> int:
-        d = self.col.delete_many({})
-        return d.deleted_count
-
-    # ── Reads ───────────────────────────────────────────────────────────────────
     def is_ready(self, user_id: int) -> bool:
-        return self.col.count_documents({"_id": int(user_id)}, limit=1) > 0
+        data = self._load()
+        return str(user_id) in data.get("users", {})
 
-    def get_all(self) -> List[Dict]:
-        return list(self.col.find({}, sort=[("created_at", ASCENDING)]))
+    def set_ready(self, user_id: int, username: str = None, first_name: str = None) -> None:
+        data = self._load()
+        data.setdefault("users", {})[str(user_id)] = {
+            "user_id": user_id,
+            "username": username,
+            "first_name": first_name,
+            "ts": int(time.time()),
+        }
+        data.setdefault("recent_mark", {})[str(user_id)] = int(time.time())
+        self._save(data)
 
-    def count(self) -> int:
-        return self.col.estimated_document_count()
+    def clear(self, user_id: int) -> None:
+        data = self._load()
+        data.get("users", {}).pop(str(user_id), None)
+        self._save(data)
+
+    def all(self) -> List[Dict[str, Any]]:
+        data = self._load()
+        return list(data.get("users", {}).values())
+
+    def was_just_marked(self, user_id: int, window_sec: int = 300) -> bool:
+        """True only once right after set_ready (used to notify owner a single time)."""
+        data = self._load()
+        ts = data.get("recent_mark", {}).pop(str(user_id), None)
+        if ts is not None:
+            self._save(data)
+            # within 5 minutes counts as "just"
+            return (int(time.time()) - int(ts)) <= window_sec
+        return False
 
