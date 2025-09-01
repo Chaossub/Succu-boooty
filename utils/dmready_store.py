@@ -1,67 +1,77 @@
 # utils/dmready_store.py
-# Tiny JSON-backed store that survives restarts.
+import json, os, threading, time
+from typing import Dict, List, Optional
 
-import os, json, time, threading
-from typing import Dict, Any, List
+_DEFAULT_PATH = os.getenv("DMREADY_STORE_PATH", "data/dmready_store.json")
+os.makedirs(os.path.dirname(_DEFAULT_PATH), exist_ok=True)
+_lock = threading.Lock()
 
-_DATA_DIR = os.getenv("DATA_DIR", "data")
-os.makedirs(_DATA_DIR, exist_ok=True)
-_PATH = os.path.join(_DATA_DIR, "dm_ready.json")
-_LOCK = threading.RLock()
+def _now() -> int:
+    return int(time.time())
 
 class DMReadyStore:
-    def __init__(self, path: str = _PATH):
-        self.path = path
+    """
+    Tiny JSON-backed store:
+      key: str(user_id)
+      value: { "user_id": int, "username": str|None, "first_name": str|None, "ts": int }
+    """
+    def __init__(self, path: Optional[str] = None):
+        self.path = path or _DEFAULT_PATH
         if not os.path.exists(self.path):
             with open(self.path, "w", encoding="utf-8") as f:
-                json.dump({"users": {}, "recent_mark": {}}, f)
+                json.dump({}, f)
 
-    def _load(self) -> Dict[str, Any]:
-        with _LOCK:
-            try:
-                with open(self.path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return {"users": {}, "recent_mark": {}}
+    # --- private -------------------------------------------------------------
+    def _load(self) -> Dict[str, Dict]:
+        with _lock:
+            with open(self.path, "r", encoding="utf-8") as f:
+                return json.load(f)
 
-    def _save(self, data: Dict[str, Any]) -> None:
-        with _LOCK:
+    def _save(self, data: Dict[str, Dict]) -> None:
+        with _lock:
             tmp = self.path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, self.path)
 
-    def is_ready(self, user_id: int) -> bool:
+    # --- public --------------------------------------------------------------
+    def mark_ready_once(self, user_id: int, username: Optional[str], first_name: Optional[str]) -> bool:
+        """
+        Returns True if this is the FIRST time we marked this user (i.e. newly DM-ready).
+        Returns False if they were already marked.
+        """
         data = self._load()
-        return str(user_id) in data.get("users", {})
-
-    def set_ready(self, user_id: int, username: str = None, first_name: str = None) -> None:
-        data = self._load()
-        data.setdefault("users", {})[str(user_id)] = {
+        k = str(user_id)
+        if k in data:
+            # update cached name/username but keep first_marked ts
+            rec = data[k]
+            rec["username"] = username or rec.get("username")
+            rec["first_name"] = first_name or rec.get("first_name")
+            rec["ts_last_seen"] = _now()
+            self._save(data)
+            return False
+        data[k] = {
             "user_id": user_id,
             "username": username,
             "first_name": first_name,
-            "ts": int(time.time()),
+            "ts": _now(),
+            "ts_last_seen": _now(),
         }
-        data.setdefault("recent_mark", {})[str(user_id)] = int(time.time())
+        self._save(data)
+        return True
+
+    def is_ready(self, user_id: int) -> bool:
+        return str(user_id) in self._load()
+
+    def unmark(self, user_id: int) -> None:
+        data = self._load()
+        data.pop(str(user_id), None)
         self._save(data)
 
-    def clear(self, user_id: int) -> None:
+    def get_all(self) -> List[Dict]:
         data = self._load()
-        data.get("users", {}).pop(str(user_id), None)
-        self._save(data)
+        # stable order by first-marked time
+        return sorted(data.values(), key=lambda r: r.get("ts", 0))
 
-    def all(self) -> List[Dict[str, Any]]:
-        data = self._load()
-        return list(data.get("users", {}).values())
-
-    def was_just_marked(self, user_id: int, window_sec: int = 300) -> bool:
-        """True only once right after set_ready (used to notify owner a single time)."""
-        data = self._load()
-        ts = data.get("recent_mark", {}).pop(str(user_id), None)
-        if ts is not None:
-            self._save(data)
-            # within 5 minutes counts as "just"
-            return (int(time.time()) - int(ts)) <= window_sec
-        return False
-
+    def clear_all(self) -> None:
+        self._save({})
