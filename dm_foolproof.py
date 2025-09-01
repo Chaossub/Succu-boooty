@@ -1,197 +1,82 @@
-# dm_foolproof.py
-# Single /start handler with two flows:
-# - Deep-link:  /start ready  (from DM Now button)
-# - Plain:      /start        (manual open)
-# Marks DM-ready ONCE, pings owner once, and debounces UI to avoid duplicates.
-# Menus are shown here; menu text comes from utils/menu_store first, then ENV.
+# handlers/dm_foolproof.py
+# Handles /start deep-link and marks DM-ready (once, persisted).
+import os
+import logging
+from typing import Optional
 
-import os, time
-from typing import Dict, Tuple, List, Optional
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.enums import ChatType
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
-from utils.menu_store import MenuStore
-try:
-    from utils.dmready_store import DMReadyStore
-    _dm = DMReadyStore()
-except Exception:
-    class _MemDM:
-        def __init__(self): self._g=set()
-        def set_dm_ready_global(self, uid:int, username=None, first=None): new = uid not in self._g; self._g.add(uid); return new
-        def is_dm_ready_global(self, uid:int)->bool: return uid in self._g
-    _dm = _MemDM()
+from utils.dmready_store import DMReadyStore
+
+log = logging.getLogger("dm_foolproof")
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
-FIND_MODELS_TEXT = os.getenv("FIND_MODELS_TEXT", "All verified links are pinned in the group.")
-HELP_TEXT = os.getenv("HELP_TEXT", "Ask questions or tap buttons below.")
+DMREADY_ECHO_IN_DM = os.getenv("DMREADY_ECHO_IN_DM", "0") == "1"
 
-WELCOME_TITLE = (
-    "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
-    "Your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
-    "✨ <i>Use the menu below to navigate!</i>"
-)
-MENUS_TITLE  = "💕 <b>Menus</b>\nPick a model or contact the team."
-ADMINS_TITLE = "👑 <b>Contact Admins</b>"
-MODELS_TITLE = "✨ <b>Find Our Models Elsewhere</b> ✨"
-HELP_TITLE   = "❓ <b>Help</b>"
+# Optional: announce to a sanctuary log chat (not the public group)
+SANCTUARY_LOG_CHAT_ID = int(os.getenv("SANCTUARY_CHAT_ID", "0") or "0")
 
-# Debounce / UI duplicate control
-_recent: Dict[Tuple[int,int], float] = {}
-DEDUP_WINDOW = 10.0
-def _soon(chat:int, user:int)->bool:
-    now=time.time(); k=(chat,user)
-    if now-_recent.get(k,0)<DEDUP_WINDOW: return True
-    _recent[k]=now
-    # prune
-    for kk, ts in list(_recent.items()):
-        if now-ts>5*DEDUP_WINDOW: _recent.pop(kk, None)
-    return False
 
-# ENV-driven models
-def _collect_models() -> List[dict]:
-    models=[]
-    for key in ["RONI","RUBY","RIN","SAVY"]:
-        name = os.getenv(f"{key}_NAME")
-        if not name: continue
-        username = os.getenv(f"{key}_USERNAME")
-        env_menu = os.getenv(f"{key}_MENU")
-        models.append({"key": key.lower(),"name": name,"username": username,"env_menu": env_menu})
-    return models
+def _dm_portal_keyboard(bot_username: Optional[str]) -> InlineKeyboardMarkup:
+    rows = []
+    if bot_username:
+        rows.append([InlineKeyboardButton("💌 Open Portal", url=f"https://t.me/{bot_username}?start=ready")])
+    return InlineKeyboardMarkup(rows) if rows else None  # type: ignore[return-value]
 
-MODELS = _collect_models()
-_store = MenuStore()
 
-def _main_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💕 Menus", callback_data="open:menus")],
-        [InlineKeyboardButton("👑 Contact Admins", callback_data="open:admins")],
-        [InlineKeyboardButton("🔥 Find Our Models Elsewhere", callback_data="open:models")],
-        [InlineKeyboardButton("❓ Help", callback_data="open:help")]
-    ])
-
-def _menus_kb():
-    rows=[]; row=[]
-    for m in MODELS:
-        row.append(InlineKeyboardButton(f"💘 {m['name']}", callback_data=f"menus:{m['key']}"))
-        if len(row)==2: rows.append(row); row=[]
-    if row: rows.append(row)
-    rows.append([InlineKeyboardButton("💞 Contact Models", callback_data="menus:contact")])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="open:main")])
-    return InlineKeyboardMarkup(rows)
-
-def _contact_models_kb():
-    rows=[]
-    for m in MODELS:
-        if m["username"]:
-            rows.append([InlineKeyboardButton(f"💌 Message {m['name']}", url=f"https://t.me/{m['username']}")])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="open:menus")])
-    return InlineKeyboardMarkup(rows)
-
-async def _mark_dm_ready_once(client:Client, m:Message):
-    if m.chat.type!=ChatType.PRIVATE or (m.from_user and m.from_user.is_bot): return
-    u=m.from_user
-    first=_dm.set_dm_ready_global(u.id, u.username, u.first_name)
-    if first and OWNER_ID:
-        handle=f"@{u.username}" if u.username else ""
-        try:
-            await client.send_message(OWNER_ID,f"✅ DM-ready — {u.first_name} {handle}")
-        except Exception:
-            pass
-
-def _menu_text_for(key:str)->str:
-    txt=None
-    try:
-        txt=_store.get_menu(key)
-    except Exception:
-        txt=None
-    if not txt:
-        txt=os.getenv(f"{key.upper()}_MENU")
-    if not txt:
-        model_name = next((m["name"] for m in MODELS if m["key"]==key), key.capitalize())
-        txt = f"No menu set for <b>{model_name}</b> yet."
-    return txt
-
-def _is_deeplink_start(m: Message) -> bool:
-    if not m or not m.text: return False
-    parts = m.text.strip().split(maxsplit=1)
-    return len(parts) == 2 and parts[0] == "/start" and parts[1].lower() == "ready"
-
-def register(app:Client):
+def register(app: Client) -> None:
+    store = DMReadyStore()
 
     @app.on_message(filters.private & filters.command("start"))
-    async def on_start(client, m:Message):
-        deeplink = _is_deeplink_start(m)
-
-        await _mark_dm_ready_once(client, m)
-
-        if _soon(m.chat.id, m.from_user.id if m.from_user else 0):
+    async def start_mark_ready(client: Client, m: Message):
+        # Mark user DM-ready if new
+        user = m.from_user
+        if not user:
             return
 
-        await m.reply_text(WELCOME_TITLE, reply_markup=_main_kb(), disable_web_page_preview=True)
+        is_new, doc = store.set_ready(
+            user_id=user.id,
+            username=(user.username or None),
+            first_name=(user.first_name or None),
+        )
 
-    @app.on_callback_query(filters.regex("^open:main$"))
-    async def cb_main(client, cq:CallbackQuery):
-        try:
-            await cq.message.edit_text(WELCOME_TITLE, reply_markup=_main_kb(), disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text(WELCOME_TITLE, reply_markup=_main_kb(), disable_web_page_preview=True)
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex("^open:menus$"))
-    async def cb_menus(client, cq:CallbackQuery):
-        try:
-            await cq.message.edit_text(MENUS_TITLE, reply_markup=_menus_kb(), disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text(MENUS_TITLE, reply_markup=_menus_kb(), disable_web_page_preview=True)
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex("^open:admins$"))
-    async def cb_admins(client, cq:CallbackQuery):
-        text = f"{ADMINS_TITLE}\n\n• Tag an admin in chat\n• Or send an anonymous message via the bot."
-        try:
-            await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="open:main")]]), disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="open:main")]]), disable_web_page_preview=True)
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex("^open:models$"))
-    async def cb_models(client, cq:CallbackQuery):
-        text = f"{MODELS_TITLE}\n\n{FIND_MODELS_TEXT}"
-        try:
-            await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="open:main")]]), disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="open:main")]]), disable_web_page_preview=True)
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex("^open:help$"))
-    async def cb_help(client, cq:CallbackQuery):
-        text = f"{HELP_TITLE}\n\n{HELP_TEXT}"
-        try:
-            await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="open:main")]]), disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="open:main")]]), disable_web_page_preview=True)
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^menus:(.+)$"))
-    async def cb_model_menu(client, cq:CallbackQuery):
-        slot=(cq.data.split(":",1)[1] or "").lower().strip()
-        if slot=="contact":
+        # Optionally echo in the DM (off by default to avoid "duplicates")
+        if DMREADY_ECHO_IN_DM and is_new:
             try:
-                await cq.message.edit_text("💞 <b>Contact Models</b>\nPick who you’d like to message.", reply_markup=_contact_models_kb(), disable_web_page_preview=True)
+                await m.reply_text(
+                    f"✅ <b>DM-ready</b> — {user.first_name or 'User'}"
+                    + (f" @{user.username}" if user.username else ""),
+                    quote=False,
+                )
             except Exception:
-                await cq.message.reply_text("💞 <b>Contact Models</b>\nPick who you’d like to message.", reply_markup=_contact_models_kb(), disable_web_page_preview=True)
-            await cq.answer(); return
+                pass
 
-        m=next((x for x in MODELS if x["key"]==slot),None)
-        if not m:
-            await cq.answer("Unknown model."); 
-            return
-        menu_text = _menu_text_for(slot)
-        text=f"💘 <b>{m['name']}</b>\n{menu_text}"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back to Menus", callback_data="open:menus")]])
-        try:
-            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
-        await cq.answer()
+        # Notify OWNER_ID once, when new
+        if is_new and OWNER_ID:
+            try:
+                uname = f"@{user.username}" if user.username else "(no username)"
+                await client.send_message(
+                    OWNER_ID,
+                    f"✅ <b>DM-ready</b> — {user.first_name or 'User'} {uname} — <code>{user.id}</code>",
+                )
+            except Exception as e:
+                log.warning("Failed DM-ready owner notify: %s", e)
+
+        # Optional sanctuary log chat
+        if is_new and SANCTUARY_LOG_CHAT_ID:
+            try:
+                uname = f"@{user.username}" if user.username else "(no username)"
+                await client.send_message(
+                    SANCTUARY_LOG_CHAT_ID,
+                    f"✅ DM-ready — {user.first_name or 'User'} {uname}",
+                )
+            except Exception as e:
+                log.warning("Group announce failed for %s: %s", SANCTUARY_LOG_CHAT_ID, e)
+
+        # If you want to always present a portal button here, uncomment:
+        # me = await client.get_me()
+        # kb = _dm_portal_keyboard(me.username)
+        # if kb:
+        #     with contextlib.suppress(Exception):
+        #         await m.reply_text("Tap to reopen your portal anytime:", reply_markup=kb, quote=False)
