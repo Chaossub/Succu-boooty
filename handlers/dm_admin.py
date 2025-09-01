@@ -1,44 +1,61 @@
 # handlers/dm_admin.py
-# /dmreadylist  /dmreadyremove <id>  /dmreadyclear
+# Admin tools: /dmreadylist, /dmreadyclear (reply or id), /dmreadywipe (owner only)
+import os
+from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
+
 from utils.dmready_store import DMReadyStore
-from utils.admin_check import require_admin
+from utils.admin_check import is_admin_or_owner  # use your existing helper
 
-_store = DMReadyStore()
 
-def _fmt(rows):
-    if not rows: return "ℹ️ No one is marked DM-ready yet."
-    out = ["✅ <b>DM-ready users</b>"]
-    for i, d in enumerate(sorted(rows, key=lambda x: x.get("ts", 0)), 1):
-        handle = f"@{d.get('username')}" if d.get('username') else ""
-        out.append(f"{i}. {d.get('first_name') or 'User'} {handle} — <code>{d.get('id')}</code>")
-    return "\n".join(out)
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 
-def register(app: Client):
 
-    @app.on_message(filters.private & filters.command("dmreadylist"))
-    @require_admin
+def register(app: Client) -> None:
+    store = DMReadyStore()
+
+    @app.on_message(filters.command("dmreadylist"))
     async def dmready_list(client: Client, m: Message):
-        await m.reply_text(_fmt(_store.list_all()))
+        if not await is_admin_or_owner(client, m):
+            return await m.reply_text("❌ You’re not allowed to use this command.", quote=True)
 
-    @app.on_message(filters.private & filters.command("dmreadyremove"))
-    @require_admin
-    async def dmready_remove(client: Client, m: Message):
-        parts = m.text.split(maxsplit=1)
-        if len(parts)<2:
-            await m.reply_text("Usage: <code>/dmreadyremove 123456789</code>"); return
-        try:
-            uid = int(parts[1].strip())
-        except Exception:
-            await m.reply_text("Invalid user id."); return
-        ok = _store.unset_dm_ready_global(uid)
-        await m.reply_text("✅ Removed." if ok else "ℹ️ Not found.")
+        docs = store.get_all()
+        if not docs:
+            return await m.reply_text("ℹ️ No one is marked DM-ready yet.", quote=True)
 
-    @app.on_message(filters.private & filters.command("dmreadyclear"))
-    @require_admin
+        lines = ["✅ <b>DM-ready users</b>"]
+        for i, d in enumerate(docs, 1):
+            uname = f"@{d.get('username')}" if d.get("username") else "(no username)"
+            lines.append(f"{i}. {d.get('first_name','User')} {uname} — <code>{d.get('user_id')}</code>")
+        await m.reply_text("\n".join(lines), quote=True)
+
+    @app.on_message(filters.command("dmreadyclear"))
     async def dmready_clear(client: Client, m: Message):
-        for d in list(_store.list_all()):
-            _store.unset_dm_ready_global(int(d["id"]))
-        await m.reply_text("🧹 Cleared all DM-ready flags.")
+        if not await is_admin_or_owner(client, m):
+            return await m.reply_text("❌ You’re not allowed to use this command.", quote=True)
+
+        target_id: Optional[int] = None
+        if m.reply_to_message and m.reply_to_message.from_user:
+            target_id = m.reply_to_message.from_user.id
+        else:
+            parts = (m.text or "").split(maxsplit=1)
+            if len(parts) == 2 and parts[1].isdigit():
+                target_id = int(parts[1])
+
+        if not target_id:
+            return await m.reply_text("Usage: <code>/dmreadyclear</code> (reply to a user) or <code>/dmreadyclear &lt;user_id&gt;</code>", quote=True)
+
+        ok = store.clear(target_id)
+        if ok:
+            await m.reply_text(f"🧹 Cleared DM-ready for <code>{target_id}</code>.", quote=True)
+        else:
+            await m.reply_text("ℹ️ That user wasn’t marked DM-ready.", quote=True)
+
+    @app.on_message(filters.command("dmreadywipe"))
+    async def dmready_wipe(client: Client, m: Message):
+        if not (m.from_user and m.from_user.id == OWNER_ID):
+            return await m.reply_text("❌ Owner only.", quote=True)
+        n = store.clear_all()
+        await m.reply_text(f"🧨 Wiped DM-ready list ({n} removed).", quote=True)
