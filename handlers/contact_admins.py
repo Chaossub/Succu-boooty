@@ -1,82 +1,109 @@
 # handlers/contact_admins.py
-from __future__ import annotations
+# Contact Admins panel with DM buttons + suggestion / anonymous.
+
 import os
-from typing import Optional, List
+import time
+from typing import Dict, Tuple
 
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import MessageNotModified
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
-# Panel title (override with CONTACT_ADMINS_TEXT in env)
-CONTACT_TEXT = os.getenv("CONTACT_ADMINS_TEXT", "").strip() or "How would you like to reach us?"
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
+RONI_ID = int(os.getenv("RONI_ID", "0") or "0")
+RUBY_ID = int(os.getenv("RUBY_ID", "0") or "0")
+RONI_NAME = os.getenv("RONI_NAME", "Roni")
+RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
-def _make_link(username_env: str, id_env: str) -> Optional[str]:
-    """Return https://t.me/username or tg://user?id=ID from env; None if missing."""
-    uname = os.getenv(username_env, "").strip().lstrip("@")
-    uid   = os.getenv(id_env, "").strip()
-    if uname:
-        return f"https://t.me/{uname}"
-    if uid.isdigit():
-        return f"tg://user?id={uid}"
-    return None
+# ephemeral capture state for suggestion / anon
+_pending: Dict[int, Tuple[str, float]] = {}
+TTL = 5 * 60  # 5 minutes
 
-def _dm_btn(label: str, link: Optional[str], missing_cb: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(label + (" ↗" if link else ""), url=link) if link \
-        else InlineKeyboardButton(label, callback_data=missing_cb)
-
-def _kb_admins() -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-
-    # Always show Roni & Ruby (even if link missing -> shows toast with env to set)
-    roni_link = _make_link("RONI_USERNAME", "RONI_ID")
-    ruby_link = _make_link("RUBY_USERNAME", "RUBY_ID")
-    rows.append([
-        _dm_btn("💌 Message Roni", roni_link, "admins:missing:roni"),
-        _dm_btn("💌 Message Ruby", ruby_link, "admins:missing:ruby"),
-    ])
-
-    # Optional: add more owners/admins here in pairs if desired
-    # savy_link = _make_link("SAVY_USERNAME", "SAVY_ID")
-    # rin_link  = _make_link("RIN_USERNAME",  "RIN_ID")
-    # rows.append([
-    #     _dm_btn("💌 Message Savy", savy_link, "admins:missing:savy"),
-    #     _dm_btn("💌 Message Rin",  rin_link,  "admins:missing:rin"),
-    # ])
-
-    rows.append([InlineKeyboardButton("🙈 Send anonymous message to admins", callback_data="admins:anon")])
-    rows.append([InlineKeyboardButton("💡 Send a suggestion", callback_data="admins:suggest")])
-    rows.append([InlineKeyboardButton("⬅️ Back to Start", callback_data="dmf_home")])
+def _kb_contact() -> InlineKeyboardMarkup:
+    rows = []
+    if RONI_ID:
+        rows.append([InlineKeyboardButton(f"💬 Message {RONI_NAME} ➜", url=f"tg://user?id={RONI_ID}")])
+    if RUBY_ID:
+        rows.append([InlineKeyboardButton(f"💬 Message {RUBY_NAME} ➜", url=f"tg://user?id={RUBY_ID}")])
+    rows += [
+        [InlineKeyboardButton("💡 Send a suggestion", callback_data="contact_suggest")],
+        [InlineKeyboardButton("🙈 Send anonymous message", callback_data="contact_anon")],
+        [InlineKeyboardButton("⬅️ Back to Main", callback_data="dmf_start")],
+    ]
     return InlineKeyboardMarkup(rows)
 
-# ── Register only callback handlers (NO /start here) ─────────────────────────
+async def _open_panel(c: Client, chat_id: int, mid: int | None = None):
+    text = "👑 <b>Contact Admins</b>\nDM an admin directly or send a suggestion / anonymous message."
+    if mid:
+        await c.edit_message_text(chat_id, mid, text, reply_markup=_kb_contact(), disable_web_page_preview=True)
+    else:
+        await c.send_message(chat_id, text, reply_markup=_kb_contact(), disable_web_page_preview=True)
+
+def _set_pending(uid: int, kind: str):
+    _pending[uid] = (kind, time.time() + TTL)
+
+def _get_pending(uid: int) -> str | None:
+    now = time.time()
+    # purge expired
+    for k, (_, exp) in list(_pending.items()):
+        if exp < now:
+            _pending.pop(k, None)
+    tup = _pending.get(uid)
+    if not tup:
+        return None
+    kind, exp = tup
+    return kind if exp >= now else None
+
+def _clear_pending(uid: int):
+    _pending.pop(uid, None)
+
 def register(app: Client):
 
-    # Open Contact Admins (edit in place)
-    @app.on_callback_query(filters.regex(r"^dmf_open_admins$"))
-    async def open_admins(client: Client, cq: CallbackQuery):
-        try:
-            await cq.message.edit_text(CONTACT_TEXT, reply_markup=_kb_admins(), disable_web_page_preview=True)
-        except MessageNotModified:
-            pass
-        await cq.answer()
+    # open from main menu button
+    @app.on_callback_query(filters.regex("^dmf_contact_admins$"))
+    async def _open_from_menu(c: Client, q: CallbackQuery):
+        await _open_panel(c, q.message.chat.id, q.message.id)
+        await q.answer()
 
-    # Missing link toast
-    @app.on_callback_query(filters.regex(r"^admins:missing:(?P<who>[a-zA-Z0-9_]+)$"))
-    async def missing_link(client: Client, cq: CallbackQuery):
-        who = cq.matches[0].group("who").upper()
-        await cq.answer(
-            f"Set contact for {who.title()}:\n"
-            f"• {who}_USERNAME (without @)  or\n"
-            f"• {who}_ID (numeric Telegram user ID)",
-            show_alert=True
+    # suggestion / anonymous flows
+    @app.on_callback_query(filters.regex("^contact_suggest$"))
+    async def _suggest(c: Client, q: CallbackQuery):
+        _set_pending(q.from_user.id, "suggest")
+        await q.answer()
+        await c.edit_message_text(
+            q.message.chat.id, q.message.id,
+            "💡 <b>Suggestion box</b>\nSend your suggestion as a single message within 5 minutes.\n"
+            "Your username will be included.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Cancel", callback_data="dmf_contact_admins")]])
         )
 
-    # Placeholder actions
-    @app.on_callback_query(filters.regex(r"^admins:anon$"))
-    async def anon_msg(client: Client, cq: CallbackQuery):
-        await cq.answer("Anon inbox coming soon. An admin will enable this.", show_alert=True)
+    @app.on_callback_query(filters.regex("^contact_anon$"))
+    async def _anon(c: Client, q: CallbackQuery):
+        _set_pending(q.from_user.id, "anon")
+        await q.answer()
+        await c.edit_message_text(
+            q.message.chat.id, q.message.id,
+            "🙈 <b>Anonymous message</b>\nSend your message as a single text within 5 minutes.\n"
+            "Your username will NOT be included.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Cancel", callback_data="dmf_contact_admins")]])
+        )
 
-    @app.on_callback_query(filters.regex(r"^admins:suggest$"))
-    async def suggest_msg(client: Client, cq: CallbackQuery):
-        await cq.answer("Suggestion box coming soon. Thanks for the idea!", show_alert=True)
+    # capture next private message if a flow is active
+    @app.on_message(filters.private & ~filters.command([]))
+    async def _capture(c: Client, m: Message):
+        kind = _get_pending(m.from_user.id)
+        if not kind:
+            return
+        _clear_pending(m.from_user.id)
+
+        if OWNER_ID:
+            if kind == "suggest":
+                u = m.from_user
+                who = (u.first_name or "User").replace("<", "&lt;").replace(">", "&gt;")
+                mention = f"<a href='tg://user?id={u.id}'>{who}</a>"
+                text = f"💡 <b>Suggestion</b> from {mention} @{u.username or '—'}:\n\n{m.text or '(no text)'}"
+                await c.send_message(OWNER_ID, text, disable_web_page_preview=True)
+            else:
+                text = f"🙈 <b>Anonymous message</b>:\n\n{m.text or '(no text)'}"
+                await c.send_message(OWNER_ID, text, disable_web_page_preview=True)
+
+        await c.send_message(m.chat.id, "✅ Thanks! Sent to the admins.", reply_markup=_kb_contact())
