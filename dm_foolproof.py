@@ -1,4 +1,5 @@
-import os, json, asyncio, tempfile, time
+# dm_foolproof.py
+import os, json, asyncio, time
 from pathlib import Path
 from datetime import datetime
 from pyrogram import Client, filters
@@ -11,7 +12,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DM_FILE = DATA_DIR / "dm_ready.json"
 
-# Cross-process lock
+# Cross-process lock to kill duplicate “DM-ready” + double welcome
 LOCK_FILE = DATA_DIR / "dm_ready.lock"
 
 def _acquire_lock(timeout=5):
@@ -57,6 +58,7 @@ def _fmt(u):
     return f"{u.first_name or 'Someone'}" + (f" @{u.username}" if u.username else "")
 
 def register(app: Client):
+
     @app.on_message(filters.private & filters.command("start"))
     async def _start(c: Client, m: Message):
         u = m.from_user
@@ -73,6 +75,6 @@ def register(app: Client):
                 except Exception:
                     pass
 
-        # show main menu (edit-in-place)
+        # Show main menu (edit in place)
         ph = await m.reply_text("…")
         await render_main(ph)
