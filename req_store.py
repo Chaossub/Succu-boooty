@@ -18,9 +18,9 @@ if _MONGO_URI:
         _mongo_col.create_index("user_id", unique=True, name="uniq_user_id")
         _mongo_col.create_index("since", name="idx_since")
     except Exception:
-        _mongo_col = None
+        _mongo_col = None  # fallback to JSON
 
-# ---- JSON fallback (same structure you had) ----
+# ---- JSON fallback (same shape you had) ----
 DEFAULT_PATH = os.getenv("REQ_STORE_PATH", "data/req_store.json")
 os.makedirs(os.path.dirname(DEFAULT_PATH) or ".", exist_ok=True)
 
@@ -61,7 +61,12 @@ class ReqStore:
         self.state = StoreState()
         self._load()
 
-    # -------- load/save --------
+    # ---------- persistence introspection ----------
+    def uses_mongo(self) -> bool:
+        """True if DM-ready changes are persisted in Mongo (survives restarts)."""
+        return _mongo_col is not None
+
+    # ---------- load/save ----------
     def _load(self):
         if not os.path.exists(self.path):
             self._save(); return
@@ -96,35 +101,36 @@ class ReqStore:
         with open(self.path, "w", encoding="utf-8") as f:
             json.dump(raw, f, indent=2)
 
-    # -------- admins ----------
-    def list_admins(self) -> List[int]: return list(self.state.admins)
-    def add_admin(self, uid: int) -> bool:
-        if uid in self.state.admins: return False
-        self.state.admins.append(uid); self._save(); return True
-    def remove_admin(self, uid: int) -> bool:
-        if uid not in self.state.admins: return False
-        self.state.admins.remove(uid); self._save(); return True
-
-    # -------- monthly counters ----------
+    # ---------- monthly counters ----------
     def _ensure_user(self, user_id: int, mk: str | None = None) -> Tuple[str, UserReq]:
         key = mk or _month_key()
-        if key not in self.state.months: self.state.months[key] = {"users": {}}
+        if key not in self.state.months:
+            self.state.months[key] = {"users": {}}
         users = self.state.months[key]["users"]
         suid = str(user_id)
-        if suid not in users: users[suid] = UserReq()
+        if suid not in users:
+            users[suid] = UserReq()
         return key, users[suid]
 
     def add_tokens(self, user_id: int, amount: int, mk: str | None = None):
-        mk, u = self._ensure_user(user_id, mk); u.tokens += max(0, int(amount)); self._save(); return mk, u
-    def add_buy(self, user_id: int, amount: int = 1, mk: str | None = None):
-        mk, u = self._ensure_user(user_id, mk); u.buys += max(0, int(amount)); u.last_buy_ts = time.time(); self._save(); return mk, u
-    def add_game(self, user_id: int, mk: str | None = None):
-        mk, u = self._ensure_user(user_id, mk); u.games += 1; self._save(); return mk, u
-    def set_note(self, user_id: int, note: str, mk: str | None = None):
-        mk, u = self._ensure_user(user_id, mk); u.notes = note.strip(); self._save(); return mk, u
+        mk, u = self._ensure_user(user_id, mk)
+        u.tokens += max(0, int(amount)); self._save(); return mk, u
 
-    # -------- DM-READY (Mongo-backed) ----------
+    def add_buy(self, user_id: int, amount: int = 1, mk: str | None = None):
+        mk, u = self._ensure_user(user_id, mk)
+        u.buys += max(0, int(amount)); u.last_buy_ts = time.time(); self._save(); return mk, u
+
+    def add_game(self, user_id: int, mk: str | None = None):
+        mk, u = self._ensure_user(user_id, mk)
+        u.games += 1; self._save(); return mk, u
+
+    def set_note(self, user_id: int, note: str, mk: str | None = None):
+        mk, u = self._ensure_user(user_id, mk)
+        u.notes = note.strip(); self._save(); return mk, u
+
+    # ---------- DM-READY (Mongo-backed) ----------
     def set_dm_ready_global(self, user_id: int, ready: bool, by_admin: bool = False) -> bool:
+        """Return True only if state changed (first set or removed)."""
         suid = str(user_id)
         if _mongo_col is not None:
             try:
@@ -141,6 +147,7 @@ class ReqStore:
             except Exception:
                 pass  # fall back to JSON
 
+        # JSON fallback (ephemeral)
         before = suid in self.state.dm_ready_global
         if ready:
             self.state.dm_ready_global[suid] = {"since": time.time(), "by_admin": bool(by_admin)}
@@ -151,8 +158,10 @@ class ReqStore:
 
     def is_dm_ready_global(self, user_id: int) -> bool:
         if _mongo_col is not None:
-            try: return _mongo_col.count_documents({"user_id": user_id}, limit=1) > 0
-            except Exception: pass
+            try:
+                return _mongo_col.count_documents({"user_id": user_id}, limit=1) > 0
+            except Exception:
+                pass
         return str(user_id) in self.state.dm_ready_global
 
     def list_dm_ready_global(self) -> Dict[str, dict]:
@@ -160,19 +169,24 @@ class ReqStore:
             try:
                 return {str(d["user_id"]): {"since": d.get("since"), "by_admin": d.get("by_admin", False)}
                         for d in _mongo_col.find({}, {"_id": 0}).sort("since", -1)}
-            except Exception: pass
+            except Exception:
+                pass
         return dict(self.state.dm_ready_global)
 
-    # -------- exemptions ----------
+    # ---------- exemptions ----------
     def add_exemption(self, user_id: int, chat_id: int | None = None, until_ts: float | None = None):
         rec = {"until": until_ts} if until_ts else {}
-        if chat_id is None: self.state.exemptions.setdefault("global", {})[str(user_id)] = rec
-        else: self.state.exemptions.setdefault("groups", {}).setdefault(str(chat_id), {})[str(user_id)] = rec
+        if chat_id is None:
+            self.state.exemptions.setdefault("global", {})[str(user_id)] = rec
+        else:
+            self.state.exemptions.setdefault("groups", {}).setdefault(str(chat_id), {})[str(user_id)] = rec
         self._save()
 
     def remove_exemption(self, user_id: int, chat_id: int | None = None):
-        if chat_id is None: self.state.exemptions.get("global", {}).pop(str(user_id), None)
-        else: self.state.exemptions.setdefault("groups", {}).get(str(chat_id), {}).pop(str(user_id), None)
+        if chat_id is None:
+            self.state.exemptions.get("global", {}).pop(str(user_id), None)
+        else:
+            self.state.exemptions.setdefault("groups", {}).get(str(chat_id), {}).pop(str(user_id), None)
         self._save()
 
     def has_valid_exemption(self, user_id: int, chat_id: int | None = None) -> bool:
@@ -181,11 +195,13 @@ class ReqStore:
             rec = self.state.exemptions.get("groups", {}).get(str(chat_id), {}).get(str(user_id))
             if rec:
                 until = rec.get("until")
-                if until is None or until > now: return True
+                if until is None or until > now:
+                    return True
                 self.remove_exemption(user_id, chat_id)
         rec = self.state.exemptions.get("global", {}).get(str(user_id))
         if rec:
             until = rec.get("until")
-            if until is None or until > now: return True
+            if until is None or until > now:
+                return True
             self.remove_exemption(user_id, None)
         return False
