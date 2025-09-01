@@ -1,70 +1,66 @@
-# dm_foolproof.py
-import os, json, asyncio, time
-from pathlib import Path
+# dm_foolproof.py — DM-ready + /start dedupe with MongoDB persistence
+import os
 from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pymongo import MongoClient, errors
+
 from handlers.panels import render_main
 
+# ---- ENV ----
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-DM_FILE = DATA_DIR / "dm_ready.json"
+# Mongo settings (works with same cluster you use elsewhere)
+MONGO_URI            = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
+MONGO_DB_NAME        = os.getenv("MONGO_DB_NAME", "succubot")
+DM_READY_COLLECTION  = os.getenv("DM_READY_COLLECTION", "dm_ready")
 
-# Cross-process lock to kill duplicate “DM-ready” + double welcome
-LOCK_FILE = DATA_DIR / "dm_ready.lock"
-
-def _acquire_lock(timeout=5):
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            fd = os.open(str(LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_RDWR)
-            return fd
-        except FileExistsError:
-            time.sleep(0.05)
-    return None
-
-def _release_lock(fd):
+# ---- DB ----
+client = MongoClient(MONGO_URI) if MONGO_URI else None
+col = None
+if client:
+    db = client[MONGO_DB_NAME]
+    col = db[DM_READY_COLLECTION]
+    # Unique user_id so duplicates across restarts/processes are prevented
     try:
-        os.close(fd)
-        os.remove(LOCK_FILE)
+        col.create_index("user_id", unique=True)
     except Exception:
         pass
 
-async def _mark_once(uid: int, name: str, username: str):
-    fd = _acquire_lock()
+def _fmt(u):
+    return f"{u.first_name or 'Someone'}" + (f" @{u.username}" if u.username else "")
+
+async def _mark_once(uid: int, name: str, username: str) -> bool:
+    """
+    Returns True only the first time we ever see this user.
+    Persists to Mongo so it survives restarts/deploys and works across replicas.
+    """
+    if not col:
+        # No DB configured -> fallback (will NOT survive restarts)
+        return True
+
     try:
-        data = {}
-        if DM_FILE.exists():
-            try:
-                data = json.loads(DM_FILE.read_text())
-            except Exception:
-                data = {}
-        if str(uid) in data:
-            return False
-        data[str(uid)] = {
+        col.insert_one({
+            "user_id": uid,
             "name": name,
             "username": username,
-            "ts": datetime.utcnow().isoformat()
-        }
-        DM_FILE.write_text(json.dumps(data, indent=2))
-        return True
-    finally:
-        if fd is not None:
-            _release_lock(fd)
-
-def _fmt(u): 
-    return f"{u.first_name or 'Someone'}" + (f" @{u.username}" if u.username else "")
+            "first_seen": datetime.utcnow()
+        })
+        return True  # first time
+    except errors.DuplicateKeyError:
+        return False  # seen before
+    except Exception:
+        # If DB is temporarily down, act conservative (avoid spam)
+        return False
 
 def register(app: Client):
 
     @app.on_message(filters.private & filters.command("start"))
     async def _start(c: Client, m: Message):
         u = m.from_user
-        new = await _mark_once(u.id, u.first_name or "Someone", u.username)
+        first_time = await _mark_once(u.id, u.first_name or "Someone", u.username)
 
-        if new:
+        if first_time:
             await m.reply_text(f"✅ DM-ready — {_fmt(u)}")
             if OWNER_ID:
                 try:
@@ -75,6 +71,29 @@ def register(app: Client):
                 except Exception:
                     pass
 
-        # Show main menu (edit in place)
+        # Always show the main panel (edit-in-place placeholder)
         ph = await m.reply_text("…")
         await render_main(ph)
+
+    # Optional: owner-only test/reset helpers
+    @app.on_message(filters.private & filters.command("dmready_reset"))
+    async def _reset_one(c: Client, m: Message):
+        if not col or m.from_user.id != OWNER_ID:
+            return
+        parts = (m.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await m.reply_text("Usage: /dmready_reset <user_id>")
+            return
+        try:
+            target = int(parts[1])
+        except ValueError:
+            await m.reply_text("Provide a numeric user_id.")
+            return
+        col.delete_one({"user_id": target})
+        await m.reply_text(f"🔁 Reset DM-ready for <code>{target}</code>.")
+
+    @app.on_message(filters.private & filters.command("dmready_count"))
+    async def _count(c: Client, m: Message):
+        if not col or m.from_user.id != OWNER_ID:
+            return
+        await m.reply_text(f"📊 DM-ready unique users: <b>{col.estimated_document_count()}</b>")
