@@ -1,9 +1,9 @@
 # dm_foolproof.py
-# Single source for /start:
-# - Shows main panel (de-duped)
-# - Marks DM-ready (persisted via utils.dmready_store)
-# - Menus read from utils.menu_store first; fallback to ENV (RONI_MENU, etc.)
-# - Handles all panel callbacks here (so buttons always work)
+# Single /start handler with two flows:
+# - Deep-link:  /start ready  (from DM Now button)
+# - Plain:      /start        (manual open)
+# Marks DM-ready ONCE, pings owner once, and debounces UI to avoid duplicates.
+# Menus are shown here; menu text comes from utils/menu_store first, then ENV.
 
 import os, time
 from typing import Dict, Tuple, List, Optional
@@ -12,8 +12,6 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 from pyrogram.enums import ChatType
 
 from utils.menu_store import MenuStore
-
-# DM-ready persistence
 try:
     from utils.dmready_store import DMReadyStore
     _dm = DMReadyStore()
@@ -38,19 +36,19 @@ ADMINS_TITLE = "👑 <b>Contact Admins</b>"
 MODELS_TITLE = "✨ <b>Find Our Models Elsewhere</b> ✨"
 HELP_TITLE   = "❓ <b>Help</b>"
 
-# Debounce duplicate /start
+# Debounce / UI duplicate control
 _recent: Dict[Tuple[int,int], float] = {}
 DEDUP_WINDOW = 10.0
 def _soon(chat:int, user:int)->bool:
     now=time.time(); k=(chat,user)
     if now-_recent.get(k,0)<DEDUP_WINDOW: return True
-    _recent[k]=now; 
-    # prune a bit
+    _recent[k]=now
+    # prune
     for kk, ts in list(_recent.items()):
         if now-ts>5*DEDUP_WINDOW: _recent.pop(kk, None)
     return False
 
-# Models from ENV
+# ENV-driven models
 def _collect_models() -> List[dict]:
     models=[]
     for key in ["RONI","RUBY","RIN","SAVY"]:
@@ -90,7 +88,7 @@ def _contact_models_kb():
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="open:menus")])
     return InlineKeyboardMarkup(rows)
 
-async def _mark_dm_ready(client:Client, m:Message):
+async def _mark_dm_ready_once(client:Client, m:Message):
     if m.chat.type!=ChatType.PRIVATE or (m.from_user and m.from_user.is_bot): return
     u=m.from_user
     first=_dm.set_dm_ready_global(u.id, u.username, u.first_name)
@@ -102,31 +100,38 @@ async def _mark_dm_ready(client:Client, m:Message):
             pass
 
 def _menu_text_for(key:str)->str:
-    # Saved store first
-    txt = None
+    txt=None
     try:
-        txt = _store.get_menu(key)
+        txt=_store.get_menu(key)
     except Exception:
-        txt = None
+        txt=None
     if not txt:
-        # ENV fallback e.g., RONI_MENU
-        txt = os.getenv(f"{key.upper()}_MENU")
+        txt=os.getenv(f"{key.upper()}_MENU")
     if not txt:
         model_name = next((m["name"] for m in MODELS if m["key"]==key), key.capitalize())
         txt = f"No menu set for <b>{model_name}</b> yet."
     return txt
 
+def _is_deeplink_start(m: Message) -> bool:
+    if not m or not m.text: return False
+    parts = m.text.strip().split(maxsplit=1)
+    return len(parts) == 2 and parts[0] == "/start" and parts[1].lower() == "ready"
+
 def register(app:Client):
 
     @app.on_message(filters.private & filters.command("start"))
     async def on_start(client, m:Message):
-        await _mark_dm_ready(client,m)
-        if _soon(m.chat.id, m.from_user.id if m.from_user else 0): 
+        deeplink = _is_deeplink_start(m)
+
+        await _mark_dm_ready_once(client, m)
+
+        if _soon(m.chat.id, m.from_user.id if m.from_user else 0):
             return
+
         await m.reply_text(WELCOME_TITLE, reply_markup=_main_kb(), disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex("^open:main$"))
-    async def cb_main(client,cq:CallbackQuery):
+    async def cb_main(client, cq:CallbackQuery):
         try:
             await cq.message.edit_text(WELCOME_TITLE, reply_markup=_main_kb(), disable_web_page_preview=True)
         except Exception:
@@ -134,7 +139,7 @@ def register(app:Client):
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^open:menus$"))
-    async def cb_menus(client,cq:CallbackQuery):
+    async def cb_menus(client, cq:CallbackQuery):
         try:
             await cq.message.edit_text(MENUS_TITLE, reply_markup=_menus_kb(), disable_web_page_preview=True)
         except Exception:
@@ -142,7 +147,7 @@ def register(app:Client):
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^open:admins$"))
-    async def cb_admins(client,cq:CallbackQuery):
+    async def cb_admins(client, cq:CallbackQuery):
         text = f"{ADMINS_TITLE}\n\n• Tag an admin in chat\n• Or send an anonymous message via the bot."
         try:
             await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="open:main")]]), disable_web_page_preview=True)
@@ -151,7 +156,7 @@ def register(app:Client):
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^open:models$"))
-    async def cb_models(client,cq:CallbackQuery):
+    async def cb_models(client, cq:CallbackQuery):
         text = f"{MODELS_TITLE}\n\n{FIND_MODELS_TEXT}"
         try:
             await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="open:main")]]), disable_web_page_preview=True)
@@ -160,7 +165,7 @@ def register(app:Client):
         await cq.answer()
 
     @app.on_callback_query(filters.regex("^open:help$"))
-    async def cb_help(client,cq:CallbackQuery):
+    async def cb_help(client, cq:CallbackQuery):
         text = f"{HELP_TITLE}\n\n{HELP_TEXT}"
         try:
             await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="open:main")]]), disable_web_page_preview=True)
@@ -169,7 +174,7 @@ def register(app:Client):
         await cq.answer()
 
     @app.on_callback_query(filters.regex(r"^menus:(.+)$"))
-    async def cb_model_menu(client,cq:CallbackQuery):
+    async def cb_model_menu(client, cq:CallbackQuery):
         slot=(cq.data.split(":",1)[1] or "").lower().strip()
         if slot=="contact":
             try:
@@ -179,7 +184,7 @@ def register(app:Client):
             await cq.answer(); return
 
         m=next((x for x in MODELS if x["key"]==slot),None)
-        if not m: 
+        if not m:
             await cq.answer("Unknown model."); 
             return
         menu_text = _menu_text_for(slot)
