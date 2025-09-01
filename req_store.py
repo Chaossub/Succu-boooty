@@ -1,10 +1,28 @@
+# req_store.py
 import json
 import os
 import time
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Tuple
 
-# Where to persist requirement data (JSON file)
+# ---------- Optional Mongo backend (for DM-ready only) ----------
+_MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
+_MONGO_DB  = os.getenv("MONGO_DB_NAME", "succubot")
+_MONGO_COL = os.getenv("DM_READY_COLLECTION", "dm_ready")
+
+_mongo_col = None
+if _MONGO_URI:
+    try:
+        from pymongo import MongoClient
+        _client = MongoClient(_MONGO_URI)
+        _db = _client[_MONGO_DB]
+        _mongo_col = _db[_MONGO_COL]
+        _mongo_col.create_index("user_id", unique=True, name="uniq_user_id")
+        _mongo_col.create_index("since", name="idx_since")
+    except Exception:
+        _mongo_col = None  # will fall back to JSON
+
+# ---------- JSON file store (existing behavior) ----------
 DEFAULT_PATH = os.getenv("REQ_STORE_PATH", "data/req_store.json")
 os.makedirs(os.path.dirname(DEFAULT_PATH) or ".", exist_ok=True)
 
@@ -16,39 +34,37 @@ def _month_key(ts: Optional[float] = None) -> str:
 
 @dataclass
 class UserReq:
-    purchases: float = 0.0
+    tokens: int = 0
+    buys: int = 0
     games: int = 0
+    last_buy_ts: float = 0.0
     notes: str = ""
-    # Monthly flag retained for back-compat (not used for global DM-ready logic)
-    dm_ready: bool = False
 
 @dataclass
 class StoreState:
-    # months[YYYY-MM]["users"][str(user_id)] = UserReq
     months: Dict[str, Dict[str, Dict[str, UserReq]]] = field(default_factory=dict)
     admins: List[int] = field(default_factory=list)
-    # Global (indefinite) DM-ready users: { user_id_str: {"since": float, "by_admin": bool} }
     dm_ready_global: Dict[str, dict] = field(default_factory=dict)
-    # Exemptions for requirement enforcement
     exemptions: Dict[str, dict] = field(default_factory=lambda: {"global": {}, "groups": {}})
 
-def _as_userreq(d: dict) -> UserReq:
+def _as_userreq(obj) -> UserReq:
+    if isinstance(obj, UserReq):
+        return obj
     return UserReq(
-        purchases=float(d.get("purchases", 0.0)),
-        games=int(d.get("games", 0)),
-        notes=str(d.get("notes", "")),
-        dm_ready=bool(d.get("dm_ready", False)),
+        tokens=int(obj.get("tokens", 0)),
+        buys=int(obj.get("buys", 0)),
+        games=int(obj.get("games", 0)),
+        last_buy_ts=float(obj.get("last_buy_ts", 0.0)),
+        notes=str(obj.get("notes", "")),
     )
 
 class ReqStore:
-    """JSON-backed store for monthly requirements, admins, exemptions, and global DM-ready."""
-
     def __init__(self, path: str = DEFAULT_PATH):
         self.path = path
-        self.state: StoreState = StoreState()
+        self.state = StoreState()
         self._load()
 
-    # ---------- persistence ----------
+    # ---------- low-level load/save ----------
     def _load(self):
         if not os.path.exists(self.path):
             self._save()
@@ -56,11 +72,10 @@ class ReqStore:
         with open(self.path, "r", encoding="utf-8") as f:
             raw = json.load(f)
 
-        # months
         months: Dict[str, Dict[str, Dict[str, UserReq]]] = {}
-        for mk, month in raw.get("months", {}).items():
+        for mk, month in (raw.get("months") or {}).items():
             users = {}
-            for uid, data in month.get("users", {}).items():
+            for uid, data in (month.get("users") or {}).items():
                 users[uid] = _as_userreq(data) if isinstance(data, dict) else data
             months[mk] = {"users": users}
 
@@ -81,8 +96,8 @@ class ReqStore:
         months_raw = {}
         for mk, month in self.state.months.items():
             out_users = {}
-            for uid, val in month.get("users", {}).items():
-                out_users[uid] = asdict(val) if isinstance(val, UserReq) else val
+            for uid, ur in month.get("users", {}).items():
+                out_users[uid] = asdict(ur) if isinstance(ur, UserReq) else ur
             months_raw[mk] = {"users": out_users}
         raw = {
             "months": months_raw,
@@ -90,51 +105,49 @@ class ReqStore:
             "dm_ready_global": self.state.dm_ready_global,
             "exemptions": self.state.exemptions,
         }
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         with open(self.path, "w", encoding="utf-8") as f:
-            json.dump(raw, f, ensure_ascii=False, indent=2)
+            json.dump(raw, f, indent=2)
 
-    # ---------- admins ----------
+    # ---------- admin list ----------
     def list_admins(self) -> List[int]:
-        return sorted(set(self.state.admins))
+        return list(self.state.admins)
 
-    def add_admin(self, user_id: int) -> bool:
-        s = set(self.state.admins)
-        if user_id in s:
+    def add_admin(self, uid: int) -> bool:
+        if uid in self.state.admins:
             return False
-        s.add(user_id)
-        self.state.admins = sorted(s)
+        self.state.admins.append(uid)
         self._save()
         return True
 
-    def remove_admin(self, user_id: int) -> bool:
-        s = set(self.state.admins)
-        if user_id not in s:
+    def remove_admin(self, uid: int) -> bool:
+        if uid not in self.state.admins:
             return False
-        s.remove(user_id)
-        self.state.admins = sorted(s)
+        self.state.admins.remove(uid)
         self._save()
         return True
 
-    # ---------- month/user helpers ----------
-    def _ensure_month(self, key: Optional[str] = None) -> str:
-        key = key or _month_key()
-        self.state.months.setdefault(key, {"users": {}})
-        return key
-
+    # ---------- monthly user state ----------
     def _ensure_user(self, user_id: int, month_key: Optional[str] = None) -> Tuple[str, UserReq]:
-        mk = self._ensure_month(month_key)
+        mk = month_key or _month_key()
+        if mk not in self.state.months:
+            self.state.months[mk] = {"users": {}}
         users = self.state.months[mk]["users"]
-        s_uid = str(user_id)
-        if s_uid not in users:
-            users[s_uid] = UserReq()
-        elif isinstance(users[s_uid], dict):
-            users[s_uid] = _as_userreq(users[s_uid])
-        return mk, users[s_uid]
+        suid = str(user_id)
+        if suid not in users:
+            users[suid] = UserReq()
+        return mk, users[suid]
 
-    # ---------- requirement ops ----------
-    def add_purchase(self, user_id: int, amount: float, month_key: Optional[str] = None):
+    def add_tokens(self, user_id: int, amount: int, month_key: Optional[str] = None):
         mk, u = self._ensure_user(user_id, month_key)
-        u.purchases += max(0.0, float(amount))
+        u.tokens += max(0, int(amount))
+        self._save()
+        return mk, u
+
+    def add_buy(self, user_id: int, amount: int = 1, month_key: Optional[str] = None):
+        mk, u = self._ensure_user(user_id, month_key)
+        u.buys += max(0, int(amount))
+        u.last_buy_ts = time.time()
         self._save()
         return mk, u
 
@@ -150,19 +163,59 @@ class ReqStore:
         self._save()
         return mk, u
 
-    # ---------- GLOBAL DM-READY ----------
-    def set_dm_ready_global(self, user_id: int, ready: bool, by_admin: bool = False):
-        s_uid = str(user_id)
+    # ---------- GLOBAL DM-READY (Mongo-backed) ----------
+    def set_dm_ready_global(self, user_id: int, ready: bool, by_admin: bool = False) -> bool:
+        """
+        Returns True if this call changed the state (i.e., newly set or removed).
+        Uses Mongo when available, else JSON map.
+        """
+        suid = str(user_id)
+        if _mongo_col is not None:
+            try:
+                if ready:
+                    # upsert unique by user_id
+                    res = _mongo_col.update_one(
+                        {"user_id": user_id},
+                        {"$setOnInsert": {"since": time.time()},
+                         "$set": {"by_admin": bool(by_admin)}},
+                        upsert=True
+                    )
+                    # modified_count==0 and upserted_id is None -> already present
+                    return bool(res.upserted_id)
+                else:
+                    res = _mongo_col.delete_one({"user_id": user_id})
+                    return res.deleted_count > 0
+            except Exception:
+                # fall through to JSON on any DB error
+                pass
+
+        # JSON fallback
+        before = suid in self.state.dm_ready_global
         if ready:
-            self.state.dm_ready_global[s_uid] = {"since": time.time(), "by_admin": bool(by_admin)}
+            self.state.dm_ready_global[suid] = {"since": time.time(), "by_admin": bool(by_admin)}
         else:
-            self.state.dm_ready_global.pop(s_uid, None)
+            self.state.dm_ready_global.pop(suid, None)
         self._save()
+        after = suid in self.state.dm_ready_global
+        return before != after
 
     def is_dm_ready_global(self, user_id: int) -> bool:
+        if _mongo_col is not None:
+            try:
+                return _mongo_col.count_documents({"user_id": user_id}, limit=1) > 0
+            except Exception:
+                pass
         return str(user_id) in self.state.dm_ready_global
 
     def list_dm_ready_global(self) -> Dict[str, dict]:
+        if _mongo_col is not None:
+            try:
+                out = {}
+                for doc in _mongo_col.find({}, {"_id": 0}).sort("since", -1):
+                    out[str(doc.get("user_id"))] = {"since": doc.get("since"), "by_admin": doc.get("by_admin", False)}
+                return out
+            except Exception:
+                pass
         return dict(self.state.dm_ready_global)
 
     # ---------- status/export ----------
@@ -170,71 +223,37 @@ class ReqStore:
         return self._ensure_user(user_id, month_key)
 
     def export_csv(self, month_key: Optional[str] = None) -> str:
-        import csv
-        from io import StringIO
+        import csv, io
         mk = month_key or _month_key()
-        self._ensure_month(mk)
-        users = self.state.months[mk]["users"]
-        sio = StringIO()
-        w = csv.writer(sio)
-        w.writerow(["user_id", "purchases", "games", "dm_ready", "notes"])
-        for s_uid, data in sorted(users.items(), key=lambda kv: int(kv[0])):
-            if isinstance(data, dict):
-                data = _as_userreq(data)
-            w.writerow([s_uid, f"{data.purchases:.2f}", data.games, int(data.dm_ready), data.notes])
-        return sio.getvalue()
+        users = self.state.months.get(mk, {}).get("users", {})
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["user_id", "tokens", "buys", "games", "last_buy_ts", "notes"])
+        for uid, u in users.items():
+            if isinstance(u, UserReq):
+                u = asdict(u)
+            w.writerow([uid, u.get("tokens", 0), u.get("buys", 0), u.get("games", 0), u.get("last_buy_ts", 0), u.get("notes", "")])
+        return buf.getvalue()
 
     # ---------- exemptions ----------
-    def _now(self) -> float:
-        return time.time()
-
-    def _parse_duration(self, duration: Optional[str]) -> Optional[float]:
-        if not duration:
-            return None
-        s = duration.strip().lower()
-        try:
-            if s.endswith("h"):
-                return float(s[:-1]) * 3600.0
-            if s.endswith("d"):
-                return float(s[:-1]) * 86400.0
-            return float(s) * 3600.0
-        except Exception:
-            return None
-
-    def add_exemption(self, user_id: int, chat_id: Optional[int] = None, duration: Optional[str] = None, note: str = "") -> dict:
-        until = None
-        secs = self._parse_duration(duration)
-        if secs:
-            until = self._now() + secs
+    def add_exemption(self, user_id: int, chat_id: Optional[int] = None, until_ts: Optional[float] = None):
+        now = time.time()
+        rec = {"until": until_ts} if until_ts else {}
         if chat_id is None:
-            self.state.exemptions["global"][str(user_id)] = {"until": until, "note": note}
+            self.state.exemptions.setdefault("global", {})[str(user_id)] = rec
         else:
-            gid = str(chat_id)
-            groups = self.state.exemptions["groups"]
-            groups.setdefault(gid, {})
-            groups[gid][str(user_id)] = {"until": until, "note": note}
+            self.state.exemptions.setdefault("groups", {}).setdefault(str(chat_id), {})[str(user_id)] = rec
         self._save()
-        return {"until": until, "note": note}
 
-    def remove_exemption(self, user_id: int, chat_id: Optional[int] = None) -> bool:
-        removed = False
+    def remove_exemption(self, user_id: int, chat_id: Optional[int] = None):
         if chat_id is None:
-            removed = self.state.exemptions["global"].pop(str(user_id), None) is not None
+            self.state.exemptions.get("global", {}).pop(str(user_id), None)
         else:
-            gid = str(chat_id)
-            grp = self.state.exemptions["groups"].get(gid, {})
-            removed = grp.pop(str(user_id), None) is not None
-        if removed:
-            self._save()
-        return removed
+            self.state.exemptions.setdefault("groups", {}).get(str(chat_id), {}).pop(str(user_id), None)
+        self._save()
 
-    def list_exemptions(self, chat_id: Optional[int] = None) -> Dict[str, dict]:
-        if chat_id is None:
-            return dict(self.state.exemptions.get("global", {}))
-        return dict(self.state.exemptions.get("groups", {}).get(str(chat_id), {}))
-
-    def is_exempt(self, user_id: int, chat_id: Optional[int] = None) -> bool:
-        now = self._now()
+    def has_valid_exemption(self, user_id: int, chat_id: Optional[int] = None) -> bool:
+        now = time.time()
         if chat_id is not None:
             rec = self.state.exemptions.get("groups", {}).get(str(chat_id), {}).get(str(user_id))
             if rec:
