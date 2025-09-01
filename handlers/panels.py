@@ -1,122 +1,99 @@
 # handlers/panels.py
-from typing import Optional
 import os
+from typing import Optional
+from pyrogram import Client
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram import filters
 
+# ENV
+RONI_ID  = os.getenv("RONI_ID")
+RUBY_ID  = os.getenv("RUBY_ID")
+RONI_NAME= os.getenv("RONI_NAME", "Roni")
+RUBY_NAME= os.getenv("RUBY_NAME", "Ruby")
+RONI_UN  = os.getenv("RONI_USERNAME")  # e.g. Chaossub283 (no @)
+RUBY_UN  = os.getenv("RUBY_USERNAME")
 
-# Admin identities from ENV (either usernames or numeric IDs are fine)
-RONI_ID    = os.getenv("RONI_ID")
-RUBY_ID    = os.getenv("RUBY_ID")
-RONI_NAME  = os.getenv("RONI_NAME", "Roni")
-RUBY_NAME  = os.getenv("RUBY_NAME", "Ruby")
-MODELS_URL = os.getenv("MODELS_LINK") or os.getenv("MODELS_URL")
+def _btn(text, data): return InlineKeyboardButton(text, callback_data=data)
+def _back_main(): return [[_btn("⬅️ Back to Main", "nav:main")]]
 
-
-def _btn(text: str, data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text, callback_data=data)
-
-
-def _back_main():
-    return [[_btn("⬅️ Back to Main", "panel:main")]]
-
+def _user_url(username: Optional[str], numeric_id: Optional[str]) -> Optional[str]:
+    if username:
+        return f"https://t.me/{username.lstrip('@')}"
+    if numeric_id:
+        return f"https://t.me/user?id={int(numeric_id)}"
+    return None
 
 async def render_main(msg: Message):
     rows = [
-        [_btn("💕 Menu", "panel:menu")],
-        [_btn("👑 Contact Admins", "panel:contact")],
-        [_btn("🔥 Find Our Models Elsewhere", "panel:models")],
-        [_btn("❓ Help", "panel:help")],
+        [_btn("💕 Menu", "nav:menu")],
+        [_btn("👑 Contact Admins", "nav:contact")],
+        [_btn("🔥 Find Our Models Elsewhere", "nav:links")],
+        [_btn("❓ Help", "nav:help")],
     ]
+    kb = InlineKeyboardMarkup(rows)
     await msg.edit_text(
         "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
         "Your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
         "✨ <i>Use the menu below to navigate!</i>",
-        reply_markup=InlineKeyboardMarkup(rows),
-        disable_web_page_preview=True,
+        reply_markup=kb
     )
 
+async def render_menu(msg: Message):
+    rows = [
+        [_btn("💘 Roni", "menu:roni"), _btn("💘 Ruby", "menu:ruby")],
+        [_btn("💘 Rin", "menu:rin"), _btn("💘 Savy", "menu:savy")],
+    ] + _back_main()
+    await msg.edit_text("💕 <b>Menus</b>\nPick a model whose menu is saved.", reply_markup=InlineKeyboardMarkup(rows))
 
-def _profile_url(username_env_key: str, numeric_id: Optional[str]) -> Optional[str]:
-    uname = os.getenv(username_env_key)
-    if uname:
-        return f"https://t.me/{uname.lstrip('@')}"
-    if numeric_id:
-        try:
-            return f"https://t.me/user?id={int(numeric_id)}"
-        except Exception:
-            return None
-    return None
-
-
-async def render_contact(msg: Message, _me_username: Optional[str] = None):
-    rows: list[list[InlineKeyboardButton]] = []
-
-    roni_url = _profile_url("RONI_USERNAME", RONI_ID)
-    ruby_url = _profile_url("RUBY_USERNAME", RUBY_ID)
-
+async def render_contact(msg: Message):
+    rows = []
+    roni_url = _user_url(RONI_UN, RONI_ID)
+    ruby_url = _user_url(RUBY_UN, RUBY_ID)
     if roni_url:
         rows.append([InlineKeyboardButton(f"👑 Contact {RONI_NAME}", url=roni_url)])
     if ruby_url:
         rows.append([InlineKeyboardButton(f"👑 Contact {RUBY_NAME}", url=ruby_url)])
-
     rows.append([_btn("🕵️ Anonymous Message", "contact:anon")])
     rows += _back_main()
-
     await msg.edit_text(
-        "👑 <b>Contact Admins</b>\n\n"
-        "• Tag an admin in chat\n"
-        "• Or send an anonymous message via the bot.\n",
-        reply_markup=InlineKeyboardMarkup(rows),
-        disable_web_page_preview=True,
+        "👑 <b>Contact Admins</b>\n\n• Tag an admin in chat\n• Or send an anonymous message via the bot.",
+        reply_markup=InlineKeyboardMarkup(rows)
     )
-
 
 async def render_help(msg: Message):
     rows = _back_main()
-    await msg.edit_text(
-        "❓ <b>Help</b>\n\n"
-        "Tap a button above, or ask an admin if you’re stuck.",
-        reply_markup=InlineKeyboardMarkup(rows),
-    )
+    await msg.edit_text("❓ <b>Help</b>\nTap a button above, or ask an admin if you’re stuck.", reply_markup=InlineKeyboardMarkup(rows))
 
-
-async def render_models(msg: Message):
+async def render_links(msg: Message):
     rows = _back_main()
-    text = "🧭 <b>Find Our Models Elsewhere</b>\n\n"
-    if MODELS_URL:
-        text += f"<a href=\"{MODELS_URL}\">Tap here</a> to browse."
-    else:
-        text += "Ask an admin for the link."
-    await msg.edit_text(text, reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=False)
+    await msg.edit_text("🔥 <b>Find Our Models Elsewhere</b>\nAll verified off-platform links are collected here.", reply_markup=InlineKeyboardMarkup(rows))
 
+def register(app: Client):
 
-def register(app):
-    from pyrogram import filters
-    from pyrogram.types import CallbackQuery
+    @app.on_callback_query(filters.regex("^nav:main$"))
+    async def _go_main(c, cq): await render_main(cq.message)
 
-    @app.on_callback_query(filters.regex("^panel:main$"))
-    async def _cb_main(_, cq: CallbackQuery):
-        await render_main(cq.message)
-        await cq.answer()
+    @app.on_callback_query(filters.regex("^nav:menu$"))
+    async def _go_menu(c, cq): await render_menu(cq.message)
 
-    @app.on_callback_query(filters.regex("^panel:contact$"))
-    async def _cb_contact(client, cq: CallbackQuery):
-        me = await client.get_me()
-        await render_contact(cq.message, getattr(me, "username", None))
-        await cq.answer()
+    @app.on_callback_query(filters.regex("^nav:contact$"))
+    async def _go_contact(c, cq): await render_contact(cq.message)
 
-    @app.on_callback_query(filters.regex("^panel:help$"))
-    async def _cb_help(_, cq: CallbackQuery):
-        await render_help(cq.message)
-        await cq.answer()
+    @app.on_callback_query(filters.regex("^nav:help$"))
+    async def _go_help(c, cq): await render_help(cq.message)
 
-    @app.on_callback_query(filters.regex("^panel:models$"))
-    async def _cb_models(_, cq: CallbackQuery):
-        await render_models(cq.message)
-        await cq.answer()
+    @app.on_callback_query(filters.regex("^nav:links$"))
+    async def _go_links(c, cq): await render_links(cq.message)
 
-    @app.on_callback_query(filters.regex("^panel:menu$"))
-    async def _cb_menu(_, cq: CallbackQuery):
-        # Your dedicated menus module should be wired separately as handlers.menu.
-        # We only acknowledge the tap so it never feels “dead”.
-        await cq.answer("Opening menus…")
+    # Optional: expose commands that open the same panels
+    @app.on_message(filters.private & filters.command("menu"))
+    async def _cmd_menu(c, m):
+        ph = await m.reply_text("…"); await render_menu(ph)
+
+    @app.on_message(filters.private & filters.command("contact"))
+    async def _cmd_contact(c, m):
+        ph = await m.reply_text("…"); await render_contact(ph)
+
+    @app.on_message(filters.private & filters.command("help"))
+    async def _cmd_help(c, m):
+        ph = await m.reply_text("…"); await render_help(ph)
