@@ -1,7 +1,5 @@
 # main.py
-import os
-import sys
-import logging
+import os, logging, sys
 from pyrogram import Client
 from dotenv import load_dotenv
 
@@ -15,11 +13,10 @@ logging.basicConfig(
 log = logging.getLogger("SuccuBot")
 
 API_ID = int(os.getenv("API_ID", "0") or "0")
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_NAME = os.getenv("BOT_NAME", "succubot")
 
-# One shared client for the whole bot
 app = Client(
     BOT_NAME,
     api_id=API_ID,
@@ -30,7 +27,6 @@ app = Client(
 )
 
 def wire(import_path: str):
-    """Import a module and call its register(app) if present."""
     try:
         mod = __import__(import_path, fromlist=["register"])
         if hasattr(mod, "register"):
@@ -44,23 +40,23 @@ def wire(import_path: str):
         log.exception("❌ Failed to wire %s: %s", import_path, e)
 
 if __name__ == "__main__":
-    # ── Core portal: keep this the ONLY /start handler ───────────────────────────
+    # The ONLY /start handler (prevents duplicates)
     wire("dm_foolproof")
 
-    # ── Panels wired through dm_foolproof (no additional /start handlers) ───────
-    wire("handlers.help_panel")        # Help: Buyer Rules / Requirements / Game Rules
-    wire("handlers.contact_admins")    # Contact Roni/Ruby, Suggestions, Anonymous
+    # Consolidated panel/UI router (Menus, Contact Admins, Help, Models Elsewhere)
+    wire("handlers.panels")
 
-    # ── DM-ready lifecycle extras ────────────────────────────────────────────────
-    wire("handlers.dmready_cleanup")   # Auto-remove DM-ready on leave/kick/ban
+    # Menus save/update command stays as-is
+    wire("handlers.createmenu")
 
-    # ── Menus (uses data/menus.json; keep your existing creator if you use it) ──
-    wire("handlers.menu")              # optional viewer if you have it
-    wire("handlers.createmenu")        # command to save/update menus
-
-    # ── Your existing feature stack (must NOT register /start again) ────────────
-    wire("handlers.dmnow")             # deep-link helper (no /start, safe)
+    # DM helper & admin tools (no /start here)
+    wire("handlers.dmnow")
     wire("handlers.dm_admin")
+
+    # Remove DM-ready when users leave/kicked/banned in Sanctuary groups
+    wire("handlers.dmready_cleanup")
+
+    # Your existing stack (must not register /start)
     wire("handlers.enforce_requirements")
     wire("handlers.req_handlers")
     wire("handlers.test_send")
