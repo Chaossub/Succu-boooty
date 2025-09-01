@@ -1,109 +1,102 @@
-# handlers/contact_admins.py
-# Contact Admins panel with DM buttons + suggestion / anonymous.
-
+# Contact Admins panel: Roni / Ruby links + Suggestion + Anonymous
 import os
-import time
-from typing import Dict, Tuple
-
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
-OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
-RONI_ID = int(os.getenv("RONI_ID", "0") or "0")
-RUBY_ID = int(os.getenv("RUBY_ID", "0") or "0")
+# ENV — names/usernames/ids (fallbacks are safe)
 RONI_NAME = os.getenv("RONI_NAME", "Roni")
 RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
+RONI_USERNAME = os.getenv("RONI_USERNAME", "").lstrip("@")
+RUBY_USERNAME = os.getenv("RUBY_USERNAME", "").lstrip("@")
+RONI_ID = int(os.getenv("RONI_ID", "0") or "0")
+RUBY_ID = int(os.getenv("RUBY_ID", "0") or "0")
 
-# ephemeral capture state for suggestion / anon
-_pending: Dict[int, Tuple[str, float]] = {}
-TTL = 5 * 60  # 5 minutes
+BTN_BACK = os.getenv("BTN_BACK", "⬅️ Back to Main")
 
-def _kb_contact() -> InlineKeyboardMarkup:
-    rows = []
-    if RONI_ID:
-        rows.append([InlineKeyboardButton(f"💬 Message {RONI_NAME} ➜", url=f"tg://user?id={RONI_ID}")])
-    if RUBY_ID:
-        rows.append([InlineKeyboardButton(f"💬 Message {RUBY_NAME} ➜", url=f"tg://user?id={RUBY_ID}")])
-    rows += [
-        [InlineKeyboardButton("💡 Send a suggestion", callback_data="contact_suggest")],
-        [InlineKeyboardButton("🙈 Send anonymous message", callback_data="contact_anon")],
-        [InlineKeyboardButton("⬅️ Back to Main", callback_data="dmf_start")],
+def _user_link(username: str, uid: int) -> str:
+    if username:
+        return f"https://t.me/{username}"
+    if uid:
+        return f"tg://user?id={uid}"
+    return "https://t.me"
+
+def _main_kb() -> InlineKeyboardMarkup:
+    # Mirror the hub buttons so Back works even if other modules change later
+    rows = [
+        [InlineKeyboardButton("💕 Menus", callback_data="open_menus")],
+        [InlineKeyboardButton("👑 Contact Admins", callback_data="open_contact_admins")],
+        [InlineKeyboardButton("🔥 Find Our Models Elsewhere", callback_data="open_models_links")],
+        [InlineKeyboardButton("❓ Help", callback_data="open_help")],
     ]
     return InlineKeyboardMarkup(rows)
 
-async def _open_panel(c: Client, chat_id: int, mid: int | None = None):
-    text = "👑 <b>Contact Admins</b>\nDM an admin directly or send a suggestion / anonymous message."
-    if mid:
-        await c.edit_message_text(chat_id, mid, text, reply_markup=_kb_contact(), disable_web_page_preview=True)
-    else:
-        await c.send_message(chat_id, text, reply_markup=_kb_contact(), disable_web_page_preview=True)
+def _kb_contact_admins() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(f"💬 Contact {RONI_NAME}", url=_user_link(RONI_USERNAME, RONI_ID)),
+            InlineKeyboardButton(f"💬 Contact {RUBY_NAME}", url=_user_link(RUBY_USERNAME, RUBY_ID)),
+        ],
+        [
+            InlineKeyboardButton("💡 Send Suggestion", callback_data="contact_suggest"),
+            InlineKeyboardButton("🙈 Anonymous Message", callback_data="contact_anon"),
+        ],
+        [InlineKeyboardButton(BTN_BACK, callback_data="panel_back_main")],
+    ]
+    return InlineKeyboardMarkup(rows)
 
-def _set_pending(uid: int, kind: str):
-    _pending[uid] = (kind, time.time() + TTL)
+CONTACT_TEXT = (
+    "<b>👑 Contact Admins</b>\n"
+    "• Tap to message an admin directly.\n"
+    "• Or send a suggestion / anonymous message via the bot."
+)
 
-def _get_pending(uid: int) -> str | None:
-    now = time.time()
-    # purge expired
-    for k, (_, exp) in list(_pending.items()):
-        if exp < now:
-            _pending.pop(k, None)
-    tup = _pending.get(uid)
-    if not tup:
-        return None
-    kind, exp = tup
-    return kind if exp >= now else None
+SUGGEST_PROMPT = (
+    "💡 <b>Suggestions</b>\n"
+    "Reply in <b>this chat</b> with your suggestion. I’ll forward it to the admins."
+)
 
-def _clear_pending(uid: int):
-    _pending.pop(uid, None)
+ANON_PROMPT = (
+    "🙈 <b>Anonymous Message</b>\n"
+    "Reply in <b>this chat</b> with the message. I’ll forward it anonymously to the owner."
+)
 
 def register(app: Client):
+    # Open panel (support multiple IDs seen in older menus)
+    @app.on_callback_query(filters.regex(r"^(open_contact_admins|contact_admins)$"))
+    async def open_panel(_, cq: CallbackQuery):
+        await cq.message.edit_text(CONTACT_TEXT, reply_markup=_kb_contact_admins(), disable_web_page_preview=True)
+        await cq.answer()
 
-    # open from main menu button
-    @app.on_callback_query(filters.regex("^dmf_contact_admins$"))
-    async def _open_from_menu(c: Client, q: CallbackQuery):
-        await _open_panel(c, q.message.chat.id, q.message.id)
-        await q.answer()
-
-    # suggestion / anonymous flows
-    @app.on_callback_query(filters.regex("^contact_suggest$"))
-    async def _suggest(c: Client, q: CallbackQuery):
-        _set_pending(q.from_user.id, "suggest")
-        await q.answer()
-        await c.edit_message_text(
-            q.message.chat.id, q.message.id,
-            "💡 <b>Suggestion box</b>\nSend your suggestion as a single message within 5 minutes.\n"
-            "Your username will be included.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Cancel", callback_data="dmf_contact_admins")]])
+    # Back to hub
+    @app.on_callback_query(filters.regex(r"^panel_back_main$"))
+    async def back_main(_, cq: CallbackQuery):
+        await cq.message.edit_text(
+            "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
+            "Your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+            "✨ <i>Use the menu below to navigate!</i>",
+            reply_markup=_main_kb(),
+            disable_web_page_preview=True,
         )
+        await cq.answer()
 
-    @app.on_callback_query(filters.regex("^contact_anon$"))
-    async def _anon(c: Client, q: CallbackQuery):
-        _set_pending(q.from_user.id, "anon")
-        await q.answer()
-        await c.edit_message_text(
-            q.message.chat.id, q.message.id,
-            "🙈 <b>Anonymous message</b>\nSend your message as a single text within 5 minutes.\n"
-            "Your username will NOT be included.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Cancel", callback_data="dmf_contact_admins")]])
-        )
+    # Suggestion flow (user will reply; dm_foolproof/owner-forwarder can pick replies if you wish;
+    # for now we just show instructions)
+    @app.on_callback_query(filters.regex(r"^contact_suggest$"))
+    async def suggest(_, cq: CallbackQuery):
+        await cq.answer()
+        await cq.message.edit_text(SUGGEST_PROMPT, reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(BTN_BACK, callback_data="open_contact_admins")]]
+        ))
 
-    # capture next private message if a flow is active
-    @app.on_message(filters.private & ~filters.command([]))
-    async def _capture(c: Client, m: Message):
-        kind = _get_pending(m.from_user.id)
-        if not kind:
-            return
-        _clear_pending(m.from_user.id)
+    # Anonymous flow prompt
+    @app.on_callback_query(filters.regex(r"^contact_anon$"))
+    async def anon(_, cq: CallbackQuery):
+        await cq.answer()
+        await cq.message.edit_text(ANON_PROMPT, reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(BTN_BACK, callback_data="open_contact_admins")]]
+        ))
 
-        if OWNER_ID:
-            if kind == "suggest":
-                u = m.from_user
-                who = (u.first_name or "User").replace("<", "&lt;").replace(">", "&gt;")
-                mention = f"<a href='tg://user?id={u.id}'>{who}</a>"
-                text = f"💡 <b>Suggestion</b> from {mention} @{u.username or '—'}:\n\n{m.text or '(no text)'}"
-                await c.send_message(OWNER_ID, text, disable_web_page_preview=True)
-            else:
-                text = f"🙈 <b>Anonymous message</b>:\n\n{m.text or '(no text)'}"
-                await c.send_message(OWNER_ID, text, disable_web_page_preview=True)
-
-        await c.send_message(m.chat.id, "✅ Thanks! Sent to the admins.", reply_markup=_kb_contact())
+    # Slash command shortcut (optional)
+    @app.on_message(filters.command(["contactadmins", "contact", "admins"]) & ~filters.edited)
+    async def cmd_contact(_, m: Message):
+        await m.reply_text(CONTACT_TEXT, reply_markup=_kb_contact_admins(), disable_web_page_preview=True)
