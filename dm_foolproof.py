@@ -1,8 +1,8 @@
-# dm_foolproof.py — DM-ready dedupe (Mongo) + owner tools, with full /dmreadylist
+# dm_foolproof.py — DM-ready dedupe with Mongo persistence + owner tools
 import os, json, time
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Tuple
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.errors import RPCError
@@ -17,10 +17,12 @@ MONGO_URI          = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
 MONGO_DB_NAME      = os.getenv("MONGO_DB_NAME", "succubot")
 DMREADY_COLLECTION = os.getenv("DM_READY_COLLECTION", "dm_ready")
 
+# announce mode: "first_only" (on first store only) or "always"
 DM_READY_NOTIFY_MODE = os.getenv("DM_READY_NOTIFY_MODE", "first_only").lower().strip()
 
 # --------- Mongo setup ---------
 mongo_col = None
+mongo_error: str | None = None
 if MONGO_URI:
     try:
         _client = MongoClient(MONGO_URI)
@@ -28,10 +30,11 @@ if MONGO_URI:
         mongo_col = _db[DMREADY_COLLECTION]
         mongo_col.create_index("user_id", unique=True, name="uniq_user_id")
         mongo_col.create_index("first_seen", name="idx_first_seen")
-    except Exception:
-        mongo_col = None  # fall back to file
+    except Exception as e:
+        mongo_error = f"{type(e).__name__}: {e}"
+        mongo_col = None
 
-# --------- Ephemeral file fallback (only if mongo isn't available) ---------
+# --------- Ephemeral file fallback (not used for announcing) ---------
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DM_FILE = DATA_DIR / "dm_ready.json"
@@ -57,10 +60,15 @@ def _release_lock(fd):
 def _fmt_user(u):
     return f"{u.first_name or 'Someone'}" + (f" @{u.username}" if u.username else "")
 
-async def _mark_once(uid: int, name: str, username: str) -> bool:
+async def _mark_once(uid: int, name: str, username: str) -> str:
     """
-    True only the first time we see this user.
-    Uses Mongo (persistent); falls back to local JSON if Mongo is down.
+    Returns one of:
+      - "first"        -> stored in Mongo for the first time
+      - "seen"         -> already present in Mongo
+      - "db_error"     -> Mongo configured but errored
+      - "no_db"        -> Mongo not configured
+
+    NOTE: We only ANNOUNCE on "first". Other states skip announcing to avoid restart spam.
     """
     if mongo_col is not None:
         try:
@@ -70,13 +78,14 @@ async def _mark_once(uid: int, name: str, username: str) -> bool:
                 "username": username,
                 "first_seen": datetime.utcnow()
             })
-            return True
+            return "first"
         except mongo_errors.DuplicateKeyError:
-            return False
+            return "seen"
         except Exception:
-            pass  # fall through to file fallback
+            return "db_error"
 
-    # Fallback: local JSON (ephemeral)
+    # No DB configured
+    # (We still store in a local file so /dmreadylist has *something*, but do not announce.)
     fd = _acquire_lock()
     try:
         data = {}
@@ -85,22 +94,20 @@ async def _mark_once(uid: int, name: str, username: str) -> bool:
                 data = json.loads(DM_FILE.read_text())
             except Exception:
                 data = {}
-        if str(uid) in data:
-            return False
-        data[str(uid)] = {
-            "name": name,
-            "username": username,
-            "first_seen": datetime.utcnow().isoformat()
-        }
-        DM_FILE.write_text(json.dumps(data, indent=2))
-        return True
+        if str(uid) not in data:
+            data[str(uid)] = {
+                "name": name,
+                "username": username,
+                "first_seen": datetime.utcnow().isoformat()
+            }
+            DM_FILE.write_text(json.dumps(data, indent=2))
+        return "no_db"
     finally:
         if fd is not None:
             _release_lock(fd)
 
 # --------- Utilities ---------
 def _chunk_text(s: str, limit: int = 4000) -> List[str]:
-    """Split a long string into Telegram-safe chunks (slightly under 4096)."""
     lines = s.splitlines()
     out, cur = [], ""
     for ln in lines:
@@ -114,12 +121,8 @@ def _chunk_text(s: str, limit: int = 4000) -> List[str]:
     return out
 
 async def _reply_chunked(message: Message, header: str, body_lines: Iterable[str]):
-    """Reply with a header + potentially many lines, chunked safely."""
     lines = list(body_lines)
-    if not lines:
-        await message.reply_text(header + "\n(empty)")
-        return
-    payload = header + "\n" + "\n".join(lines)
+    payload = header + ("\n" + "\n".join(lines) if lines else "\n(empty)")
     for part in _chunk_text(payload):
         await message.reply_text(part)
 
@@ -129,9 +132,10 @@ def register(app: Client):
     @app.on_message(filters.private & filters.command("start"))
     async def _start(c: Client, m: Message):
         u = m.from_user
-        first_time = await _mark_once(u.id, u.first_name or "Someone", u.username)
+        state = await _mark_once(u.id, u.first_name or "Someone", u.username)
 
-        if first_time:
+        # Announce ONLY when we truly persisted to Mongo the first time.
+        if state == "first":
             try:
                 await m.reply_text(f"✅ DM-ready — {_fmt_user(u)}")
             except RPCError:
@@ -144,11 +148,35 @@ def register(app: Client):
                     )
                 except Exception:
                     pass
+        elif state in ("db_error", "no_db") and OWNER_ID:
+            # Soft heads-up once per process: DB not working, so we skipped announcement to avoid restart spam.
+            # Comment out if you don't want this nudge.
+            try:
+                await c.send_message(
+                    OWNER_ID,
+                    "⚠️ DM-ready persistence unavailable "
+                    f"({'Mongo error' if state=='db_error' else 'no Mongo configured'}); "
+                    "skipped DM-ready announcement to avoid duplicates on restart."
+                )
+            except Exception:
+                pass
 
+        # Show main panel (always)
         ph = await m.reply_text("…")
         await render_main(ph)
 
     # ---- Owner tools ----
+    @app.on_message(filters.private & filters.command("dmready_status"))
+    async def _status(c: Client, m: Message):
+        if m.from_user.id != OWNER_ID:
+            return
+        if mongo_col is not None:
+            await m.reply_text("✅ Mongo connected.\n"
+                               f"DB: <code>{MONGO_DB_NAME}</code>, Collection: <code>{DMREADY_COLLECTION}</code>")
+        else:
+            await m.reply_text("⚠️ Mongo NOT connected."
+                               + (f"\nError: <code>{mongo_error}</code>" if mongo_error else ""))
+
     @app.on_message(filters.private & filters.command("dmready_count"))
     async def _count(c: Client, m: Message):
         if m.from_user.id != OWNER_ID:
@@ -170,13 +198,8 @@ def register(app: Client):
 
     @app.on_message(filters.private & filters.command("dmreadylist"))
     async def _list_all(c: Client, m: Message):
-        """
-        List ALL DM-ready users: name, @username, Telegram ID.
-        Sorted by newest first. Owner-only.
-        """
         if m.from_user.id != OWNER_ID:
             return
-
         rows: List[str] = []
         if mongo_col is not None:
             try:
@@ -187,10 +210,9 @@ def register(app: Client):
                     uid = doc.get("user_id")
                     at = f"@{un}" if un else "(no username)"
                     rows.append(f"• {name} {at} — <code>{uid}</code>")
-            except Exception:
-                rows.append("⚠️ Could not read from Mongo.")
+            except Exception as e:
+                rows.append(f"⚠️ Could not read from Mongo: {type(e).__name__}")
         else:
-            # File fallback
             try:
                 data = json.loads(DM_FILE.read_text()) if DM_FILE.exists() else {}
                 items = sorted(
@@ -205,7 +227,6 @@ def register(app: Client):
                     rows.append(f"• {name} {at} — <code>{uid}</code>")
             except Exception:
                 rows.append("⚠️ No local DM-ready file.")
-
         await _reply_chunked(m, "🗂 <b>DM-ready (all)</b>", rows)
 
     @app.on_message(filters.private & filters.command("dmready_reset"))
