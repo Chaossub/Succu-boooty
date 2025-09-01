@@ -1,49 +1,18 @@
 # handlers/dmnow.py
-# /dmnow -> posts a deep-link button to open the bot DM portal.
-# Duplicate-safe (per message) and duplicate-safe (module wire). No side effects.
+# /dmnow -> a single deep-link button to the bot (does NOT mark DM-ready; /start does).
 
-import os
-from typing import Set, Tuple
+import logging
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
-BOT_USERNAME = os.getenv("BOT_USERNAME")  # optional; falls back to get_me().username
-
-_processed: Set[Tuple[int, int]] = set()
-_REGISTERED = False
-
-def _need_skip(m: Message) -> bool:
-    key = (m.chat.id, m.id)
-    if key in _processed:
-        return True
-    _processed.add(key)
-    if len(_processed) > 1000:
-        _processed.clear()
-        _processed.add(key)
-    return False
+log = logging.getLogger("handlers.dmnow")
 
 def register(app: Client):
-    global _REGISTERED
-    if _REGISTERED:
-        return
-    _REGISTERED = True
-
     @app.on_message(filters.command("dmnow"))
     async def dmnow(client: Client, m: Message):
-        if _need_skip(m):
-            return
-
         me = await client.get_me()
-        username = BOT_USERNAME or (me.username if me else None)
-        if not username:
-            await m.reply_text("⚠️ Bot username isn’t set. Set BOT_USERNAME or give the bot an @username.")
-            return
-
-        url = f"https://t.me/{username}?start=ready"
+        # send a deep-link with a tiny payload "d" to record source (logic lives in /start)
+        url = f"https://t.me/{me.username}?start=d"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("💌 Open DM Portal", url=url)]])
-        await m.reply_text(
-            "Tap below to open the DM portal:\n"
-            f"<code>{url}</code>",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
+        await m.reply_text("Tap to open your portal:", reply_markup=kb, disable_web_page_preview=True)
+
