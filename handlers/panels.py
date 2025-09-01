@@ -3,6 +3,7 @@ import os
 from typing import Optional, List
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import MessageNotModified
 
 # ========= Core Admin ENV =========
 RONI_ID   = os.getenv("RONI_ID")
@@ -37,6 +38,17 @@ def _user_url(username: Optional[str], numeric_id: Optional[str]) -> Optional[st
         return f"https://t.me/user?id={int(numeric_id)}"
     return None
 
+async def _safe_edit(msg: Message, text: str, **kwargs):
+    """
+    Edit a message but swallow Telegram's 400 MESSAGE_NOT_MODIFIED if content is identical.
+    This happens when users tap the same button repeatedly.
+    """
+    try:
+        await msg.edit_text(text, **kwargs)
+    except MessageNotModified:
+        # Nothing changed – just ignore.
+        return
+
 # ========= Panels =========
 async def render_main(msg: Message):
     rows = [
@@ -46,12 +58,13 @@ async def render_main(msg: Message):
         [_btn("❓ Help", "nav:help")],
     ]
     kb = InlineKeyboardMarkup(rows)
-    await msg.edit_text(
+    await _safe_edit(
+        msg,
         "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
         "Your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
         "✨ <i>Use the menu below to navigate!</i>",
         reply_markup=kb,
-        disable_web_page_preview=True
+        disable_web_page_preview=True,
     )
 
 async def render_menu(msg: Message):
@@ -60,10 +73,11 @@ async def render_menu(msg: Message):
         [_btn("💘 Roni", "menu:roni"), _btn("💘 Ruby", "menu:ruby")],
         [_btn("💘 Rin", "menu:rin"), _btn("💘 Savy", "menu:savy")],
     ] + _back_main()
-    await msg.edit_text(
+    await _safe_edit(
+        msg,
         "💕 <b>Menus</b>\nPick a model whose menu is saved.",
         reply_markup=InlineKeyboardMarkup(rows),
-        disable_web_page_preview=True
+        disable_web_page_preview=True,
     )
 
 async def render_contact(msg: Message):
@@ -81,10 +95,11 @@ async def render_contact(msg: Message):
     rows.append([_btn("🕵️ Anonymous Message", "contact:anon")])
     rows += _back_main()
 
-    await msg.edit_text(
+    await _safe_edit(
+        msg,
         "👑 <b>Contact Admins</b>\n\n• Tag an admin in chat\n• Or send an anonymous message via the bot.",
         reply_markup=InlineKeyboardMarkup(rows),
-        disable_web_page_preview=True
+        disable_web_page_preview=True,
     )
 
 # ----- HELP HUB (text buttons → text panels, not URLs)
@@ -95,35 +110,57 @@ async def render_help(msg: Message):
         [_btn("🎲 Game Rules", "help:games")],
         [_btn("🕊️ Exemptions", "help:exempt")],
     ] + _back_main()
-    await msg.edit_text(
+    await _safe_edit(
+        msg,
         "❓ <b>Help</b>\nChoose a section:",
         reply_markup=InlineKeyboardMarkup(rows),
-        disable_web_page_preview=True
+        disable_web_page_preview=True,
     )
 
 async def render_help_rules(msg: Message):
     text = BUYER_RULES_TEXT or "No Buyer Rules configured yet."
-    await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[ _btn("⬅️ Back to Help", "nav:help") ]]), disable_web_page_preview=False)
+    await _safe_edit(
+        msg,
+        text,
+        reply_markup=InlineKeyboardMarkup([[ _btn("⬅️ Back to Help", "nav:help") ]]),
+        disable_web_page_preview=False,
+    )
 
 async def render_help_requirements(msg: Message):
     text = BUYER_REQUIREMENTS_TEXT or "No Buyer Requirements configured yet."
-    await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[ _btn("⬅️ Back to Help", "nav:help") ]]), disable_web_page_preview=False)
+    await _safe_edit(
+        msg,
+        text,
+        reply_markup=InlineKeyboardMarkup([[ _btn("⬅️ Back to Help", "nav:help") ]]),
+        disable_web_page_preview=False,
+    )
 
 async def render_help_games(msg: Message):
     text = GAME_RULES_TEXT or "No Game Rules configured yet."
-    await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[ _btn("⬅️ Back to Help", "nav:help") ]]), disable_web_page_preview=False)
+    await _safe_edit(
+        msg,
+        text,
+        reply_markup=InlineKeyboardMarkup([[ _btn("⬅️ Back to Help", "nav:help") ]]),
+        disable_web_page_preview=False,
+    )
 
 async def render_help_exemptions(msg: Message):
     text = EXEMPTIONS_TEXT or "No Exemptions info configured yet."
-    await msg.edit_text(text, reply_markup=InlineKeyboardMarkup([[ _btn("⬅️ Back to Help", "nav:help") ]]), disable_web_page_preview=False)
+    await _safe_edit(
+        msg,
+        text,
+        reply_markup=InlineKeyboardMarkup([[ _btn("⬅️ Back to Help", "nav:help") ]]),
+        disable_web_page_preview=False,
+    )
 
 # ----- MODELS ELSEWHERE (single text block from env)
 async def render_links(msg: Message):
     text = FIND_MODELS_TEXT or "No models directory text configured yet."
-    await msg.edit_text(
+    await _safe_edit(
+        msg,
         text,
         reply_markup=InlineKeyboardMarkup(_back_main()),
-        disable_web_page_preview=False  # allow previews for links you include in the text
+        disable_web_page_preview=False,  # allow previews for any links inside your text
     )
 
 # ========= Wiring =========
