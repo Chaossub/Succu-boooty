@@ -12,51 +12,34 @@ logging.basicConfig(
 )
 log = logging.getLogger("SuccuBot")
 
-API_ID = int(os.getenv("API_ID", "0") or "0")
+API_ID   = int(os.getenv("API_ID", "0") or "0")
 API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN= os.getenv("BOT_TOKEN")
 BOT_NAME = os.getenv("BOT_NAME", "succubot")
 
-app = Client(
-    BOT_NAME,
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-    workdir=".",
-    in_memory=False,
-)
+app = Client(BOT_NAME, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workdir=".", in_memory=False)
 
-def wire(import_path: str):
+def wire(path: str):
     try:
-        mod = __import__(import_path, fromlist=["register"])
-        if hasattr(mod, "register"):
-            mod.register(app)
-            log.info("✅ Wired: %s", import_path)
-        else:
-            log.warning("ℹ️  %s has no register()", import_path)
-    except ModuleNotFoundError as e:
-        log.error("❌ Failed to wire %s: %s", import_path, e)
+        mod = __import__(path, fromlist=["register"])
+        mod.register(app)
+        log.info("✅ Wired: %s", path)
     except Exception as e:
-        log.exception("❌ Failed to wire %s: %s", import_path, e)
+        log.exception("❌ Failed to wire %s: %s", path, e)
 
 if __name__ == "__main__":
-    # The ONLY /start handler (prevents duplicates)
+    # SINGLE /start handler
     wire("dm_foolproof")
 
-    # Consolidated panel/UI router (Menus, Contact Admins, Help, Models Elsewhere)
+    # Panels (Menus / Contact Admins / Help)
     wire("handlers.panels")
 
-    # Menus save/update command stays as-is
-    wire("handlers.createmenu")
-
-    # DM helper & admin tools (no /start here)
-    wire("handlers.dmnow")
+    # Admin tools around DM-ready + deep link
     wire("handlers.dm_admin")
-
-    # Remove DM-ready when users leave/kicked/banned in Sanctuary groups
+    wire("handlers.dmnow")
     wire("handlers.dmready_cleanup")
 
-    # Your existing stack (must not register /start)
+    # Everything else (none of these should register /start)
     wire("handlers.enforce_requirements")
     wire("handlers.req_handlers")
     wire("handlers.test_send")
@@ -72,7 +55,6 @@ if __name__ == "__main__":
     wire("handlers.hi")
     wire("handlers.warmup")
     wire("handlers.health")
-    wire("handlers.welcome")
     wire("handlers.bloop")
     wire("handlers.whoami")
 
