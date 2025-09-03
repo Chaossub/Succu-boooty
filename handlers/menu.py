@@ -1,5 +1,5 @@
 # handlers/menu.py
-# Keep it minimal: create menus reliably + proper Back behavior.
+# Minimal menu creation + browsing with proper Back behavior.
 # Uses your existing handlers/menu_save_fix.py for persistence.
 
 import os
@@ -17,7 +17,7 @@ from handlers.menu_save_fix import MenuStore
 
 MENUS = MenuStore()
 
-# ---- load names/ids like RONI_NAME/RONI_ID etc. (case-insensitive match)
+# ---- load names/ids like RONI_NAME/RONI_ID etc. (case-insensitive)
 def _load_models_from_env() -> Dict[str, int]:
     out: Dict[str, int] = {}
     for k, v in os.environ.items():
@@ -62,19 +62,19 @@ def _contact_line(name: str) -> str:
     tid = NAME_TO_ID.get(name)
     return f'\n\nContact: <a href="tg://user?id={tid}">{name}</a>' if tid else ""
 
+# ---------- RENDER HELPERS ----------
 async def _send_menu_list(msg: Message):
     names = MENUS.list_names()
     if not names:
         await msg.reply_text("No menus have been created yet.")
         return
-    # order buttons in two columns
-    rows = []
-    row = []
+    # arrange buttons in 2 columns
+    rows, row = [], []
     for n in sorted(names, key=str.lower):
-        row.append(_btn(f"💘 {n}", f"menu:show:{n}"))
+        # IMPORTANT: use the legacy callback format your buttons already rely on.
+        row.append(_btn(f"💘 {n}", f"menu:{n}"))
         if len(row) == 2:
-            rows.append(row)
-            row = []
+            rows.append(row); row = []
     if row:
         rows.append(row)
     rows.append([_btn("⬅️ Back to Main", "nav:root")])
@@ -102,32 +102,46 @@ async def _send_menu_preview(msg: Message, name: str):
             reply_markup=kb
         )
 
+# ---------- REGISTRATION ----------
 def register(app: Client):
 
-    # ---------- PUBLIC: browse ----------
+    # PUBLIC: open the model list when pressing the “💕 Menu” button
+    @app.on_callback_query(filters.regex(r"^nav:main$"))
+    async def _open_list_from_nav(c: Client, cq: CallbackQuery):
+        await _send_menu_list(cq.message)
+        await cq.answer()
+
+    # PUBLIC: manual command /menu (optional)
     @app.on_message(filters.command("menu", prefixes=["/", "!", "."]))
-    async def _menu(c: Client, m: Message):
+    async def _menu_cmd(c: Client, m: Message):
         await _send_menu_list(m)
 
-    @app.on_callback_query(filters.regex(r"^menu:show:(.+)$"))
-    async def _cb_show(c: Client, cq: CallbackQuery):
-        name = cq.data.split(":", 2)[2]
+    # PUBLIC: show a model’s menu
+    # Support BOTH formats so your existing buttons keep working:
+    #   1) "menu:<Name>"
+    #   2) "menu:show:<Name>"
+    @app.on_callback_query(filters.regex(r"^menu:(?:show:)?(.+)$"))
+    async def _show_menu(c: Client, cq: CallbackQuery):
+        # Extract name after either "menu:" or "menu:show:"
+        data = cq.data
+        name = data.split("menu:", 1)[1]
+        if name.startswith("show:"):
+            name = name.split("show:", 1)[1]
         await _send_menu_preview(cq.message, name)
         await cq.answer()
 
+    # PUBLIC: close the opened menu and reveal the list again
     @app.on_callback_query(filters.regex(r"^menu:close$"))
-    async def _cb_close(c: Client, cq: CallbackQuery):
-        # Delete the menu card so the list above is visible again
+    async def _close_menu(c: Client, cq: CallbackQuery):
         try:
             await cq.message.delete()
         except Exception:
             pass
         await cq.answer("Back")
 
-    # ---------- ADMIN: create/update ----------
+    # ADMIN: create/update menus — works from text OR photo caption
     @app.on_message(filters.command(["createmenu", "addmenu"], prefixes=["/", "!", "."]))
     async def _createmenu(c: Client, m: Message):
-        # Permissions
         if not _is_editor(m.from_user.id):
             return
 
@@ -147,7 +161,7 @@ def register(app: Client):
         name_raw, rest = _split_first_word(after)
         name = _canon(name_raw)
 
-        # If name missing, try first word of replied photo caption
+        # If name missing, try first word of replied-photo caption
         if not name and m.reply_to_message and m.reply_to_message.caption:
             nr, rr = _split_first_word(m.reply_to_message.caption)
             cand = _canon(nr)
@@ -181,6 +195,4 @@ def register(app: Client):
             photo_id = m.reply_to_message.photo[-1].file_id
 
         MENUS.set_menu(name=name, caption=caption, photo_file_id=photo_id)
-        await m.reply_text(
-            f"✅ Saved <b>{name}</b> menu ({'photo+text' if photo_id else 'text-only'})."
-        )
+        await m.reply_text(f"✅ Saved <b>{name}</b> menu ({'photo+text' if photo_id else 'text-only'}).")
