@@ -1,90 +1,159 @@
 # handlers/menu_save_fix.py
-import os, json
-from pyrogram import Client, filters
-from pyrogram.types import Message
+# Persistent model menus with Mongo (preferred) + JSON fallback.
 
-MENUS_PATH = os.getenv("MENUS_PATH", "./data/menus.json")
+import os, json, time
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Dict, List, Optional
 
-def _ensure_dir(path: str):
-    d = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(d, exist_ok=True)
+# ---- Mongo (preferred) ----
+_MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGO_URL")
+_MONGO_DB  = os.getenv("MONGO_DB_NAME", "succubot")
+_MONGO_COL = os.getenv("MENUS_COLLECTION", "menus")
 
-def _load_menus():
+_mongo_col = None
+if _MONGO_URI:
     try:
-        with open(MENUS_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        from pymongo import MongoClient
+        _cli = MongoClient(_MONGO_URI)
+        _db  = _cli[_MONGO_DB]
+        _mongo_col = _db[_MONGO_COL]
+        _mongo_col.create_index("name_lc", unique=True, name="uniq_name")
+        _mongo_col.create_index("updated_at", name="idx_updated")
     except Exception:
-        return {}
+        _mongo_col = None
 
-def _save_menus(data: dict):
-    _ensure_dir(MENUS_PATH)
-    tmp = MENUS_PATH + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, MENUS_PATH)
+# ---- JSON fallback (works across restarts, may reset on redeploy) ----
+JSON_PATH = Path(os.getenv("MENUS_PATH", "data/menus.json"))
+JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-SLUGS = {"roni": "Roni", "ruby": "Ruby", "rin": "Rin", "savy": "Savy"}
+@dataclass
+class MenuItem:
+    name: str
+    photo_file_id: str
+    caption: str
+    updated_at: float
 
-def _is_editor(uid: int) -> bool:
-    def to_int(s):
-        try: return int(str(s)) if s not in (None,"","None") else None
-        except: return None
-    owner = to_int(os.getenv("OWNER_ID"))
-    super_admin = to_int(os.getenv("SUPER_ADMIN_ID"))
-    extras = set()
-    if os.getenv("MENU_EDITORS"):
-        for tok in os.getenv("MENU_EDITORS").split(","):
+class MenuStore:
+    def __init__(self):
+        self._cache: Dict[str, MenuItem] = {}
+        self._load_json()
+
+    def uses_mongo(self) -> bool:
+        return _mongo_col is not None
+
+    # ---------- JSON helpers ----------
+    def _load_json(self):
+        if JSON_PATH.exists():
             try:
-                v = int(tok.strip())
-                extras.add(v)
-            except: pass
-    return uid in {x for x in (owner, super_admin) if x} | extras
+                raw = json.loads(JSON_PATH.read_text())
+                self._cache = {k: MenuItem(**v) for k, v in raw.items()}
+            except Exception:
+                self._cache = {}
+        else:
+            self._cache = {}
 
-def register(app: Client):
-    @app.on_message(filters.command("addmenu"))
-    async def addmenu(client: Client, m: Message):
-        uid = m.from_user.id if m.from_user else 0
-        if not _is_editor(uid):
-            return await m.reply_text("Admins only for saving menus.")
+    def _save_json(self):
+        JSON_PATH.write_text(json.dumps({k: asdict(v) for k, v in self._cache.items()}, indent=2))
 
-        # Parse: /addmenu <slug> [optional text…]
-        parts = (m.text or "").split(maxsplit=2)
-        if len(parts) < 2:
-            return await m.reply_text("Usage: /addmenu <roni|ruby|rin|savy> (reply with text or put text after the slug).")
+    # ---------- CRUD ----------
+    def set_menu(self, name: str, photo_file_id: str, caption: str) -> None:
+        now = time.time()
+        name_lc = name.strip().lower()
+        if _mongo_col is not None:
+            try:
+                _mongo_col.update_one(
+                    {"name_lc": name_lc},
+                    {"$set": {
+                        "name": name.strip(),
+                        "name_lc": name_lc,
+                        "photo_file_id": photo_file_id,
+                        "caption": caption,
+                        "updated_at": now
+                    }},
+                    upsert=True
+                )
+                return
+            except Exception:
+                pass  # fall through to JSON
+        self._cache[name_lc] = MenuItem(name=name.strip(), photo_file_id=photo_file_id, caption=caption, updated_at=now)
+        self._save_json()
 
-        slug = parts[1].strip().lower()
-        if slug not in SLUGS:
-            return await m.reply_text("Unknown model. Use one of: roni, ruby, rin, savy.")
+    def update_photo(self, name: str, photo_file_id: str, new_caption: Optional[str] = None) -> bool:
+        now = time.time()
+        name_lc = name.strip().lower()
+        if _mongo_col is not None:
+            try:
+                doc = _mongo_col.find_one({"name_lc": name_lc})
+                if not doc:
+                    return False
+                upd = {"photo_file_id": photo_file_id, "updated_at": now}
+                if new_caption is not None and new_caption.strip():
+                    upd["caption"] = new_caption
+                _mongo_col.update_one({"name_lc": name_lc}, {"$set": upd})
+                return True
+            except Exception:
+                pass
+        item = self._cache.get(name_lc)
+        if not item:
+            return False
+        item.photo_file_id = photo_file_id
+        if new_caption is not None and new_caption.strip():
+            item.caption = new_caption
+        item.updated_at = now
+        self._save_json()
+        return True
 
-        # Prefer inline text; else use reply text
-        inline_text = parts[2].strip() if len(parts) >= 3 else ""
-        if not inline_text and m.reply_to_message:
-            inline_text = (m.reply_to_message.text or m.reply_to_message.caption or "").strip()
+    def update_caption(self, name: str, caption: str) -> bool:
+        now = time.time()
+        name_lc = name.strip().lower()
+        if _mongo_col is not None:
+            try:
+                res = _mongo_col.update_one({"name_lc": name_lc}, {"$set": {"caption": caption, "updated_at": now}})
+                return res.matched_count > 0
+            except Exception:
+                pass
+        item = self._cache.get(name_lc)
+        if not item:
+            return False
+        item.caption = caption
+        item.updated_at = now
+        self._save_json()
+        return True
 
-        if not inline_text:
-            return await m.reply_text("No text found. Either put the menu text after the slug or reply to a message that has the text.")
+    def delete_menu(self, name: str) -> bool:
+        name_lc = name.strip().lower()
+        if _mongo_col is not None:
+            try:
+                res = _mongo_col.delete_one({"name_lc": name_lc})
+                return res.deleted_count > 0
+            except Exception:
+                pass
+        if name_lc in self._cache:
+            del self._cache[name_lc]
+            self._save_json()
+            return True
+        return False
 
-        try:
-            data = _load_menus()
-            data[slug] = inline_text
-            _save_menus(data)
-            await m.reply_text(f"✅ Saved menu for {SLUGS[slug]}.")
-        except Exception as e:
-            await m.reply_text(f"Could not save menu: {e}")
+    def get_menu(self, name: str) -> Optional[MenuItem]:
+        name_lc = name.strip().lower()
+        if _mongo_col is not None:
+            try:
+                d = _mongo_col.find_one({"name_lc": name_lc}, {"_id": 0})
+                if not d:
+                    return None
+                return MenuItem(
+                    name=d["name"], photo_file_id=d["photo_file_id"],
+                    caption=d.get("caption", ""), updated_at=d.get("updated_at", 0.0)
+                )
+            except Exception:
+                pass
+        return self._cache.get(name_lc)
 
-    @app.on_message(filters.command("listmenus"))
-    async def listmenus(client: Client, m: Message):
-        data = _load_menus()
-        if not data:
-            return await m.reply_text("No menus saved yet.")
-        lines = [f"• {SLUGS.get(k,k)}" for k in data.keys()]
-        await m.reply_text("Saved menus:\n" + "\n".join(lines))
-
-    @app.on_message(filters.command("changemenu"))
-    async def changemenu(client: Client, m: Message):
-        # Same parsing as addmenu; overwrite existing
-        parts = (m.text or "").split(maxsplit=2)
-        if len(parts) < 2:
-            return await m.reply_text("Usage: /changemenu <roni|ruby|rin|savy> (reply with new text or put text after slug).")
-        m.text = m.text.replace("/changemenu", "/addmenu", 1)
-        await addmenu(client, m)  # reuse logic
+    def list_names(self) -> List[str]:
+        if _mongo_col is not None:
+            try:
+                return [d["name"] for d in _mongo_col.find({}, {"name": 1, "_id": 0}).sort("name_lc", 1)]
+            except Exception:
+                pass
+        return sorted([v.name for v in self._cache.values()], key=str.lower)
