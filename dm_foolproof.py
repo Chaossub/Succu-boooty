@@ -1,22 +1,34 @@
 # dm_foolproof.py
-# SINGLE, idempotent /start. Stops duplicate "Welcome" bursts without changing your buttons.
+# SINGLE /start. File-backed dedup stops duplicate welcome bursts.
 
-import os
-import time
+import os, time, json
+from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
-# --- tiny in-memory de-dup window to ignore a 2nd /start burst
-_RECENT_STARTS = {}         # chat_id -> last_ts
-_START_TTL_SEC = 10         # keep it small; just prevents back-to-back duplicates
+# --- small dedup cache (persists across quick restarts)
+_DEDUP_FILE = Path("data/_start_seen.json")
+_DEDUP_FILE.parent.mkdir(parents=True, exist_ok=True)
+_DEDUP_TTL_SEC = 12
 
 def _is_duplicate_start(chat_id: int) -> bool:
     now = time.time()
-    last = _RECENT_STARTS.get(chat_id, 0)
-    _RECENT_STARTS[chat_id] = now
-    return (now - last) < _START_TTL_SEC
+    try:
+        data = json.loads(_DEDUP_FILE.read_text()) if _DEDUP_FILE.exists() else {}
+    except Exception:
+        data = {}
+    # drop stale
+    data = {k: v for k, v in data.items() if now - v < _DEDUP_TTL_SEC}
+    last = data.get(str(chat_id), 0)
+    is_dup = (now - last) < _DEDUP_TTL_SEC
+    data[str(chat_id)] = now
+    try:
+        _DEDUP_FILE.write_text(json.dumps(data))
+    except Exception:
+        pass
+    return is_dup
 
-# --- button labels pulled from your existing .env (unchanged semantics)
+# labels from your .env (unchanged semantics)
 MENU_LABEL   = os.getenv("MENU_BTN", "💕 Menu")
 ADMINS_LABEL = os.getenv("ADMINS_BTN", "👑 Contact Admins")
 FIND_LABEL   = os.getenv("FIND_MODELS_BTN", "🔥 Find Our Models Elsewhere")
@@ -28,8 +40,7 @@ WELCOME_TEXT = (
     "✨ <i>Use the menu below to navigate!</i>"
 )
 
-def _start_kb() -> InlineKeyboardMarkup:
-    # NOTE: layout/labels unchanged — still driven by your .env
+def _kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(MENU_LABEL,   callback_data="nav:main")],
         [InlineKeyboardButton(ADMINS_LABEL, callback_data="nav:admins")],
@@ -38,15 +49,10 @@ def _start_kb() -> InlineKeyboardMarkup:
     ])
 
 def register(app: Client):
-    # This must be the ONLY /start in the whole project.
+    # This must be the ONLY /start in the project.
     @app.on_message(filters.private & filters.command("start"))
     async def _start(c: Client, m: Message):
-        # Hard stop duplicates without touching any other behavior
         if _is_duplicate_start(m.chat.id):
             return
-        await m.reply_text(
-            WELCOME_TEXT,
-            reply_markup=_start_kb(),
-            disable_web_page_preview=True
-        )
+        await m.reply_text(WELCOME_TEXT, reply_markup=_kb(), disable_web_page_preview=True)
 
