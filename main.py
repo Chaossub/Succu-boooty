@@ -17,7 +17,14 @@ API_HASH = os.getenv("API_HASH")
 BOT_TOKEN= os.getenv("BOT_TOKEN")
 BOT_NAME = os.getenv("BOT_NAME", "succubot")
 
-app = Client(BOT_NAME, api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN, workdir=".", in_memory=False)
+app = Client(
+    BOT_NAME,
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    workdir=".",          # store session files in root
+    in_memory=False       # persist session
+)
 
 def wire(path: str):
     try:
@@ -33,6 +40,9 @@ if __name__ == "__main__":
 
     # Panels (Menus / Contact Admins / Help)
     wire("handlers.panels")
+
+    # Menu commands (/addmenu, /menu, etc.)
+    wire("handlers.menu")
 
     # Admin tools around DM-ready + deep link
     wire("handlers.dm_admin")
