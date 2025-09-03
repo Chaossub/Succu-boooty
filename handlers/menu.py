@@ -1,5 +1,11 @@
-# handlers/menus.py
-# Menus with ENV-driven names/IDs. Works in DMs & groups. Photo optional.
+# handlers/menu.py
+# Minimal, loud, and robust menus module:
+# - guarantees register(app)
+# - DM + group compatible
+# - /pingmenu and /menudebug to prove it's wired
+# - /addmenu works with or without photo
+# - /menu shows saved menus
+
 import os
 import traceback
 from typing import Dict, List, Tuple
@@ -7,7 +13,8 @@ from typing import Dict, List, Tuple
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-# Persistent store (Mongo first, JSON fallback)
+# Persistent store (Mongo first, JSON fallback).
+# Make sure you have handlers/menu_save_fix.py from earlier messages.
 from handlers.menu_save_fix import MenuStore
 
 # Optional: accept ReqStore admins too
@@ -28,8 +35,8 @@ def _load_models_from_env() -> Dict[str, int]:
     """
     Merge models from two styles:
       1) MENU_MODEL_MAP="Roni:696...,Ruby:...,Rin:...,Savy:..."
-      2) Any number of *_NAME + *_ID pairs (e.g., RONI_NAME/RONI_ID)
-    Returns {CanonicalName: telegram_id}
+      2) any number of *_NAME + *_ID pairs (e.g., RONI_NAME/RONI_ID)
+    Return {CanonicalName: telegram_id}
     """
     out: Dict[str, int] = {}
 
@@ -43,11 +50,11 @@ def _load_models_from_env() -> Dict[str, int]:
                 if n and tid.isdigit():
                     out[n] = int(tid)
 
-    # Style 2 (scan env for *_NAME + *_ID)
+    # Style 2
     for k, v in os.environ.items():
         if not k.endswith("_NAME"):
             continue
-        base = k[:-5]  # drop "_NAME"
+        base = k[:-5]
         name = (v or "").strip()
         if not name:
             continue
@@ -57,7 +64,6 @@ def _load_models_from_env() -> Dict[str, int]:
 
     return out
 
-# Build mappings
 NAME_TO_ID: Dict[str, int] = _load_models_from_env()
 ALLOWED_NAMES = set(NAME_TO_ID.keys())
 LOWER_TO_CANON = {n.lower(): n for n in ALLOWED_NAMES}
@@ -95,30 +101,41 @@ def _contact_line(name: str) -> str:
     return f'\n\nContact: <a href="tg://user?id={tid}">{name}</a>'
 
 async def _send_menu_list(msg: Message):
-    names = MENUS.list_names()
-    if not names:
-        return await msg.reply_text("No menus have been created yet.")
-    # Only show allowed names if set
-    if ALLOWED_NAMES:
-        names = [n for n in names if n in ALLOWED_NAMES]
+    try:
+        names = MENUS.list_names()
         if not names:
             return await msg.reply_text("No menus have been created yet.")
-    rows = [[_btn(n, f"menu:show:{n}")] for n in names]
-    await msg.reply_text("Choose a model:", reply_markup=InlineKeyboardMarkup(rows))
+        # Filter to allowed names (so typos don't show)
+        if ALLOWED_NAMES:
+            names = [n for n in names if n in ALLOWED_NAMES]
+            if not names:
+                return await msg.reply_text("No menus have been created yet.")
+        rows = [[_btn(n, f"menu:show:{n}")] for n in names]
+        await msg.reply_text("Choose a model:", reply_markup=InlineKeyboardMarkup(rows))
+    except Exception as e:
+        traceback.print_exc()
+        await msg.reply_text(f"_send_menu_list error: <code>{type(e).__name__}: {e}</code>")
 
 async def _send_menu_preview(msg: Message, name: str):
-    item = MENUS.get_menu(name)
-    if not item:
-        return await msg.reply_text(f"Menu for <b>{name}</b> not found.")
-    contact = _contact_line(name)
-    if item.photo_file_id:
-        await msg.reply_photo(item.photo_file_id, caption=(item.caption or item.name) + contact)
-    else:
-        await msg.reply_text(f"<b>{item.name}</b>\n{(item.caption or '(no text)')}{contact}")
+    try:
+        item = MENUS.get_menu(name)
+        if not item:
+            return await msg.reply_text(f"Menu for <b>{name}</b> not found.")
+        contact = _contact_line(name)
+        if item.photo_file_id:
+            await msg.reply_photo(item.photo_file_id, caption=(item.caption or item.name) + contact)
+        else:
+            await msg.reply_text(f"<b>{item.name}</b>\n{(item.caption or '(no text)')}{contact}")
+    except Exception as e:
+        traceback.print_exc()
+        await msg.reply_text(f"_send_menu_preview error: <code>{type(e).__name__}: {e}</code>")
 
 def register(app: Client):
+    # ======= PROVE IT'S WIRED =======
+    @app.on_message(filters.command("pingmenu", prefixes=["/", "!", "."]))
+    async def _pingmenu(c: Client, m: Message):
+        await m.reply_text("pong ✅ (handlers/menu.py is wired)")
 
-    # ---------- DEBUG ----------
     @app.on_message(filters.command("menudebug", prefixes=["/", "!", "."]))
     async def _menudebug(c: Client, m: Message):
         try:
@@ -138,14 +155,10 @@ def register(app: Client):
             traceback.print_exc()
             await m.reply_text(f"menudebug error: <code>{type(e).__name__}: {e}</code>")
 
-    # ---------- PUBLIC ----------
+    # ======= PUBLIC =======
     @app.on_message(filters.command("menu", prefixes=["/", "!", "."]))
     async def _menu(c: Client, m: Message):
-        try:
-            await _send_menu_list(m)
-        except Exception as e:
-            traceback.print_exc()
-            await m.reply_text(f"/menu error: <code>{type(e).__name__}: {e}</code>")
+        await _send_menu_list(m)
 
     @app.on_callback_query(filters.regex(r"^menu:list$"))
     async def _cb_list(c: Client, cq: CallbackQuery):
@@ -168,7 +181,7 @@ def register(app: Client):
             try: await cq.answer("Error", show_alert=True)
             except Exception: pass
 
-    # ---------- ADMIN ROUTER ----------
+    # ======= ADMIN ROUTER (DM OR GROUP) =======
     admin_cmds = ["addmenu", "changemenu", "updatecaption", "deletemenu", "listmenus", "menueditors"]
     @app.on_message(filters.command(admin_cmds, prefixes=["/", "!", "."]))
     async def _admin_router(c: Client, m: Message):
@@ -192,9 +205,9 @@ def register(app: Client):
             traceback.print_exc()
             await m.reply_text(f"{cmd} error: <code>{type(e).__name__}: {e}</code>")
 
-    # ---------- INDIVIDUAL HANDLERS ----------
+    # ======= INDIVIDUAL HANDLERS =======
     async def _handle_addmenu(c: Client, m: Message):
-        # Gather "after command" args from text or caption (when command in photo caption)
+        # Collect text after command from message text or photo caption.
         if m.text and len(m.text.split(maxsplit=1)) > 1:
             after = m.text.split(maxsplit=1)[1]
         elif m.caption and any(m.caption.startswith(p+"addmenu") for p in ("/","!",".")):
@@ -202,7 +215,6 @@ def register(app: Client):
         else:
             after = ""
 
-        # Need at least a name, but we also allow using the reply caption if provided later
         if not after and not (m.reply_to_message or m.caption):
             return await m.reply_text(
                 "Usage:\n/addmenu <Name> <caption...>\n"
@@ -214,7 +226,7 @@ def register(app: Client):
         name_raw, rest = _split_first_word(after)
         name = _canon_name(name_raw)
         if not name:
-            # If name wasn't in args, try using the first word of the reply caption
+            # Try reply caption's first word
             rc = m.reply_to_message.caption.strip() if (m.reply_to_message and m.reply_to_message.caption) else ""
             nr, rr = _split_first_word(rc)
             name = _canon_name(nr)
@@ -227,19 +239,17 @@ def register(app: Client):
 
         caption = rest
         if not caption:
-            # use caption from message or replied photo
             if m.caption and any(m.caption.startswith(p+"addmenu") for p in ("/","!",".")):
-                # strip "/addmenu <Name> "
                 cap_parts = m.caption.split(maxsplit=2)
                 caption = cap_parts[2].strip() if len(cap_parts) > 2 else ""
             elif m.reply_to_message and m.reply_to_message.caption:
-                # remove the leading "<Name>" if present
                 rc = m.reply_to_message.caption.strip()
                 if rc.lower().startswith(name.lower() + " "):
                     caption = rc[len(name)+1:].strip()
                 else:
                     caption = rc
 
+        # Photo detection
         photo_file_id = None
         if m.photo:
             photo_file_id = m.photo[-1].file_id
@@ -324,4 +334,3 @@ def register(app: Client):
             f"Map: <code>{pairs}</code>\n"
             f"Storage: {'Mongo' if MENUS.uses_mongo() else 'JSON'}"
         )
-
