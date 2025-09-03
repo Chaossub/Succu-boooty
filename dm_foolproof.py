@@ -1,12 +1,10 @@
 # dm_foolproof.py
-# SINGLE /start. File-backed dedup stops duplicate welcome bursts.
-
+# SINGLE /start with a tiny dedup so welcome doesn't double-send.
 import os, time, json
 from pathlib import Path
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
-# --- small dedup cache (persists across quick restarts)
 _DEDUP_FILE = Path("data/_start_seen.json")
 _DEDUP_FILE.parent.mkdir(parents=True, exist_ok=True)
 _DEDUP_TTL_SEC = 12
@@ -17,7 +15,6 @@ def _is_duplicate_start(chat_id: int) -> bool:
         data = json.loads(_DEDUP_FILE.read_text()) if _DEDUP_FILE.exists() else {}
     except Exception:
         data = {}
-    # drop stale
     data = {k: v for k, v in data.items() if now - v < _DEDUP_TTL_SEC}
     last = data.get(str(chat_id), 0)
     is_dup = (now - last) < _DEDUP_TTL_SEC
@@ -28,7 +25,6 @@ def _is_duplicate_start(chat_id: int) -> bool:
         pass
     return is_dup
 
-# labels from your .env (unchanged semantics)
 MENU_LABEL   = os.getenv("MENU_BTN", "💕 Menu")
 ADMINS_LABEL = os.getenv("ADMINS_BTN", "👑 Contact Admins")
 FIND_LABEL   = os.getenv("FIND_MODELS_BTN", "🔥 Find Our Models Elsewhere")
@@ -41,6 +37,7 @@ WELCOME_TEXT = (
 )
 
 def _kb() -> InlineKeyboardMarkup:
+    # Keep the same callback datas you already use in panels.
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(MENU_LABEL,   callback_data="nav:main")],
         [InlineKeyboardButton(ADMINS_LABEL, callback_data="nav:admins")],
@@ -49,7 +46,6 @@ def _kb() -> InlineKeyboardMarkup:
     ])
 
 def register(app: Client):
-    # This must be the ONLY /start in the project.
     @app.on_message(filters.private & filters.command("start"))
     async def _start(c: Client, m: Message):
         if _is_duplicate_start(m.chat.id):
