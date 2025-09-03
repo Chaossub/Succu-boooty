@@ -12,18 +12,18 @@ logging.basicConfig(
 )
 log = logging.getLogger("SuccuBot")
 
-API_ID   = int(os.getenv("API_ID", "0") or "0")
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN= os.getenv("BOT_TOKEN")
-BOT_NAME = os.getenv("BOT_NAME", "succubot")
+API_ID    = int(os.getenv("API_ID", "0") or "0")
+API_HASH  = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_NAME  = os.getenv("BOT_NAME", "succubot")
 
 app = Client(
     BOT_NAME,
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workdir=".",          # store session files in root
-    in_memory=False       # persist session
+    workdir=".",
+    in_memory=False
 )
 
 def wire(path: str):
@@ -38,10 +38,10 @@ if __name__ == "__main__":
     # SINGLE /start handler
     wire("dm_foolproof")
 
-    # Panels (Menus / Contact Admins / Help)
+    # Panels (navigation buttons & renders)
     wire("handlers.panels")
 
-    # Menu commands (/addmenu, /menu, etc.)
+    # >>> Ensure your existing menu commands are actually registered
     wire("handlers.menu")
 
     # Admin tools around DM-ready + deep link
@@ -70,4 +70,3 @@ if __name__ == "__main__":
 
     log.info("🚀 SuccuBot starting…")
     app.run()
-
