@@ -1,16 +1,16 @@
 # handlers/menus.py
-# Menus with ENV-driven names + Telegram IDs. DM or group. With/without photo.
+# Menus with ENV-driven names/IDs. Works in DMs & groups. Photo optional.
 import os
 import traceback
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
-# Persistent store (Mongo first, JSON fallback) — must exist as provided earlier.
+# Persistent store (Mongo first, JSON fallback)
 from handlers.menu_save_fix import MenuStore
 
-# Optional: trust ReqStore admins if present (won't crash if missing)
+# Optional: accept ReqStore admins too
 try:
     from req_store import ReqStore
     _STORE = ReqStore()
@@ -24,31 +24,51 @@ EXTRA_EDITORS = {
     if x.strip().isdigit()
 }
 
-# ---- Allowed models + their Telegram user IDs (from ENV) ----
-# Format: MENU_MODEL_MAP="Roni:6964994611,Ruby:123456789,Rin:987654321,Savy:555555555"
-_raw_map = os.getenv("MENU_MODEL_MAP", "")
-NAME_TO_ID: Dict[str, int] = {}
-if _raw_map.strip():
-    for pair in _raw_map.split(","):
-        if ":" in pair:
-            name, tid = pair.split(":", 1)
-            name = name.strip()
-            tid = tid.strip()
-            if name and tid.isdigit():
-                NAME_TO_ID[name] = int(tid)
+def _load_models_from_env() -> Dict[str, int]:
+    """
+    Merge models from two styles:
+      1) MENU_MODEL_MAP="Roni:696...,Ruby:...,Rin:...,Savy:..."
+      2) Any number of *_NAME + *_ID pairs (e.g., RONI_NAME/RONI_ID)
+    Returns {CanonicalName: telegram_id}
+    """
+    out: Dict[str, int] = {}
 
-ALLOWED_NAMES = set(NAME_TO_ID.keys())  # e.g. {"Roni","Ruby","Rin","Savy"}
+    # Style 1
+    raw_map = os.getenv("MENU_MODEL_MAP", "")
+    if raw_map.strip():
+        for pair in raw_map.split(","):
+            if ":" in pair:
+                n, tid = pair.split(":", 1)
+                n, tid = n.strip(), tid.strip()
+                if n and tid.isdigit():
+                    out[n] = int(tid)
+
+    # Style 2 (scan env for *_NAME + *_ID)
+    for k, v in os.environ.items():
+        if not k.endswith("_NAME"):
+            continue
+        base = k[:-5]  # drop "_NAME"
+        name = (v or "").strip()
+        if not name:
+            continue
+        tid = (os.getenv(f"{base}_ID") or "").strip()
+        if tid.isdigit():
+            out[name] = int(tid)
+
+    return out
+
+# Build mappings
+NAME_TO_ID: Dict[str, int] = _load_models_from_env()
+ALLOWED_NAMES = set(NAME_TO_ID.keys())
+LOWER_TO_CANON = {n.lower(): n for n in ALLOWED_NAMES}
 
 MENUS = MenuStore()
 
 def _is_editor(uid: int) -> bool:
     try:
-        if uid == OWNER_ID:
-            return True
-        if uid in EXTRA_EDITORS:
-            return True
-        if _STORE and uid in _STORE.list_admins():
-            return True
+        if uid == OWNER_ID: return True
+        if uid in EXTRA_EDITORS: return True
+        if _STORE and uid in _STORE.list_admins(): return True
         return False
     except Exception:
         return False
@@ -56,12 +76,17 @@ def _is_editor(uid: int) -> bool:
 def _btn(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text, callback_data=data)
 
-def _first_word(s: str) -> str:
-    return s.split()[0] if s and s.strip() else ""
-
-def _caption_after_first_word(s: str) -> str:
+def _split_first_word(s: str) -> Tuple[str, str]:
+    s = (s or "").strip()
+    if not s:
+        return "", ""
     parts = s.split(maxsplit=1)
-    return parts[1].strip() if len(parts) > 1 else ""
+    first = parts[0]
+    rest = parts[1].strip() if len(parts) > 1 else ""
+    return first, rest
+
+def _canon_name(name: str) -> str:
+    return LOWER_TO_CANON.get((name or "").lower(), "")
 
 def _contact_line(name: str) -> str:
     tid = NAME_TO_ID.get(name)
@@ -73,11 +98,12 @@ async def _send_menu_list(msg: Message):
     names = MENUS.list_names()
     if not names:
         return await msg.reply_text("No menus have been created yet.")
-    # filter to allowed names if you only want those shown
-    names = [n for n in names if not ALLOWED_NAMES or n in ALLOWED_NAMES]
-    if not names:
-        return await msg.reply_text("No menus have been created yet.")
-    rows = [[_btn(name, f"menu:show:{name}")] for name in names]
+    # Only show allowed names if set
+    if ALLOWED_NAMES:
+        names = [n for n in names if n in ALLOWED_NAMES]
+        if not names:
+            return await msg.reply_text("No menus have been created yet.")
+    rows = [[_btn(n, f"menu:show:{n}")] for n in names]
     await msg.reply_text("Choose a model:", reply_markup=InlineKeyboardMarkup(rows))
 
 async def _send_menu_preview(msg: Message, name: str):
@@ -86,31 +112,33 @@ async def _send_menu_preview(msg: Message, name: str):
         return await msg.reply_text(f"Menu for <b>{name}</b> not found.")
     contact = _contact_line(name)
     if item.photo_file_id:
-        await msg.reply_photo(photo=item.photo_file_id, caption=(item.caption or item.name) + contact)
+        await msg.reply_photo(item.photo_file_id, caption=(item.caption or item.name) + contact)
     else:
         await msg.reply_text(f"<b>{item.name}</b>\n{(item.caption or '(no text)')}{contact}")
 
 def register(app: Client):
 
-    # ========== DEBUG ==========
+    # ---------- DEBUG ----------
     @app.on_message(filters.command("menudebug", prefixes=["/", "!", "."]))
     async def _menudebug(c: Client, m: Message):
         try:
             uid = m.from_user.id
+            pairs = ", ".join([f"{n}:{NAME_TO_ID[n]}" for n in sorted(ALLOWED_NAMES)]) or "(none)"
             await m.reply_text(
                 "🛠 <b>Menu Debug</b>\n"
                 f"Storage: {'Mongo' if MENUS.uses_mongo() else 'JSON'}\n"
-                f"OWNER_ID: {OWNER_ID}\n"
-                f"IsEditor({uid}): { _is_editor(uid) }\n"
+                f"IsEditor({uid}): {_is_editor(uid)}\n"
                 f"Allowed names: {', '.join(sorted(ALLOWED_NAMES)) or '(none)'}\n"
-                f"ENV MENU_MODEL_MAP: <code>{os.getenv('MENU_MODEL_MAP','')}</code>\n"
-                f"ENV MENU_EDITORS: <code>{os.getenv('MENU_EDITORS','')}</code>"
+                f"Map: <code>{pairs}</code>\n"
+                f"OWNER_ID: {OWNER_ID}\n"
+                f"MENU_EDITORS: <code>{os.getenv('MENU_EDITORS','')}</code>\n"
+                f"MENU_MODEL_MAP: <code>{os.getenv('MENU_MODEL_MAP','')}</code>"
             )
         except Exception as e:
             traceback.print_exc()
             await m.reply_text(f"menudebug error: <code>{type(e).__name__}: {e}</code>")
 
-    # ========== PUBLIC ==========
+    # ---------- PUBLIC ----------
     @app.on_message(filters.command("menu", prefixes=["/", "!", "."]))
     async def _menu(c: Client, m: Message):
         try:
@@ -140,14 +168,13 @@ def register(app: Client):
             try: await cq.answer("Error", show_alert=True)
             except Exception: pass
 
-    # ========== ADMIN (DM or GROUP) ==========
-    admin_filter = filters.command(["addmenu", "changemenu", "updatecaption", "deletemenu", "listmenus", "menueditors"], prefixes=["/", "!", "."])
-
-    @app.on_message(admin_filter)
+    # ---------- ADMIN ROUTER ----------
+    admin_cmds = ["addmenu", "changemenu", "updatecaption", "deletemenu", "listmenus", "menueditors"]
+    @app.on_message(filters.command(admin_cmds, prefixes=["/", "!", "."]))
     async def _admin_router(c: Client, m: Message):
-        cmd = (m.command[0] if m.command else "").lower()
         if not _is_editor(m.from_user.id):
             return await m.reply_text("🚫 You’re not allowed to manage menus.")
+        cmd = (m.command[0] if m.command else "").lower()
         try:
             if cmd == "addmenu":
                 await _handle_addmenu(c, m)
@@ -165,39 +192,53 @@ def register(app: Client):
             traceback.print_exc()
             await m.reply_text(f"{cmd} error: <code>{type(e).__name__}: {e}</code>")
 
-    # -------- handlers --------
+    # ---------- INDIVIDUAL HANDLERS ----------
     async def _handle_addmenu(c: Client, m: Message):
-        # Accept from text, caption, or reply
-        after_cmd = ""
+        # Gather "after command" args from text or caption (when command in photo caption)
         if m.text and len(m.text.split(maxsplit=1)) > 1:
-            after_cmd = m.text.split(maxsplit=1)[1]
-        elif m.caption and any(m.caption.startswith(p + "addmenu") for p in ("/", "!", ".")):
-            after_cmd = m.caption.split(maxsplit=1)[1] if len(m.caption.split(maxsplit=1)) > 1 else ""
+            after = m.text.split(maxsplit=1)[1]
+        elif m.caption and any(m.caption.startswith(p+"addmenu") for p in ("/","!",".")):
+            after = m.caption.split(maxsplit=1)[1] if len(m.caption.split(maxsplit=1)) > 1 else ""
+        else:
+            after = ""
 
-        if not after_cmd and not (m.reply_to_message or m.caption):
+        # Need at least a name, but we also allow using the reply caption if provided later
+        if not after and not (m.reply_to_message or m.caption):
             return await m.reply_text(
                 "Usage:\n/addmenu <Name> <caption...>\n"
                 "Attach a photo, reply to a photo, or send without a photo for a text-only menu.\n"
-                f"Allowed names: {', '.join(sorted(ALLOWED_NAMES)) or '(none set)'}"
+                f"Allowed names: {', '.join(sorted(ALLOWED_NAMES)) or '(none)'}"
             )
 
-        name = _first_word(after_cmd)
+        # Parse name + caption
+        name_raw, rest = _split_first_word(after)
+        name = _canon_name(name_raw)
         if not name:
-            return await m.reply_text("Missing model name. Example: /addmenu Roni My caption…")
-        if ALLOWED_NAMES and name not in ALLOWED_NAMES:
-            return await m.reply_text(f"❌ Unknown model '{name}'. Allowed: {', '.join(sorted(ALLOWED_NAMES))}")
+            # If name wasn't in args, try using the first word of the reply caption
+            rc = m.reply_to_message.caption.strip() if (m.reply_to_message and m.reply_to_message.caption) else ""
+            nr, rr = _split_first_word(rc)
+            name = _canon_name(nr)
+            rest = rr if name and not rest else rest
 
-        caption = _caption_after_first_word(after_cmd)
+        if not name:
+            return await m.reply_text(
+                f"❌ Unknown or missing name. Allowed: {', '.join(sorted(ALLOWED_NAMES)) or '(none)'}"
+            )
 
-        # If only name supplied, fallback to caption in the message (minus the command) or reply caption
+        caption = rest
         if not caption:
-            if m.caption and any(m.caption.startswith(p + "addmenu") for p in ("/", "!", ".")):
-                # Strip the command and the name from caption
-                # e.g., "/addmenu Roni <rest>"
+            # use caption from message or replied photo
+            if m.caption and any(m.caption.startswith(p+"addmenu") for p in ("/","!",".")):
+                # strip "/addmenu <Name> "
                 cap_parts = m.caption.split(maxsplit=2)
                 caption = cap_parts[2].strip() if len(cap_parts) > 2 else ""
             elif m.reply_to_message and m.reply_to_message.caption:
-                caption = m.reply_to_message.caption.strip()
+                # remove the leading "<Name>" if present
+                rc = m.reply_to_message.caption.strip()
+                if rc.lower().startswith(name.lower() + " "):
+                    caption = rc[len(name)+1:].strip()
+                else:
+                    caption = rc
 
         photo_file_id = None
         if m.photo:
@@ -206,8 +247,7 @@ def register(app: Client):
             photo_file_id = m.reply_to_message.photo[-1].file_id
 
         MENUS.set_menu(name=name, caption=caption, photo_file_id=photo_file_id)
-        kind = "photo+text" if photo_file_id else "text-only"
-        await m.reply_text(f"✅ Saved <b>{name}</b> menu ({kind}).")
+        await m.reply_text(f"✅ Saved <b>{name}</b> menu ({'photo+text' if photo_file_id else 'text-only'}).")
 
     async def _handle_changemenu(c: Client, m: Message):
         args = (m.text or "").split(maxsplit=1)
@@ -216,10 +256,11 @@ def register(app: Client):
                 "Usage:\n/changemenu <Name> [new caption]\n"
                 "Reply to a NEW photo to change the image (keeps caption unless you provide a new one)."
             )
-        name = _first_word(args[1])
-        if not name or (ALLOWED_NAMES and name not in ALLOWED_NAMES):
+        name_raw, rest = _split_first_word(args[1])
+        name = _canon_name(name_raw)
+        if not name:
             return await m.reply_text(f"❌ Unknown or missing name. Allowed: {', '.join(sorted(ALLOWED_NAMES))}")
-        new_caption = _caption_after_first_word(args[1]) or None
+        new_caption = rest or None
 
         photo_file_id = None
         if m.reply_to_message and m.reply_to_message.photo:
@@ -236,13 +277,13 @@ def register(app: Client):
         args = (m.text or "").split(maxsplit=1)
         if len(args) < 2:
             return await m.reply_text("Usage:\n/updatecaption <Name> <new caption...>")
-        name = _first_word(args[1])
-        if not name or (ALLOWED_NAMES and name not in ALLOWED_NAMES):
+        name_raw, rest = _split_first_word(args[1])
+        name = _canon_name(name_raw)
+        if not name:
             return await m.reply_text(f"❌ Unknown or missing name. Allowed: {', '.join(sorted(ALLOWED_NAMES))}")
-        new_caption = _caption_after_first_word(args[1])
-        if not new_caption:
+        if not rest:
             return await m.reply_text("Missing caption text.")
-        ok = MENUS.update_caption(name, new_caption)
+        ok = MENUS.update_caption(name, rest)
         if not ok:
             return await m.reply_text(f"Menu for <b>{name}</b> not found.")
         await m.reply_text(f"✅ Caption updated for <b>{name}</b>.")
@@ -251,8 +292,8 @@ def register(app: Client):
         args = (m.text or "").split(maxsplit=1)
         if len(args) < 2:
             return await m.reply_text("Usage:\n/deletemenu <Name>")
-        name = _first_word(args[1])
-        if not name or (ALLOWED_NAMES and name not in ALLOWED_NAMES):
+        name = _canon_name(args[1].split()[0])
+        if not name:
             return await m.reply_text(f"❌ Unknown or missing name. Allowed: {', '.join(sorted(ALLOWED_NAMES))}")
         ok = MENUS.delete_menu(name)
         await m.reply_text("🗑️ Deleted." if ok else f"Menu for <b>{name}</b> not found.")
@@ -273,11 +314,14 @@ def register(app: Client):
         extras = ", ".join(str(x) for x in sorted(EXTRA_EDITORS)) or "(none)"
         admins = ", ".join(str(x) for x in (_STORE.list_admins() if _STORE else [])) or "(none)"
         allowed = ", ".join(sorted(ALLOWED_NAMES)) or "(none)"
+        pairs = ", ".join([f"{n}:{NAME_TO_ID[n]}" for n in sorted(ALLOWED_NAMES)]) or "(none)"
         await m.reply_text(
             "Menu editors\n"
             f"OWNER_ID: {OWNER_ID}\n"
             f"EXTRA MENU_EDITORS: {extras}\n"
             f"ReqStore admins: {admins}\n"
             f"Allowed names: {allowed}\n"
+            f"Map: <code>{pairs}</code>\n"
             f"Storage: {'Mongo' if MENUS.uses_mongo() else 'JSON'}"
         )
+
