@@ -1,6 +1,10 @@
 # handlers/menu.py
-# Menus: save/load from a simple JSON file; show model menus; Back button only.
-import os, json
+# Menus: create (text/photo), persist to data/menus.json, show with Back.
+# Supports callback formats: "menu:<Name>" and "menu:show:<Name>".
+# Back button uses "menu:close" and deletes only the opened card.
+
+import os
+import json
 from typing import Dict, Tuple
 
 from pyrogram import Client, filters
@@ -11,25 +15,32 @@ from pyrogram.types import (
     InlineKeyboardButton,
 )
 
-MENU_STORE_PATH = "data/menus.json"
-os.makedirs("data", exist_ok=True)
+# ---------- simple JSON store ----------
+DATA_DIR = "data"
+MENU_STORE_PATH = os.path.join(DATA_DIR, "menus.json")
+os.makedirs(DATA_DIR, exist_ok=True)
 
 def _load() -> Dict[str, dict]:
     if not os.path.exists(MENU_STORE_PATH):
         return {}
     try:
-        return json.loads(open(MENU_STORE_PATH, "r", encoding="utf-8").read())
+        with open(MENU_STORE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
         return {}
 
 def _save(data: Dict[str, dict]) -> None:
     try:
-        open(MENU_STORE_PATH, "w", encoding="utf-8").write(json.dumps(data, ensure_ascii=False, indent=2))
+        with open(MENU_STORE_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 
-MENUS: Dict[str, dict] = _load()  # keys are lowercased model names
+# in-memory cache (updated on writes; reads will re-load when showing)
+MENUS: Dict[str, dict] = _load()  # keys: lowercased model names
 
+
+# ---------- helpers ----------
 def _split_first_word(s: str) -> Tuple[str, str]:
     s = (s or "").strip()
     if not s:
@@ -37,9 +48,12 @@ def _split_first_word(s: str) -> Tuple[str, str]:
     parts = s.split(maxsplit=1)
     return parts[0], (parts[1] if len(parts) > 1 else "")
 
+
+# ---------- register handlers ----------
 def register(app: Client):
 
-    # --- CREATE TEXT-ONLY: /createmenu <Model> <caption...>
+    # ---- CREATE TEXT-ONLY ----
+    # /createmenu <Model> <caption...>
     @app.on_message(filters.command("createmenu", prefixes=["/", "!", "."]))
     async def _create_menu(c: Client, m: Message):
         after = ""
@@ -62,7 +76,9 @@ def register(app: Client):
         _save(MENUS)
         await m.reply_text(f"✅ Saved <b>{model_raw}</b> menu (text-only).")
 
-    # --- CREATE WITH PHOTO: reply to a photo with /addmenu <Model> <caption...>
+    # ---- CREATE WITH PHOTO ----
+    # Reply to a photo (or send a photo with the command in caption):
+    # /addmenu <Model> <caption...>
     @app.on_message(filters.command("addmenu", prefixes=["/", "!", "."]))
     async def _add_menu(c: Client, m: Message):
         after = ""
@@ -78,7 +94,9 @@ def register(app: Client):
 
         model_raw, caption = _split_first_word(after)
         if not model_raw or not caption:
-            return await m.reply_text("Reply to a photo OR send a photo with caption, then use /addmenu <Model> <caption>")
+            return await m.reply_text(
+                "Reply to a photo OR send a photo with caption, then use /addmenu <Model> <caption>"
+            )
 
         # photo can be on this message or the replied message
         photo_id = None
@@ -94,26 +112,46 @@ def register(app: Client):
         _save(MENUS)
         await m.reply_text(f"✅ Saved <b>{model_raw}</b> menu (photo+text).")
 
-    # --- SHOW A MODEL MENU (support BOTH callback formats your buttons may use)
-    @app.on_callback_query(filters.regex(r"^menu:(?:show:)?(.+)$"))
+    # ---- SHOW A MODEL MENU (supports both callback formats; excludes 'menu:close') ----
+    @app.on_callback_query(filters.regex(r"^menu:(?:show:)?(?P<name>(?!close$).+)$"))
     async def _show_menu(c: Client, cq: CallbackQuery):
-        model = cq.matches[0].group(1).strip()
-        key = model.lower()
-        item = MENUS.get(key)
+        # Safety: if some broad handler matched, let the close handler take it.
+        if cq.data == "menu:close":
+            return
+
+        name = cq.matches[0].group("name").strip()
+        key = name.lower()
+
+        # Reload from disk so new/updated menus are always visible across processes.
+        try:
+            latest = _load()
+        except Exception:
+            latest = MENUS
+        item = latest.get(key) or MENUS.get(key)
+
         if not item:
             return await cq.answer("No menu saved for this model.", show_alert=True)
 
-        # The ONLY change you asked for: add a Back button that closes this card.
-        kb_back = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="menu:close")]])
+        # Back button — delete just this menu card so the list remains visible.
+        kb_back = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅️ Back", callback_data="menu:close")]]
+        )
 
         if item.get("photo_file_id"):
-            await cq.message.reply_photo(item["photo_file_id"], caption=item.get("caption") or f"{model} Menu", reply_markup=kb_back)
+            await cq.message.reply_photo(
+                item["photo_file_id"],
+                caption=item.get("caption") or f"{name} Menu",
+                reply_markup=kb_back,
+            )
         else:
-            await cq.message.reply_text(item.get("caption") or f"{model} Menu", reply_markup=kb_back)
+            await cq.message.reply_text(
+                item.get("caption") or f"{name} Menu",
+                reply_markup=kb_back,
+            )
 
         await cq.answer()
 
-    # --- BACK: just delete the card so the model list above is visible again
+    # ---- BACK: delete the opened menu card ----
     @app.on_callback_query(filters.regex(r"^menu:close$"))
     async def _menu_close(c: Client, cq: CallbackQuery):
         try:
