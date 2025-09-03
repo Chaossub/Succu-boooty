@@ -1,161 +1,64 @@
 # handlers/menu.py
-# Menus: create (text/photo), persist to data/menus.json, show with Back.
-# Supports callback formats: "menu:<Name>" and "menu:show:<Name>".
-# Back button uses "menu:close" and deletes only the opened card.
+import json, os
+from pyrogram import filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-import os
-import json
-from typing import Dict, Tuple
+MENU_FILE = "menus.json"
 
-from pyrogram import Client, filters
-from pyrogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
-
-# ---------- simple JSON store ----------
-DATA_DIR = "data"
-MENU_STORE_PATH = os.path.join(DATA_DIR, "menus.json")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-def _load() -> Dict[str, dict]:
-    if not os.path.exists(MENU_STORE_PATH):
-        return {}
-    try:
-        with open(MENU_STORE_PATH, "r", encoding="utf-8") as f:
+# Load menus from file
+def load_menus():
+    if os.path.exists(MENU_FILE):
+        with open(MENU_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
-        return {}
+    return {}
 
-def _save(data: Dict[str, dict]) -> None:
-    try:
-        with open(MENU_STORE_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+# Save menus to file
+def save_menus(menus):
+    with open(MENU_FILE, "w", encoding="utf-8") as f:
+        json.dump(menus, f, indent=2)
 
-# in-memory cache (updated on writes; reads will re-load when showing)
-MENUS: Dict[str, dict] = _load()  # keys: lowercased model names
+menus = load_menus()
 
+def register(app):
 
-# ---------- helpers ----------
-def _split_first_word(s: str) -> Tuple[str, str]:
-    s = (s or "").strip()
-    if not s:
-        return "", ""
-    parts = s.split(maxsplit=1)
-    return parts[0], (parts[1] if len(parts) > 1 else "")
+    # Command to create/replace a menu for a model
+    @app.on_message(filters.command("createmenu"))
+    async def create_menu(_, msg):
+        parts = msg.text.split(maxsplit=2)
+        if len(parts) < 3:
+            return await msg.reply("Usage: /createmenu <model> <menu text>")
+        model, menu_text = parts[1].strip(), parts[2].strip()
+        menus[model.lower()] = menu_text
+        save_menus(menus)
+        await msg.reply(f"✅ Saved *{model}* menu (text-only).", quote=True)
 
+    # Show model selection
+    @app.on_callback_query(filters.regex("^menu$"))
+    async def show_menu_selection(_, cq):
+        kb = [
+            [InlineKeyboardButton("💘 Roni", callback_data="show:roni"),
+             InlineKeyboardButton("💘 Ruby", callback_data="show:ruby")],
+            [InlineKeyboardButton("💘 Rin", callback_data="show:rin"),
+             InlineKeyboardButton("💘 Savy", callback_data="show:savy")],
+            [InlineKeyboardButton("⬅️ Back to Main", callback_data="back_main")]
+        ]
+        await cq.message.edit_text("💕 *Menus*\nPick a model whose menu is saved.",
+                                   reply_markup=InlineKeyboardMarkup(kb))
 
-# ---------- register handlers ----------
-def register(app: Client):
+    # Show a specific model menu
+    @app.on_callback_query(filters.regex("^show:(.+)$"))
+    async def show_model_menu(_, cq):
+        model = cq.data.split(":", 1)[1].lower()
+        if model not in menus:
+            return await cq.answer("❌ No menu saved for this model.", show_alert=True)
 
-    # ---- CREATE TEXT-ONLY ----
-    # /createmenu <Model> <caption...>
-    @app.on_message(filters.command("createmenu", prefixes=["/", "!", "."]))
-    async def _create_menu(c: Client, m: Message):
-        after = ""
-        if m.text and len(m.text.split(maxsplit=1)) > 1:
-            after = m.text.split(maxsplit=1)[1]
-        elif m.caption:
-            cap = m.caption.strip()
-            for p in ("/", "!", "."):
-                if cap.startswith(p + "createmenu"):
-                    parts = cap.split(maxsplit=1)
-                    after = parts[1] if len(parts) > 1 else ""
-                    break
+        text = menus[model]
+        kb = [[InlineKeyboardButton("⬅️ Back", callback_data="menu")]]
+        await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(kb))
 
-        model_raw, caption = _split_first_word(after)
-        if not model_raw or not caption:
-            return await m.reply_text("Usage: /createmenu <Model> <caption>")
-
-        key = model_raw.lower()
-        MENUS[key] = {"caption": caption, "photo_file_id": None}
-        _save(MENUS)
-        await m.reply_text(f"✅ Saved <b>{model_raw}</b> menu (text-only).")
-
-    # ---- CREATE WITH PHOTO ----
-    # Reply to a photo (or send a photo with the command in caption):
-    # /addmenu <Model> <caption...>
-    @app.on_message(filters.command("addmenu", prefixes=["/", "!", "."]))
-    async def _add_menu(c: Client, m: Message):
-        after = ""
-        if m.text and len(m.text.split(maxsplit=1)) > 1:
-            after = m.text.split(maxsplit=1)[1]
-        elif m.caption:
-            cap = m.caption.strip()
-            for p in ("/", "!", "."):
-                if cap.startswith(p + "addmenu"):
-                    parts = cap.split(maxsplit=1)
-                    after = parts[1] if len(parts) > 1 else ""
-                    break
-
-        model_raw, caption = _split_first_word(after)
-        if not model_raw or not caption:
-            return await m.reply_text(
-                "Reply to a photo OR send a photo with caption, then use /addmenu <Model> <caption>"
-            )
-
-        # photo can be on this message or the replied message
-        photo_id = None
-        if m.photo:
-            photo_id = m.photo[-1].file_id
-        elif m.reply_to_message and m.reply_to_message.photo:
-            photo_id = m.reply_to_message.photo[-1].file_id
-        if not photo_id:
-            return await m.reply_text("Please attach a photo or reply to a photo with the command.")
-
-        key = model_raw.lower()
-        MENUS[key] = {"caption": caption, "photo_file_id": photo_id}
-        _save(MENUS)
-        await m.reply_text(f"✅ Saved <b>{model_raw}</b> menu (photo+text).")
-
-    # ---- SHOW A MODEL MENU (supports both callback formats; excludes 'menu:close') ----
-    @app.on_callback_query(filters.regex(r"^menu:(?:show:)?(?P<name>(?!close$).+)$"))
-    async def _show_menu(c: Client, cq: CallbackQuery):
-        # Safety: if some broad handler matched, let the close handler take it.
-        if cq.data == "menu:close":
-            return
-
-        name = cq.matches[0].group("name").strip()
-        key = name.lower()
-
-        # Reload from disk so new/updated menus are always visible across processes.
-        try:
-            latest = _load()
-        except Exception:
-            latest = MENUS
-        item = latest.get(key) or MENUS.get(key)
-
-        if not item:
-            return await cq.answer("No menu saved for this model.", show_alert=True)
-
-        # Back button — delete just this menu card so the list remains visible.
-        kb_back = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅️ Back", callback_data="menu:close")]]
-        )
-
-        if item.get("photo_file_id"):
-            await cq.message.reply_photo(
-                item["photo_file_id"],
-                caption=item.get("caption") or f"{name} Menu",
-                reply_markup=kb_back,
-            )
-        else:
-            await cq.message.reply_text(
-                item.get("caption") or f"{name} Menu",
-                reply_markup=kb_back,
-            )
-
-        await cq.answer()
-
-    # ---- BACK: delete the opened menu card ----
-    @app.on_callback_query(filters.regex(r"^menu:close$"))
-    async def _menu_close(c: Client, cq: CallbackQuery):
-        try:
-            await cq.message.delete()
-        except Exception:
-            pass
-        await cq.answer("Back")
+    # Handle going back to main panel
+    @app.on_callback_query(filters.regex("^back_main$"))
+    async def back_to_main(_, cq):
+        # Re-import panels so you don’t duplicate
+        from handlers.panels import main_menu
+        await main_menu(cq.message)
