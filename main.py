@@ -35,21 +35,21 @@ def wire(path: str):
         log.exception("❌ Failed to wire %s: %s", path, e)
 
 if __name__ == "__main__":
-    # SINGLE /start handler
+    # SINGLE /start handler (welcome + nav buttons)
     wire("dm_foolproof")
 
-    # Panels (navigation buttons & renders)
+    # Panels / navigation (unchanged)
     wire("handlers.panels")
 
-    # >>> Ensure your existing menu commands are actually registered
+    # Menus (unchanged behavior + Back button only)
     wire("handlers.menu")
 
-    # Admin tools around DM-ready + deep link
+    # Admin tools around DM-ready + deep link (unchanged)
     wire("handlers.dm_admin")
     wire("handlers.dmnow")
     wire("handlers.dmready_cleanup")
 
-    # Everything else (none of these should register /start)
+    # Everything else (unchanged; none of these should register /start)
     wire("handlers.enforce_requirements")
     wire("handlers.req_handlers")
     wire("handlers.test_send")
