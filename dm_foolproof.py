@@ -1,8 +1,10 @@
 # dm_foolproof.py
-# DM-ready in one place (no other new handlers):
-#  - /start marks once (persisted)
-#  - /dmreadylist shows name, @username, id, since
-#  - optional cleanup on leave/kick from SANCTUARY_GROUP_IDS
+# /start:
+#   - marks DM-ready once (persisted)
+#   - ALWAYS shows your welcome + buttons
+#   - DM-ready banner only on first time
+# /dmreadylist shows name, @username, id, since
+# Optional cleanup from SANCTUARY_GROUP_IDS on leave/kick
 
 import os
 import json
@@ -12,6 +14,9 @@ from typing import Dict
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, ChatMemberUpdated
+
+# import the renderer for your main panel (no duplication)
+from handlers.panels import main_menu  # <- this shows the welcome + buttons
 
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -49,32 +54,32 @@ SANCTUARY_GROUP_IDS = _ids_from_env("SANCTUARY_GROUP_IDS")
 
 def register(app: Client):
 
-    # Mark DM-ready exactly once on /start in PRIVATE chat
     @app.on_message(filters.private & filters.command("start"))
     async def _start(c: Client, m: Message):
+        """Mark DM-ready once, but ALWAYS show the main menu panel."""
         u = m.from_user
         if not u:
             return
 
         store = _load_ready()
         key = str(u.id)
-        if key in store:
-            # already marked (persisted) → do not re-announce
-            return
+        first_time = key not in store
 
-        store[key] = {
-            "since": int(time.time()),
-            "first_name": (u.first_name or "").strip() or "Someone",
-            "username": (u.username or "") or "",
-        }
-        _save_ready(store)
+        if first_time:
+            store[key] = {
+                "since": int(time.time()),
+                "first_name": (u.first_name or "").strip() or "Someone",
+                "username": (u.username or "") or "",
+            }
+            _save_ready(store)
+            # one-time banner
+            name = store[key]["first_name"]
+            uname = f"@{store[key]['username']}" if store[key]["username"] else ""
+            await m.reply_text(f"✅ DM-ready — {name} {uname}".rstrip())
 
-        # One-time banner so you can see it registered
-        name = store[key]["first_name"]
-        uname = f"@{store[key]['username']}" if store[key]["username"] else ""
-        await m.reply_text(f"✅ DM-ready — {name} {uname}".rstrip())
+        # ALWAYS render the welcome + buttons (no duplicates)
+        await main_menu(m)
 
-    # /dmreadylist → names, @usernames, ids, since
     @app.on_message(filters.command("dmreadylist", prefixes=["/", "!", "."]))
     async def _dm_list(c: Client, m: Message):
         store = _load_ready()
@@ -93,7 +98,7 @@ def register(app: Client):
         await m.reply_text("📬 <b>DM-ready (all)</b>\n" + "\n".join(lines),
                            disable_web_page_preview=True)
 
-    # Optional: auto-remove from DM-ready if user leaves/kicked from your Sanctuary groups
+    # Optional auto-cleanup if a user leaves/kicked/banned from your sanctuary groups
     if SANCTUARY_GROUP_IDS:
         @app.on_chat_member_updated()
         async def _cleanup(c: Client, upd: ChatMemberUpdated):
@@ -104,13 +109,11 @@ def register(app: Client):
                 if not new or not new.user:
                     return
                 user_id = str(new.user.id)
-                gone = {"kicked", "left", "banned"}
-                if new.status in gone:
+                if new.status in {"kicked", "left", "banned"}:
                     store = _load_ready()
                     if user_id in store:
                         store.pop(user_id, None)
                         _save_ready(store)
             except Exception:
-                # never crash the bot over cleanup
                 pass
 
