@@ -159,3 +159,4 @@ def register(app: Client):
                     _remove_ready(new.user.id)
             except Exception:
                 pass
+
