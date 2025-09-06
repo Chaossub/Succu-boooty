@@ -1,10 +1,8 @@
 # dm_foolproof.py
-# DM-ready in one place (no extra handlers):
-#  - /start  -> mark user DM-ready exactly once (persisted across restarts)
-#  - /dmreadylist -> list all marked users (name, @username, id, since)
-#  - auto cleanup on leave/kick from SANCTUARY_GROUP_IDS (optional)
-#
-# Nothing else changed.
+# DM-ready in one place (no other new handlers):
+#  - /start marks once (persisted)
+#  - /dmreadylist shows name, @username, id, since
+#  - optional cleanup on leave/kick from SANCTUARY_GROUP_IDS
 
 import os
 import json
@@ -106,8 +104,6 @@ def register(app: Client):
                 if not new or not new.user:
                     return
                 user_id = str(new.user.id)
-
-                # "gone" statuses
                 gone = {"kicked", "left", "banned"}
                 if new.status in gone:
                     store = _load_ready()
