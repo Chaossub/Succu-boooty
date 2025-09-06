@@ -1,162 +1,65 @@
-# dm_foolproof.py
-#
-# - Persist DM-ready across restarts using MongoDB (MONGO_URL)
-# - Show ✅ DM-ready banner ONLY the first time a user hits /start
-# - /start then calls handlers.panels.main_menu() to render the single welcome + buttons
-# - /dmreadylist shows name, @username, telegram id, since
-# - Optional auto-cleanup when user leaves/kicked/banned from SANCTUARY_GROUP_IDS
-#
-# No other handlers are added/changed.
+import json, os, time
+from pyrogram import filters
+from pyrogram.types import Message
 
-import os
-import time
-from typing import Optional
+DATA_FILE = "dm_ready.json"
 
-from pyrogram import Client, filters
-from pyrogram.types import Message, ChatMemberUpdated
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
 
-from pymongo import MongoClient, ASCENDING
-from pymongo.collection import Collection
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-# Only import the renderer (it prints the welcome + buttons exactly once)
-from handlers.panels import main_menu
+def human_time_ago(ts: float) -> str:
+    delta = int(time.time() - ts)
+    days, rem = divmod(delta, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, _ = divmod(rem, 60)
+    if days > 0:
+        return f"{days}d {hours}h ago"
+    elif hours > 0:
+        return f"{hours}h {minutes}m ago"
+    else:
+        return f"{minutes}m ago"
 
-# ---------- ENV ----------
-MONGO_URL  = os.getenv("MONGO_URL", "").strip()
-MONGO_DB   = os.getenv("MONGO_DB", "succubot").strip()
-COLL_NAME  = os.getenv("DM_READY_COLL", "dm_ready").strip()
+def register(app):
+    @app.on_message(filters.command("start"))
+    async def start_handler(client, message: Message):
+        data = load_data()
+        uid = str(message.from_user.id)
 
-def _ids_from_env(name: str) -> set[int]:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return set()
-    out: set[int] = set()
-    for part in raw.replace(";", ",").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            out.add(int(part))
-        except ValueError:
-            pass
-    return out
+        if uid not in data:
+            data[uid] = {
+                "id": message.from_user.id,
+                "name": message.from_user.first_name,
+                "username": f"@{message.from_user.username}" if message.from_user.username else "(no username)",
+                "since": time.time()
+            }
+            save_data(data)
+            await message.reply_text(f"✅ DM-ready — {data[uid]['name']} {data[uid]['username']}")
 
-SANCTUARY_GROUP_IDS = _ids_from_env("SANCTUARY_GROUP_IDS")
+        await message.reply_text(
+            "🔥 Welcome to SuccuBot 🔥\n"
+            "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+            "✨ Use the menu below to navigate!",
+            reply_markup=client.get_panel("main")
+        )
 
-# ---------- Mongo helpers ----------
-_client: Optional[MongoClient] = None
-_coll: Optional[Collection] = None
-
-def _get_coll() -> Optional[Collection]:
-    """Return the Mongo collection or None if not configured."""
-    global _client, _coll
-    if _coll is not None:
-        return _coll
-    if not MONGO_URL:
-        return None
-    _client = MongoClient(MONGO_URL, connectTimeoutMS=5000, serverSelectionTimeoutMS=5000)
-    db = _client[MONGO_DB]
-    _coll = db[COLL_NAME]
-    try:
-        _coll.create_index([("user_id", ASCENDING)], unique=True, background=True)
-    except Exception:
-        pass
-    return _coll
-
-def _already_ready(user_id: int) -> bool:
-    coll = _get_coll()
-    if coll is None:
-        return False
-    return coll.find_one({"user_id": user_id}, {"_id": 1}) is not None
-
-def _mark_ready(user_id: int, first_name: str, username: str) -> None:
-    coll = _get_coll()
-    if coll is None:
-        return
-    now = int(time.time())
-    coll.update_one(
-        {"user_id": user_id},
-        {"$setOnInsert": {
-            "user_id": user_id,
-            "first_name": first_name,
-            "username": username,
-            "since": now
-        }},
-        upsert=True
-    )
-
-def _remove_ready(user_id: int) -> None:
-    coll = _get_coll()
-    if coll is None:
-        return
-    try:
-        coll.delete_one({"user_id": user_id})
-    except Exception:
-        pass
-
-def _iter_ready():
-    coll = _get_coll()
-    if coll is None:
-        return []
-    return coll.find({}, {"_id": 0}).sort("since", ASCENDING)
-
-# ---------- Register ----------
-def register(app: Client):
-
-    @app.on_message(filters.private & filters.command("start"))
-    async def _start(c: Client, m: Message):
-        """
-        - First time ever: mark DM-ready in Mongo & show the green banner
-        - Then render the single welcome + buttons via main_menu()
-        """
-        u = m.from_user
-        if not u:
+    @app.on_message(filters.command("dmreadylist"))
+    async def dmready_list(client, message: Message):
+        data = load_data()
+        if not data:
+            await message.reply_text("No one is DM-ready yet.")
             return
 
-        first_time = not _already_ready(u.id)
-        if first_time:
-            _mark_ready(u.id, (u.first_name or "Someone").strip(), (u.username or ""))
-            handle = f"@{u.username}" if u.username else ""
-            await m.reply_text(f"✅ DM-ready — {u.first_name} {handle}".rstrip())
-
-        # IMPORTANT: Do NOT send another welcome card here.
-        # handlers.panels.main_menu() already renders the welcome + buttons.
-        await main_menu(m)
-
-    @app.on_message(filters.command("dmreadylist", prefixes=["/", "!", "."]))
-    async def _dm_list(c: Client, m: Message):
-        coll = _get_coll()
-        if coll is None:
-            return await m.reply_text("⚠️ DM-ready list unavailable (MONGO_URL not configured).")
-
-        rows = list(_iter_ready())
-        if not rows:
-            return await m.reply_text("📬 DM-ready (all)\n• <i>none yet</i>")
-
         lines = []
-        for r in rows:
-            uid = r.get("user_id")
-            name = r.get("first_name") or "Someone"
-            uname = r.get("username") or ""
-            handle = f"@{uname}" if uname else ""
-            since = r.get("since", 0)
-            lines.append(
-                f"• <a href='tg://user?id={uid}'>{name}</a> {handle} — id: <code>{uid}</code> — since <code>{since}</code>"
-            )
-        await m.reply_text("📬 <b>DM-ready (all)</b>\n" + "\n".join(lines), disable_web_page_preview=True)
+        for entry in data.values():
+            since = human_time_ago(entry["since"])
+            lines.append(f"✅ {entry['name']} {entry['username']} — `{entry['id']}` (since {since})")
 
-    # Optional: clean up when a user leaves/kicked/banned from your sanctuary groups
-    if SANCTUARY_GROUP_IDS:
-        @app.on_chat_member_updated()
-        async def _cleanup(c: Client, upd: ChatMemberUpdated):
-            try:
-                if upd.chat.id not in SANCTUARY_GROUP_IDS:
-                    return
-                new = upd.new_chat_member
-                if not new or not new.user:
-                    return
-                if new.status in {"kicked", "left", "banned"}:
-                    _remove_ready(new.user.id)
-            except Exception:
-                pass
+        await message.reply_text("\n".join(lines))
 
