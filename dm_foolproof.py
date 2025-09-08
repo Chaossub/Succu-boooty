@@ -7,7 +7,9 @@ from pyrogram.types import Message, ChatMemberUpdated
 from pyrogram.errors import MessageNotModified
 from pymongo import MongoClient
 
-# === ENV helpers & fallbacks ===
+# =========================
+# ENV helpers & fallbacks
+# =========================
 def _parse_ids_csv(val: Optional[str]) -> List[int]:
     out: List[int] = []
     if not val:
@@ -38,12 +40,19 @@ _group_env = (
 SANCTUARY_GROUP_IDS: List[int] = _parse_ids_csv(_group_env)
 MAIN_GROUP_ID = SANCTUARY_GROUP_IDS[0] if SANCTUARY_GROUP_IDS else 0  # primary for legacy handlers
 
-# === Mongo ===
+# Suppress owner alert for these user_ids (defaults to OWNER_ID so you don't alert on yourself)
+SUPPRESS_ALERT_IDS = set(_parse_ids_csv(os.getenv("SUPPRESS_DMREADY_ALERT_IDS", str(OWNER_ID))))
+
+# =========================
+# Mongo
+# =========================
 _mcli = MongoClient(_MONGO_URL, serverSelectionTimeoutMS=10000)
 _db = _mcli[_DB_NAME]
 col_dm = _db.get_collection(os.getenv("DM_READY_COLLECTION", "dm_ready"))
 
-# === Helpers ===
+# =========================
+# Helpers
+# =========================
 def _now_ts() -> int:
     return int(time.time())
 
@@ -106,13 +115,17 @@ async def _mark_dm_ready_once(c: Client, user_id: int, name: str, username: Opti
         "username": username,
         "ts": ts
     })
-    await _notify_owner_new_dm_ready(c, user_id, name, username, ts)
+    # Notify unless suppressed
+    if user_id not in SUPPRESS_ALERT_IDS:
+        await _notify_owner_new_dm_ready(c, user_id, name, username, ts)
     return True
 
-# === Registration ===
+# =========================
+# Registration
+# =========================
 def register(app: Client):
 
-    # /start shows the panel and marks once (only for real users)
+    # /start shows the panel and marks once (only for real incoming user messages)
     @app.on_message(filters.command("start") & filters.private & filters.incoming)
     async def _on_start(c: Client, m: Message):
         if m.from_user and not m.from_user.is_bot:
@@ -195,4 +208,3 @@ def register(app: Client):
                     col_dm.delete_one({"user_id": user.id})
             except Exception:
                 pass
-
