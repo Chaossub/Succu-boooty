@@ -100,3 +100,4 @@ def register(app: Client):
             m.from_user.first_name or "Someone",
             m.from_user.username
         )
+
