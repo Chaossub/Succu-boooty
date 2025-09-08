@@ -1,11 +1,12 @@
-import os, time, traceback
+# handlers/menu.py
+import os, time
 from typing import Dict, Optional, List
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pymongo import MongoClient, errors as _pm_errors
+from pymongo import MongoClient
 from pymongo.collection import Collection
 
-# ───────────────── Mongo — persistent storage ─────────────────
+# ───────────────── Mongo (persistent) ─────────────────
 def _mongo_url() -> Optional[str]:
     return os.getenv("MONGO_URL") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 
@@ -16,22 +17,14 @@ _MONGO_URL = _mongo_url()
 if not _MONGO_URL:
     raise RuntimeError("Set one of MONGO_URL / MONGODB_URI / MONGO_URI")
 
-try:
-    _mcli = MongoClient(_MONGO_URL, serverSelectionTimeoutMS=10000)
-    # Trigger server selection now to fail fast if misconfigured
-    _mcli.admin.command("ping")
-except Exception as e:
-    raise RuntimeError(f"Mongo connection failed: {e}")
-
+_mcli = MongoClient(_MONGO_URL, serverSelectionTimeoutMS=10000)
+# Fail fast if misconfigured
+_mcli.admin.command("ping")
 _db = _mcli[_mongo_dbname()]
 col_model_menus: Collection = _db.get_collection("model_menus")
-# Ensure 1 doc per model key
-try:
-    col_model_menus.create_index("key", unique=True, name="uniq_model_key")
-except Exception:
-    pass
+col_model_menus.create_index("key", unique=True, name="uniq_model_key")
 
-# ──────────────── Auth & Models ────────────────
+# ──────────────── Admin / Models ────────────────
 def _parse_ids(s: Optional[str]) -> List[int]:
     if not s: return []
     out: List[int] = []
@@ -76,9 +69,7 @@ def _model_key_from_name(name: str) -> Optional[str]:
     return None
 
 def _can_edit_model(user_id: int, username: Optional[str], model_key: str) -> bool:
-    # Owner/Admin ⇒ any model
     if _is_owner_or_admin(user_id): return True
-    # Model self-edit by uid or username
     meta = MODELS.get(model_key) or {}
     if not meta: return False
     if meta.get("uid") and user_id == meta["uid"]: return True
@@ -86,22 +77,16 @@ def _can_edit_model(user_id: int, username: Optional[str], model_key: str) -> bo
     return False
 
 def _split_args(m: Message) -> List[str]:
-    """
-    Return ['/cmd','Model','rest of text'] from text OR caption.
-    Prefer caption when a photo is attached (Telegram puts the command there).
-    """
+    # Prefer caption when a photo is attached
     if m.photo and m.caption: return m.caption.split(maxsplit=2)
     if m.text: return m.text.split(maxsplit=2)
     if m.caption: return m.caption.split(maxsplit=2)
     return []
 
-# ───────────────── Helpers ─────────────────
-async def _reply_err(m: Message, err: Exception, where: str):
-    msg = f"⛔ Error in {where}:\n`{type(err).__name__}: {err}`"
+async def _err(m: Message, where: str, err: Exception):
     try:
-        await m.reply_text(msg, quote=True)
+        await m.reply_text(f"⛔ Error in {where}:\n`{type(err).__name__}: {err}`", quote=True)
     except Exception:
-        # swallow
         pass
 
 # ───────────────── Register ─────────────────
@@ -135,11 +120,10 @@ def register(app: Client):
                 {"$set": {"text": text, "photo_id": photo_id, "updated_at": int(time.time())}},
                 upsert=True
             )
-
             await m.reply_text(f"✅ Saved menu for **{MODELS[model_key]['name']}**.\n\n{text or '(no text)'}", quote=True)
 
         except Exception as e:
-            await _reply_err(m, e, "createmenu")
+            await _err(m, "createmenu", e)
 
     # /editmenu <Model> <new text>   (photo optional to replace)
     @app.on_message(filters.command("editmenu"))
@@ -166,7 +150,7 @@ def register(app: Client):
             await m.reply_text(f"✅ Updated menu for **{MODELS[model_key]['name']}**.", quote=True)
 
         except Exception as e:
-            await _reply_err(m, e, "editmenu")
+            await _err(m, "editmenu", e)
 
     # /deletemenu <Model>
     @app.on_message(filters.command("deletemenu"))
@@ -190,9 +174,9 @@ def register(app: Client):
                 await m.reply_text("There was no stored menu for that model.", quote=True)
 
         except Exception as e:
-            await _reply_err(m, e, "deletemenu")
+            await _err(m, "deletemenu", e)
 
-    # /viewmenu <Model>  (quick preview of saved menu)
+    # /viewmenu <Model>
     @app.on_message(filters.command("viewmenu"))
     async def viewmenu(_: Client, m: Message):
         try:
@@ -216,4 +200,4 @@ def register(app: Client):
                 await m.reply_text(text)
 
         except Exception as e:
-            await _reply_err(m, e, "viewmenu")
+            await _err(m, "viewmenu", e)
