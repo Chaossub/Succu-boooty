@@ -34,25 +34,23 @@ def wire(path: str):
         log.exception("❌ Failed to wire %s: %s", path, e)
 
 if __name__ == "__main__":
-    # ONE AND ONLY /start handler → prevents duplicate welcomes
+    # Single /start source to avoid duplicate welcomes
     wire("dm_foolproof")
 
-    # Inline panels + callbacks (no /start here)
+    # Panels & callbacks (no /start handlers inside)
     wire("handlers.panels")
 
-    # Menus commands (/createmenu, /editmenu, /deletemenu, /viewmenu)
+    # Menus (Mongo-persistent)
     wire("handlers.menu")
 
-    # DM-ready & related
+    # Admin/DM-ready
     wire("handlers.dm_admin")
     wire("handlers.dmnow")
     wire("handlers.dmready_cleanup")
 
-    # Everything else (none of these should register /start)
+    # Other stuff (must not register /start)
     wire("handlers.enforce_requirements")
     wire("handlers.req_handlers")
-    # wire("handlers.hi")       # leave disabled if it greets on join
-    # wire("handlers.warmup")   # leave disabled if it greets on start
     wire("handlers.flyer")
     wire("handlers.flyer_scheduler")
     wire("handlers.schedulemsg")
