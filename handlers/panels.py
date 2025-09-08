@@ -1,6 +1,6 @@
 # handlers/panels.py
-import os, time
-from typing import Dict, List, Optional, Tuple
+import os, time, re
+from typing import Dict, List, Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -134,19 +134,59 @@ def _sub_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏠 Main", callback_data="home")],
     ])
 
+URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
+
 def _models_elsewhere_kb() -> InlineKeyboardMarkup:
+    """
+    Accept either:
+      - MODELS_ELSEWHERE: 'Label|URL' per line
+      - FIND_MODELS_TEXT: free text (label+url on separate lines, or just URLs)
+    """
     raw = (os.getenv("MODELS_ELSEWHERE") or os.getenv("FIND_MODELS_TEXT") or "").strip()
     rows: List[List[InlineKeyboardButton]] = []
+
     if raw:
-        for line in raw.splitlines():
-            if "|" not in line: continue
-            label, url = line.split("|", 1)
-            label, url = label.strip(), url.strip()
-            if label and url:
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        i = 0
+        while i < len(lines):
+            ln = lines[i]
+
+            # 1) Label|URL on one line
+            if "|" in ln:
+                label, url = ln.split("|", 1)
+                label, url = label.strip(), url.strip()
+                if label and URL_RE.search(url):
+                    rows.append([InlineKeyboardButton(label, url=url)])
+                    i += 1
+                    continue
+
+            # 2) URL alone -> use domain as label
+            m = URL_RE.search(ln)
+            if m and (ln == m.group(1) or ln.startswith(m.group(1))):
+                url = m.group(1)
+                label = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
                 rows.append([InlineKeyboardButton(label, url=url)])
-    else:
-        rows.append([InlineKeyboardButton("Set MODELS_ELSEWHERE or FIND_MODELS_TEXT in ENV", url="https://render.com/")])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="home"), InlineKeyboardButton("🏠 Main", callback_data="home")])
+                i += 1
+                continue
+
+            # 3) Label on this line, URL on next line
+            if i + 1 < len(lines):
+                m2 = URL_RE.search(lines[i + 1])
+                if m2:
+                    url = m2.group(1)
+                    label = ln
+                    rows.append([InlineKeyboardButton(label, url=url)])
+                    i += 2
+                    continue
+
+            # None matched — skip this line
+            i += 1
+
+    if not rows:
+        rows.append([InlineKeyboardButton("Set MODELS_ELSEWHERE or FIND_MODELS_TEXT", url="https://render.com/")])
+
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="home"),
+                 InlineKeyboardButton("🏠 Main", callback_data="home")])
     return InlineKeyboardMarkup(rows)
 
 # ---------------- Panels: callbacks ----------------
