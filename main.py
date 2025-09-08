@@ -1,3 +1,4 @@
+# main.py
 import os, logging, sys
 from pyrogram import Client
 from dotenv import load_dotenv
@@ -34,21 +35,21 @@ def wire(path: str):
         log.exception("❌ Failed to wire %s: %s", path, e)
 
 if __name__ == "__main__":
-    # SINGLE /start handler (welcome + nav buttons)
+    # Single welcome + nav (/start) lives in dm_foolproof only
     wire("dm_foolproof")
 
-    # Unified panels/navigation (menus, admins, help, elsewhere all-in-one)
+    # Inline panels & callbacks
     wire("handlers.panels")
 
-    # Remove old duplicates:
-    # wire("handlers.menu")
-    # wire("handlers.dm_admin")
-    # wire("handlers.dmnow")
+    # Menus command (/createmenu ...)
+    wire("handlers.menu")
 
-    # DM-ready cleanup still safe to keep
+    # DM-ready & admin tools
+    wire("handlers.dm_admin")
+    wire("handlers.dmnow")
     wire("handlers.dmready_cleanup")
 
-    # Everything else (unchanged)
+    # The rest (safe; none of these should register /start)
     wire("handlers.enforce_requirements")
     wire("handlers.req_handlers")
     wire("handlers.test_send")
@@ -61,8 +62,7 @@ if __name__ == "__main__":
     wire("handlers.summon")
     wire("handlers.xp")
     wire("handlers.fun")
-    wire("handlers.hi")
-    wire("handlers.warmup")
+    # NOTE: intentionally NOT wiring handlers.hi or handlers.warmup to avoid duplicate welcome
     wire("handlers.health")
     wire("handlers.bloop")
     wire("handlers.whoami")
