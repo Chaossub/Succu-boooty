@@ -94,7 +94,14 @@ async def _safe_edit(msg: Message, text: str, **kwargs):
                 return
         return
     except BadRequest:
-        return await msg.reply_text(text, **kwargs)
+        # Fall back to editing only markup if text equals current content on Telegram's side
+        if "reply_markup" in kwargs and kwargs["reply_markup"] is not None:
+            try:
+                return await msg.edit_reply_markup(kwargs["reply_markup"])
+            except Exception:
+                pass
+        # Absolute fallback: do nothing (prevents duplicate replies)
+        return
 
 # ---------------- Keyboards ----------------
 def _menus_kb() -> InlineKeyboardMarkup:
@@ -134,54 +141,11 @@ def _sub_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🏠 Main", callback_data="home")],
     ])
 
-URL_RE = re.compile(r"(https?://\S+)", re.IGNORECASE)
-
-def _models_elsewhere_kb() -> InlineKeyboardMarkup:
-    """
-    Reads ONLY FIND_MODELS_TEXT in this format:
-
-      Label (any text, emojis ok)
-      https://link.one
-      (blank line optional)
-      Another Label
-      https://link.two
-    """
-    raw = (os.getenv("FIND_MODELS_TEXT") or "").strip()
-    rows: List[List[InlineKeyboardButton]] = []
-
-    if raw:
-        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-        i = 0
-        while i < len(lines):
-            ln = lines[i]
-
-            # URL alone -> use domain as label
-            m = URL_RE.search(ln)
-            if m and (ln == m.group(1) or ln.startswith(m.group(1))):
-                url = m.group(1)
-                label = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
-                rows.append([InlineKeyboardButton(label, url=url)])
-                i += 1
-                continue
-
-            # Label on this line, URL on next line
-            if i + 1 < len(lines):
-                m2 = URL_RE.search(lines[i + 1])
-                if m2:
-                    url = m2.group(1)
-                    label = ln
-                    rows.append([InlineKeyboardButton(label, url=url)])
-                    i += 2
-                    continue
-
-            i += 1
-
-    if not rows:
-        rows.append([InlineKeyboardButton("Set FIND_MODELS_TEXT in ENV", url="https://render.com/")])
-
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="home"),
-                 InlineKeyboardButton("🏠 Main", callback_data="home")])
-    return InlineKeyboardMarkup(rows)
+def _back_main_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Back", callback_data="home"),
+         InlineKeyboardButton("🏠 Main", callback_data="home")]
+    ])
 
 # ---------------- Panels: callbacks ----------------
 def register(app: Client):
@@ -207,9 +171,13 @@ def register(app: Client):
         caption = f"{title}\n\n{body}" if body else title
         photo_id = doc.get("photo_id")
 
+        # Show either the photo+caption or just text; always via edit-in-place where possible
         if photo_id:
-            try: await q.message.delete()
-            except Exception: pass
+            try:
+                # Telegram cannot "edit" a text message into a photo; delete old, send new once
+                await q.message.delete()
+            except Exception:
+                pass
             await q.message.reply_photo(
                 photo=photo_id,
                 caption=caption,
@@ -259,20 +227,27 @@ def register(app: Client):
         finally:
             col_anon.delete_one({"user_id": m.from_user.id})
 
-    # Find Our Models Elsewhere
+    # Find Our Models Elsewhere — EXACT ENV TEXT, no per-model buttons, edit-in-place
     @app.on_callback_query(filters.regex(r"^models$"))
     async def _show_elsewhere(_: Client, q: CallbackQuery):
+        text = (os.getenv("FIND_MODELS_TEXT") or "Set FIND_MODELS_TEXT in ENV.").strip()
         await _safe_edit(
             q.message,
-            "🔥 Find Our Models Elsewhere",
-            reply_markup=_models_elsewhere_kb(),
+            text,
+            reply_markup=_back_main_kb(),
             disable_web_page_preview=True
         )
 
-    # Help panel + subpages
+    # Help panel + subpages (edit-in-place)
     @app.on_callback_query(filters.regex(r"^help$"))
     async def _show_help(_: Client, q: CallbackQuery):
-        await _safe_edit(q.message, "❓ Help", reply_markup=_help_kb())
+        await _safe_edit(q.message, "❓ Help", reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🧾 Buyer Requirements", callback_data="help:reqs")],
+            [InlineKeyboardButton("📜 Buyer Rules", callback_data="help:rules")],
+            [InlineKeyboardButton("🎲 Game Rules", callback_data="help:games")],
+            [InlineKeyboardButton("🕊️ Exemptions", callback_data="help:ex")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="home"), InlineKeyboardButton("🏠 Main", callback_data="home")],
+        ]))
 
     @app.on_callback_query(filters.regex(r"^help:reqs$"))
     async def _h_reqs(_: Client, q: CallbackQuery):
