@@ -2,17 +2,18 @@
 import os, time
 from typing import Dict, List, Optional, Tuple
 
-from pyrogram import Client, filters, enums
+from pyrogram import Client, filters
 from pyrogram.types import (
     CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 )
+from pyrogram.errors import MessageNotModified, BadRequest
 from pymongo import MongoClient
 
 # ------------------ Mongo ------------------
-MONGO_URL = os.getenv("MONGO_URL")
-DB_NAME   = os.getenv("MONGO_DB", "succubot")
+MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
+DB_NAME   = os.getenv("MONGO_DB") or os.getenv("MONGO_DBNAME") or "succubot"
 if not MONGO_URL:
-    raise RuntimeError("MONGO_URL is required")
+    raise RuntimeError("MONGO_URL / MONGODB_URI / MONGO_URI is required")
 _mcli = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)
 _db   = _mcli[DB_NAME]
 
@@ -20,17 +21,19 @@ col_model_menus = _db.get_collection("model_menus")   # stores each model menu (
 col_anon        = _db.get_collection("anon_sessions") # ephemeral flag for anon message flow
 
 # ---------------- Owner/Admin + Model Auth ----------------
-def _parse_ids(env_val: str) -> List[int]:
+def _parse_ids(env_val: Optional[str]) -> List[int]:
     out: List[int] = []
-    for token in (env_val or "").replace(" ", "").split(","):
+    if not env_val:
+        return out
+    for token in env_val.replace(" ", "").split(","):
         if not token:
             continue
         try: out.append(int(token))
         except ValueError: pass
     return out
 
-OWNER_ID = int(os.getenv("OWNER_ID", "6964994611") or 6964994611)
-EXTRA_ADMIN_IDS: List[int] = _parse_ids(os.getenv("EXTRA_ADMIN_IDS", ""))
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
+EXTRA_ADMIN_IDS: List[int] = _parse_ids(os.getenv("EXTRA_ADMIN_IDS") or os.getenv("SUPER_ADMINS"))
 
 def _is_owner_or_admin(uid: Optional[int]) -> bool:
     return bool(uid) and (uid == OWNER_ID or uid in EXTRA_ADMIN_IDS)
@@ -41,24 +44,19 @@ def _int_or_zero(v: Optional[str]) -> int:
 
 # Models map for buttons + Book links + self-edit permissions
 MODELS: Dict[str, Dict] = {
-    "roni": {"name": os.getenv("MODEL_RONI_NAME", "Roni"), "username": os.getenv("RONI_USERNAME", ""), "uid": _int_or_zero(os.getenv("MODEL_RONI_ID"))},
-    "ruby": {"name": os.getenv("MODEL_RUBY_NAME", "Ruby"), "username": os.getenv("RUBY_USERNAME", ""), "uid": _int_or_zero(os.getenv("MODEL_RUBY_ID"))},
-    "rin":  {"name": os.getenv("MODEL_RIN_NAME",  "Rin"),  "username": os.getenv("RIN_USERNAME",  ""), "uid": _int_or_zero(os.getenv("MODEL_RIN_ID"))},
-    "savy": {"name": os.getenv("MODEL_SAVY_NAME", "Savy"), "username": os.getenv("SAVY_USERNAME", ""), "uid": _int_or_zero(os.getenv("MODEL_SAVY_ID"))},
+    "roni": {"name": os.getenv("MODEL_RONI_NAME", os.getenv("RONI_NAME", "Roni")),
+             "username": os.getenv("RONI_USERNAME", ""),
+             "uid": _int_or_zero(os.getenv("MODEL_RONI_ID") or os.getenv("RONI_ID"))},
+    "ruby": {"name": os.getenv("MODEL_RUBY_NAME", os.getenv("RUBY_NAME", "Ruby")),
+             "username": os.getenv("RUBY_USERNAME", ""),
+             "uid": _int_or_zero(os.getenv("MODEL_RUBY_ID") or os.getenv("RUBY_ID"))},
+    "rin":  {"name": os.getenv("MODEL_RIN_NAME",  os.getenv("RIN_NAME",  "Rin")),
+             "username": os.getenv("RIN_USERNAME",  ""),
+             "uid": _int_or_zero(os.getenv("MODEL_RIN_ID")  or os.getenv("RIN_ID"))},
+    "savy": {"name": os.getenv("MODEL_SAVY_NAME", os.getenv("SAVY_NAME", "Savy")),
+             "username": os.getenv("SAVY_USERNAME", ""),
+             "uid": _int_or_zero(os.getenv("MODEL_SAVY_ID") or os.getenv("SAVY_ID"))},
 }
-
-def _user_matches_model(user_id: Optional[int], username: Optional[str], model_key: str) -> bool:
-    meta = MODELS.get(model_key) or {}
-    uid = meta.get("uid") or 0
-    uname = (meta.get("username") or "").lower()
-    if uid and user_id and uid == user_id:
-        return True
-    if uname and username and uname == username.lower():
-        return True
-    return False
-
-def _can_edit_model(user_id: Optional[int], username: Optional[str], model_key: str) -> bool:
-    return _is_owner_or_admin(user_id) or _user_matches_model(user_id, username, model_key)
 
 # ---------------- Small helpers ----------------
 def _tg_url(username: str) -> str:
@@ -85,9 +83,21 @@ def _extract_text_after_command(m: Message) -> str:
             return parts[2]
     return ""
 
+async def _safe_edit(msg: Message, text: str, **kwargs):
+    try:
+        return await msg.edit_text(text, **kwargs)
+    except MessageNotModified:
+        if "reply_markup" in kwargs and kwargs["reply_markup"] is not None:
+            try:
+                return await msg.edit_reply_markup(kwargs["reply_markup"])
+            except MessageNotModified:
+                return
+        return
+    except BadRequest:
+        return await msg.reply_text(text, **kwargs)
+
 # ---------------- Keyboards ----------------
 def _menus_kb() -> InlineKeyboardMarkup:
-    # 2×2 grid of models + Back/Home row
     order = ["roni","ruby","rin","savy"]
     btns = [InlineKeyboardButton(MODELS[k]["name"], callback_data=f"menu:{k}") for k in order]
     rows = [btns[i:i+2] for i in range(0, len(btns), 2)]
@@ -125,7 +135,7 @@ def _sub_kb() -> InlineKeyboardMarkup:
     ])
 
 def _models_elsewhere_kb() -> InlineKeyboardMarkup:
-    raw = (os.getenv("MODELS_ELSEWHERE","") or "").strip()
+    raw = (os.getenv("MODELS_ELSEWHERE") or os.getenv("FIND_MODELS_TEXT") or "").strip()
     rows: List[List[InlineKeyboardButton]] = []
     if raw:
         for line in raw.splitlines():
@@ -135,7 +145,7 @@ def _models_elsewhere_kb() -> InlineKeyboardMarkup:
             if label and url:
                 rows.append([InlineKeyboardButton(label, url=url)])
     else:
-        rows.append([InlineKeyboardButton("Set MODELS_ELSEWHERE in ENV", url="https://render.com/")])
+        rows.append([InlineKeyboardButton("Set MODELS_ELSEWHERE or FIND_MODELS_TEXT in ENV", url="https://render.com/")])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="home"), InlineKeyboardButton("🏠 Main", callback_data="home")])
     return InlineKeyboardMarkup(rows)
 
@@ -145,7 +155,7 @@ def register(app: Client):
     # MENUS list
     @app.on_callback_query(filters.regex(r"^menus$"))
     async def _show_menus(_: Client, q: CallbackQuery):
-        await q.message.edit_text("💕 Choose a model:", reply_markup=_menus_kb())
+        await _safe_edit(q.message, "💕 Choose a model:", reply_markup=_menus_kb())
 
     # Model page
     @app.on_callback_query(filters.regex(r"^menu:(roni|ruby|rin|savy)$"))
@@ -155,10 +165,7 @@ def register(app: Client):
         doc = col_model_menus.find_one({"key": key})
 
         if not doc:
-            await q.message.edit_text(
-                f"{meta['name']}'s menu has not been set yet.",
-                reply_markup=_menus_kb()
-            )
+            await _safe_edit(q.message, f"{meta['name']}'s menu has not been set yet.", reply_markup=_menus_kb())
             return
 
         title = f"**{meta['name']} — Menu**"
@@ -167,7 +174,6 @@ def register(app: Client):
         photo_id = doc.get("photo_id")
 
         if photo_id:
-            # If previous message is a photo, editing fails; just delete+send new
             try: await q.message.delete()
             except Exception: pass
             await q.message.reply_photo(
@@ -176,7 +182,8 @@ def register(app: Client):
                 reply_markup=_model_menu_kb(key, meta["username"]),
             )
         else:
-            await q.message.edit_text(
+            await _safe_edit(
+                q.message,
                 caption,
                 reply_markup=_model_menu_kb(key, meta["username"]),
                 disable_web_page_preview=True,
@@ -190,15 +197,15 @@ def register(app: Client):
     # Contact Admins
     @app.on_callback_query(filters.regex(r"^admins$"))
     async def _show_admins(_: Client, q: CallbackQuery):
-        await q.message.edit_text("👑 Contact Admins", reply_markup=_admins_kb())
+        await _safe_edit(q.message, "👑 Contact Admins", reply_markup=_admins_kb())
 
     # Anonymous message flow
     @app.on_callback_query(filters.regex(r"^anon:start$"))
     async def _start_anon(_: Client, q: CallbackQuery):
         col_anon.update_one({"user_id": q.from_user.id}, {"$set": {"user_id": q.from_user.id, "ts": int(time.time())}}, upsert=True)
-        await q.message.edit_text(
-            "🕵️ *Anonymous message mode*\n\n"
-            "Send me the message now. I’ll forward it anonymously to the owner.",
+        await _safe_edit(
+            q.message,
+            "🕵️ *Anonymous message mode*\n\nSend me the message now. I’ll forward it anonymously to the owner.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⬅️ Back", callback_data="admins")],
                 [InlineKeyboardButton("🏠 Main", callback_data="home")]
@@ -207,12 +214,12 @@ def register(app: Client):
         )
 
     # Capture next private message in anon mode and forward to OWNER_ID
-    @app.on_message(filters.private & ~filters.service)
+    @app.on_message(filters.private & filters.incoming & ~filters.service)
     async def _anon_capture(c: Client, m: Message):
         if not m.from_user: return
         if not col_anon.find_one({"user_id": m.from_user.id}):
             return
-        owner_id = int(os.getenv("OWNER_ID", "6964994611") or 6964994611)
+        owner_id = int(os.getenv("OWNER_ID", "0") or 0)
         try:
             await c.copy_message(owner_id, from_chat_id=m.chat.id, message_id=m.id)
             await m.reply_text("✅ Sent anonymously to the owner.")
@@ -222,36 +229,37 @@ def register(app: Client):
     # Find Our Models Elsewhere
     @app.on_callback_query(filters.regex(r"^models$"))
     async def _show_elsewhere(_: Client, q: CallbackQuery):
-        await q.message.edit_text(
+        await _safe_edit(
+            q.message,
             "🔥 Find Our Models Elsewhere",
             reply_markup=_models_elsewhere_kb(),
             disable_web_page_preview=True
         )
 
-    # Help panel + subpages (from ENV)
+    # Help panel + subpages (read both *_TEXT and short key variants)
     @app.on_callback_query(filters.regex(r"^help$"))
     async def _show_help(_: Client, q: CallbackQuery):
-        await q.message.edit_text("❓ Help", reply_markup=_help_kb())
+        await _safe_edit(q.message, "❓ Help", reply_markup=_help_kb())
 
     @app.on_callback_query(filters.regex(r"^help:reqs$"))
     async def _h_reqs(_: Client, q: CallbackQuery):
-        text = os.getenv("BUYER_REQUIREMENTS", "Set BUYER_REQUIREMENTS in ENV.")
-        await q.message.edit_text(f"🧾 **Buyer Requirements**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
+        text = os.getenv("BUYER_REQUIREMENTS") or os.getenv("BUYER_REQUIREMENTS_TEXT") or "Set BUYER_REQUIREMENTS(_TEXT) in ENV."
+        await _safe_edit(q.message, f"🧾 **Buyer Requirements**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^help:rules$"))
     async def _h_rules(_: Client, q: CallbackQuery):
-        text = os.getenv("BUYER_RULES", "Set BUYER_RULES in ENV.")
-        await q.message.edit_text(f"📜 **Buyer Rules**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
+        text = os.getenv("BUYER_RULES") or os.getenv("BUYER_RULES_TEXT") or "Set BUYER_RULES(_TEXT) in ENV."
+        await _safe_edit(q.message, f"📜 **Buyer Rules**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^help:games$"))
     async def _h_games(_: Client, q: CallbackQuery):
-        text = os.getenv("GAME_RULES", "Set GAME_RULES in ENV.")
-        await q.message.edit_text(f"🎲 **Game Rules**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
+        text = os.getenv("GAME_RULES") or os.getenv("GAME_RULES_TEXT") or "Set GAME_RULES(_TEXT) in ENV."
+        await _safe_edit(q.message, f"🎲 **Game Rules**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^help:ex$"))
     async def _h_ex(_: Client, q: CallbackQuery):
-        text = os.getenv("EXEMPTIONS", "Set EXEMPTIONS in ENV.")
-        await q.message.edit_text(f"🕊️ **Exemptions**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
+        text = os.getenv("EXEMPTIONS") or os.getenv("EXEMPTIONS_TEXT") or "Set EXEMPTIONS(_TEXT) in ENV."
+        await _safe_edit(q.message, f"🕊️ **Exemptions**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
 
     # ---------------- Commands: Menus CRUD ----------------
 
@@ -263,7 +271,8 @@ def register(app: Client):
         # find which model this user controls
         my_key: Optional[str] = None
         for k in MODELS:
-            if _user_matches_model(user.id, user.username, k):
+            meta = MODELS[k]
+            if (meta.get("uid") and user.id == meta["uid"]) or (meta.get("username") and user.username and user.username.lower() == meta["username"].lower()):
                 my_key = k; break
         if not my_key:
             await m.reply_text("You are not authorized to edit a model menu with /mymenu.")
@@ -290,10 +299,16 @@ def register(app: Client):
         if len(m.command) < 2:
             await m.reply_text("Usage:\n`/createmenu Roni <menu text>`\n(You can also attach a photo with caption.)", quote=True)
             return
+        def _can_edit_model(key: str) -> bool:
+            meta = MODELS[key]
+            return _is_owner_or_admin(user.id) or \
+                   (meta.get("uid") and user.id == meta["uid"]) or \
+                   (meta.get("username") and user.username and user.username.lower() == meta["username"].lower())
+
         model_key = _model_key_from_name(m.command[1])
         if not model_key:
             await m.reply_text("Invalid model. Choose from: Roni, Ruby, Rin, Savy.", quote=True); return
-        if not _can_edit_model(user.id, user.username, model_key):
+        if not _can_edit_model(model_key):
             await m.reply_text("You are not allowed to create/overwrite this model’s menu.", quote=True); return
 
         text = _extract_text_after_command(m)
@@ -313,10 +328,16 @@ def register(app: Client):
         if len(m.command) < 2:
             await m.reply_text("Usage:\n`/editmenu Roni <new text>`\n(Attach a new photo to replace; omit to keep old.)", quote=True); return
 
+        def _can_edit_model(key: str) -> bool:
+            meta = MODELS[key]
+            return _is_owner_or_admin(user.id) or \
+                   (meta.get("uid") and user.id == meta["uid"]) or \
+                   (meta.get("username") and user.username and user.username.lower() == meta["username"].lower())
+
         model_key = _model_key_from_name(m.command[1])
         if not model_key:
             await m.reply_text("Invalid model. Choose from: Roni, Ruby, Rin, Savy.", quote=True); return
-        if not _can_edit_model(user.id, user.username, model_key):
+        if not _can_edit_model(model_key):
             await m.reply_text("You are not allowed to edit this model’s menu.", quote=True); return
 
         text = _extract_text_after_command(m)
@@ -334,10 +355,16 @@ def register(app: Client):
         if len(m.command) < 2:
             await m.reply_text("Usage: /deletemenu Roni", quote=True); return
 
+        def _can_edit_model(key: str) -> bool:
+            meta = MODELS[key]
+            return _is_owner_or_admin(user.id) or \
+                   (meta.get("uid") and user.id == meta["uid"]) or \
+                   (meta.get("username") and user.username and user.username.lower() == meta["username"].lower())
+
         model_key = _model_key_from_name(m.command[1])
         if not model_key:
             await m.reply_text("Invalid model. Choose from: Roni, Ruby, Rin, Savy.", quote=True); return
-        if not _can_edit_model(user.id, user.username, model_key):
+        if not _can_edit_model(model_key):
             await m.reply_text("You are not allowed to delete this model’s menu.", quote=True); return
 
         res = col_model_menus.delete_one({"key": model_key})
@@ -354,10 +381,16 @@ def register(app: Client):
         if len(m.command) < 2:
             await m.reply_text("Usage: /viewmenu Roni", quote=True); return
 
+        def _can_edit_model(key: str) -> bool:
+            meta = MODELS[key]
+            return _is_owner_or_admin(user.id) or \
+                   (meta.get("uid") and user.id == meta["uid"]) or \
+                   (meta.get("username") and user.username and user.username.lower() == meta["username"].lower())
+
         model_key = _model_key_from_name(m.command[1])
         if not model_key:
             await m.reply_text("Invalid model. Choose from: Roni, Ruby, Rin, Savy.", quote=True); return
-        if not _can_edit_model(user.id, user.username, model_key):
+        if not _can_edit_model(model_key):
             await m.reply_text("You are not allowed to view this model’s menu via command.", quote=True); return
 
         doc = col_model_menus.find_one({"key": model_key})
