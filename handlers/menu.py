@@ -1,118 +1,53 @@
-# handlers/menu.py
-# Menus: save to data/menus.json (single path), atomic writes, reload-before-show.
-# Commands:
-#   /createmenu <Model> <caption...>
-# Callbacks:
-#   menu            -> list models
-#   show:<name>     -> show that model's menu
-#   back_main       -> call panels.main_menu()
-
-import os, json, tempfile
-from typing import Dict, Tuple
-
+# handlers/admins.py
+import os, time
 from pyrogram import Client, filters
-from pyrogram.types import (
-    Message,
-    CallbackQuery,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-)
+from pyrogram.types import CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pymongo import MongoClient
 
-DATA_DIR = "data"
-STORE_PATH = os.path.join(DATA_DIR, "menus.json")
-os.makedirs(DATA_DIR, exist_ok=True)
+MONGO_URL = os.getenv("MONGO_URL"); DB_NAME = os.getenv("MONGO_DB", "succubot")
+_mcli = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000); _db = _mcli[DB_NAME]
+col_anon = _db.get_collection("anon_sessions")
 
-def _load() -> Dict[str, dict]:
-    if not os.path.exists(STORE_PATH):
-        return {}
-    try:
-        with open(STORE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))
+RONI_USERNAME = os.getenv("RONI_USERNAME", "")
+RUBY_USERNAME = os.getenv("RUBY_USERNAME", "")
 
-def _atomic_save(data: Dict[str, dict]) -> None:
-    fd, tmp = tempfile.mkstemp(dir=DATA_DIR, prefix="menus.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, STORE_PATH)
-    finally:
-        try:
-            if os.path.exists(tmp):
-                os.remove(tmp)
-        except Exception:
-            pass
+def _tg_url(username: str) -> str:
+    return f"https://t.me/{username}" if username else "https://t.me/"
 
-MENUS: Dict[str, dict] = _load()  # in-RAM cache, updated on write
-
-def _first_rest(s: str) -> Tuple[str, str]:
-    s = (s or "").strip()
-    if not s:
-        return "", ""
-    parts = s.split(maxsplit=1)
-    return parts[0], (parts[1] if len(parts) > 1 else "")
+def _admins_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 Contact Roni", url=_tg_url(RONI_USERNAME))],
+        [InlineKeyboardButton("💬 Contact Ruby", url=_tg_url(RUBY_USERNAME))],
+        [InlineKeyboardButton("🕵️ Send Anonymous Message", callback_data="anon:start")],
+        [InlineKeyboardButton("🏠 Main", callback_data="home")],
+    ])
 
 def register(app: Client):
+    @app.on_callback_query(filters.regex(r"^admins$"))
+    async def _show_admins(_, q: CallbackQuery):
+        await q.message.edit_text("👑 Contact Admins", reply_markup=_admins_kb())
 
-    # ---- create text-only: /createmenu <Model> <caption...>
-    @app.on_message(filters.command("createmenu", prefixes=["/", "!", "."]))
-    async def _create_menu(c: Client, m: Message):
-        rest = ""
-        if m.text and len(m.text.split(maxsplit=1)) > 1:
-            rest = m.text.split(maxsplit=1)[1]
-        elif m.caption:
-            cap = m.caption.strip()
-            for p in ("/", "!", "."):
-                if cap.startswith(p + "createmenu"):
-                    parts = cap.split(maxsplit=1)
-                    rest = parts[1] if len(parts) > 1 else ""
-                    break
+    @app.on_callback_query(filters.regex(r"^anon:start$"))
+    async def _start_anon(_, q: CallbackQuery):
+        col_anon.update_one({"user_id": q.from_user.id}, {"$set": {"user_id": q.from_user.id, "ts": int(time.time())}}, upsert=True)
+        await q.message.edit_text(
+            "🕵️ *Anonymous message mode*\n\n"
+            "Send me the message now. I’ll forward it anonymously to the owner.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Back", callback_data="admins")],
+                [InlineKeyboardButton("🏠 Main", callback_data="home")]
+            ]),
+            disable_web_page_preview=True
+        )
 
-        model, caption = _first_rest(rest)
-        if not model or not caption:
-            return await m.reply_text("Usage: /createmenu <Model> <caption>")
-
-        key = model.lower()
-        MENUS[key] = {"caption": caption}
-        _atomic_save(MENUS)
-        await m.reply_text(f"✅ Saved <b>{model}</b> menu.")
-
-    # ---- list models (callback: 'menu')
-    @app.on_callback_query(filters.regex(r"^menu$"))
-    async def _menu_list(c: Client, cq: CallbackQuery):
-        rows = [
-            [InlineKeyboardButton("💘 Roni", callback_data="show:roni"),
-             InlineKeyboardButton("💘 Ruby", callback_data="show:ruby")],
-            [InlineKeyboardButton("💘 Rin",  callback_data="show:rin"),
-             InlineKeyboardButton("💘 Savy", callback_data="show:savy")],
-            [InlineKeyboardButton("⬅️ Back to Main", callback_data="back_main")],
-        ]
-        await cq.message.edit_text("💕 <b>Menus</b>\nPick a model whose menu is saved.",
-                                   reply_markup=InlineKeyboardMarkup(rows),
-                                   disable_web_page_preview=True)
-        await cq.answer()
-
-    # ---- show a model (callbacks: 'show:<name>')
-    @app.on_callback_query(filters.regex(r"^show:(?P<name>.+)$"))
-    async def _show_model(c: Client, cq: CallbackQuery):
-        name = cq.matches[0].group("name").strip()
-        key = name.lower()
-
-        # reload from disk so changes are visible across workers/restarts
-        latest = _load()
-        item = latest.get(key) or MENUS.get(key)
-        if not item:
-            return await cq.answer("❌ No menu saved for this model.", show_alert=True)
-
-        text = item.get("caption") or f"{name.title()} Menu"
-        rows = [[InlineKeyboardButton("⬅️ Back", callback_data="menu")]]
-        await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(rows))
-        await cq.answer()
-
-    # ---- back to main panel (handled by panels.main_menu)
-    @app.on_callback_query(filters.regex(r"^back_main$"))
-    async def _back_main(c: Client, cq: CallbackQuery):
-        from handlers.panels import main_menu
-        await main_menu(cq.message)
-        await cq.answer()
+    @app.on_message(filters.private & ~filters.service)
+    async def _anon_capture(c: Client, m: Message):
+        if not m.from_user: return
+        if not col_anon.find_one({"user_id": m.from_user.id}):
+            return
+        try:
+            await c.copy_message(OWNER_ID, from_chat_id=m.chat.id, message_id=m.id)
+            await m.reply_text("✅ Sent anonymously to the owner.")
+        finally:
+            col_anon.delete_one({"user_id": m.from_user.id})
