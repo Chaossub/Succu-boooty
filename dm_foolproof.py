@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.errors import MessageNotModified, BadRequest
 from pymongo import MongoClient
 
 # === Mongo connection ===
@@ -74,22 +75,36 @@ def register(app: Client):
                 reply_markup=_main_kb(),
                 disable_web_page_preview=True
             )
+        except MessageNotModified:
+            try:
+                await q.message.edit_reply_markup(_main_kb())
+            except MessageNotModified:
+                pass
         except Exception:
             await _send_main_panel(q.message)
 
     @app.on_message(filters.command("dmreadylist"))
     async def _dmready_list(c: Client, m: Message):
-        users = list(col_dm.find().sort("ts", 1))
+        raw = list(col_dm.find().sort("ts", 1))
+        users = [u for u in raw if "user_id" in u]  # skip malformed docs
+
         if not users:
             await m.reply_text("📭 No DM-ready users yet.")
             return
-        lines = ["📋 DM-ready (all)"]
+
         now = _now_ts()
+        lines = ["📋 DM-ready (all)"]
         for u in users:
+            uid = u.get("user_id")
+            name = u.get("name") or "Someone"
             uname = f"@{u.get('username')}" if u.get("username") else ""
-            age = _hms(now - int(u.get("ts", now)))
-            since = datetime.fromtimestamp(int(u.get("ts", now)), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            lines.append(f"- {u.get('name','Someone')} {uname}\n   id: {u['user_id']} — since {since} ({age})")
+            ts = int(u.get("ts", now))
+            age = _hms(now - ts)
+            try:
+                since = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            except Exception:
+                since = "?"
+            lines.append(f"- {name} {uname}\n   id: {uid} — since {since} ({age})")
         await m.reply_text("\n".join(lines))
 
     # Mark anyone who DMs the bot as DM-ready (persists)
