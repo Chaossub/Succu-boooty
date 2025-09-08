@@ -65,6 +65,7 @@ def register(app: Client):
     async def _on_start(c: Client, m: Message):
         await _send_main_panel(m)
 
+    # Universal "Home" so any panel can jump back to start
     @app.on_callback_query(filters.regex(r"^home$"))
     async def _go_home(c: Client, q):
         try:
@@ -91,6 +92,7 @@ def register(app: Client):
             lines.append(f"- {u.get('name','Someone')} {uname}\n   id: {u['user_id']} — since {since} ({age})")
         await m.reply_text("\n".join(lines))
 
+    # Mark anyone who DMs the bot as DM-ready (persists)
     @app.on_message(filters.private & ~filters.service)
     async def _on_any_private(c: Client, m: Message):
         if not m.from_user:
