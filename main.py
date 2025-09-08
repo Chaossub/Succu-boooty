@@ -1,4 +1,3 @@
-# main.py
 import os, logging, sys
 from pyrogram import Client
 from dotenv import load_dotenv
@@ -38,18 +37,18 @@ if __name__ == "__main__":
     # SINGLE /start handler (welcome + nav buttons)
     wire("dm_foolproof")
 
-    # Panels / navigation (unchanged)
+    # Unified panels/navigation (menus, admins, help, elsewhere all-in-one)
     wire("handlers.panels")
 
-    # Menus (unchanged behavior + Back button only)
-    wire("handlers.menu")
+    # Remove old duplicates:
+    # wire("handlers.menu")
+    # wire("handlers.dm_admin")
+    # wire("handlers.dmnow")
 
-    # Admin tools around DM-ready + deep link (unchanged)
-    wire("handlers.dm_admin")
-    wire("handlers.dmnow")
+    # DM-ready cleanup still safe to keep
     wire("handlers.dmready_cleanup")
 
-    # Everything else (unchanged; none of these should register /start)
+    # Everything else (unchanged)
     wire("handlers.enforce_requirements")
     wire("handlers.req_handlers")
     wire("handlers.test_send")
@@ -70,3 +69,4 @@ if __name__ == "__main__":
 
     log.info("🚀 SuccuBot starting…")
     app.run()
+
