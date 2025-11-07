@@ -7,7 +7,7 @@ from pyrogram import Client, filters, enums
 from pyrogram.types import Message, ChatMemberUpdated
 from pyrogram.handlers import MessageHandler, ChatMemberUpdatedHandler
 
-GROUP_ID = -1002823762054  # your main group ID
+GROUP_ID = -1002823762054  # your main group
 
 
 # ---------- Storage (Mongo first, JSON fallback) ----------
@@ -21,7 +21,9 @@ class DMReadyStore:
             try:
                 from pymongo import MongoClient, ASCENDING
                 self._mongo = MongoClient(uri)
-                self._db = self._mongo.get_database()  # use DB from URI
+                # if URI has no db, this still works once you call get_database("name")
+                db_name = os.getenv("MONGO_DB") or (os.getenv("MONGO_DB_NAME")) or "chaossunflowerbusiness321"
+                self._db = self._mongo[db_name]
                 self._coll = self._db["dm_ready"]
                 self._coll.create_index([("user_id", ASCENDING)], unique=True)
                 self._mongo_ok = True
