@@ -5,8 +5,10 @@ from typing import Optional, Dict, Any, List
 
 from pyrogram import Client, filters, enums
 from pyrogram.types import Message, ChatMemberUpdated
+from pyrogram.handlers import MessageHandler, ChatMemberUpdatedHandler
 
-GROUP_ID = -1002823762054  # your group
+GROUP_ID = -1002823762054  # your main group ID
+
 
 # ---------- Storage (Mongo first, JSON fallback) ----------
 class DMReadyStore:
@@ -19,7 +21,7 @@ class DMReadyStore:
             try:
                 from pymongo import MongoClient, ASCENDING
                 self._mongo = MongoClient(uri)
-                self._db = self._mongo.get_database()  # default from URI
+                self._db = self._mongo.get_database()  # use DB from URI
                 self._coll = self._db["dm_ready"]
                 self._coll.create_index([("user_id", ASCENDING)], unique=True)
                 self._mongo_ok = True
@@ -33,7 +35,6 @@ class DMReadyStore:
                 with open(self._json_path, "w", encoding="utf-8") as f:
                     json.dump({"users": {}}, f)
 
-    # ----- helpers -----
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
 
@@ -51,9 +52,7 @@ class DMReadyStore:
 
     # ----- public API -----
     def mark_ready(self, user_id: int, first_name: str, username: Optional[str]) -> bool:
-        """
-        Returns True if newly marked; False if already present.
-        """
+        """Returns True if newly marked; False if already present."""
         if self._mongo_ok:
             doc = self._coll.find_one({"user_id": user_id})
             if doc:
@@ -79,9 +78,7 @@ class DMReadyStore:
         return True
 
     def remove(self, user_id: int) -> bool:
-        """
-        Returns True if removed; False if not present.
-        """
+        """Returns True if removed; False if not present."""
         if self._mongo_ok:
             res = self._coll.delete_one({"user_id": user_id})
             return bool(res.deleted_count)
@@ -107,12 +104,13 @@ class DMReadyStore:
         out.sort(key=lambda r: r.get("since") or "")
         return out
 
+
 store = DMReadyStore()
 
+
 # ---------- Handlers ----------
-# 1) FIRST DM contact → mark them once, silently on duplicates
-@Client.on_message(filters.private & ~filters.service)
 async def dm_first_contact(client: Client, msg: Message):
+    """Triggered when someone DMs the bot."""
     user = msg.from_user
     if not user:
         return
@@ -125,45 +123,43 @@ async def dm_first_contact(client: Client, msg: Message):
         try:
             await msg.reply_text("You’re now DM-ready ✅")
         except Exception:
-            pass  # If replies are disabled, just skip
+            pass
 
-# 2) Auto-remove when they leave your group
-@Client.on_chat_member_updated(filters.chat(GROUP_ID))
+
 async def on_member_update(client: Client, event: ChatMemberUpdated):
-    # Remove when they leave or are kicked
+    """Auto-remove DM-ready users when they leave the group."""
     new = event.new_chat_member
     if not new:
         return
-    status = new.status
-    if status in (enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.KICKED):
+    if new.status in (enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.KICKED):
         user_id = new.user.id
         removed = store.remove(user_id)
         if removed:
-            # Optional: log to your admin chat or print
             print(f"[DM-READY] Removed {user_id} (left group)")
 
-# 3) Admin utility: list DM-ready (callable in group by owner/admins)
-@Client.on_message(filters.command(["dmready", "dmreadylist"]) & filters.chat(GROUP_ID))
+
 async def dmready_list(client: Client, msg: Message):
-    # You can tighten permissions here if you want:
-    # if msg.from_user and msg.from_user.id not in {6964994611}: return
+    """Show list of DM-ready users."""
     rows = store.list_all()
     if not rows:
         await msg.reply_text("No one is DM-ready yet.")
         return
-
-    # Keep it compact
     lines = []
     for r in rows[:100]:
         tag = f"@{r['username']}" if r.get("username") else f"{r.get('first_name','User')} ({r['user_id']})"
         when = r.get("since", "")[:19].replace("T", " ")
         lines.append(f"• {tag} — since {when} UTC")
-
     extras = ""
     if len(rows) > 100:
         extras = f"\n… and {len(rows) - 100} more."
-
     await msg.reply_text(
         f"**DM-ready users:** {len(rows)}\n" + "\n".join(lines) + extras,
         disable_web_page_preview=True
     )
+
+
+# ---------- Register for main.py ----------
+def register(app: Client):
+    app.add_handler(MessageHandler(dm_first_contact, filters.private & ~filters.service))
+    app.add_handler(ChatMemberUpdatedHandler(on_member_update, filters.chat(GROUP_ID)))
+    app.add_handler(MessageHandler(dmready_list, filters.command(["dmready", "dmreadylist"]) & filters.chat(GROUP_ID)))
