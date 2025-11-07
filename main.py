@@ -43,10 +43,11 @@ if __name__ == "__main__":
     # Menus (Mongo-persistent)
     wire("handlers.menu")
 
-    # Admin/DM-ready
+    # Admin / DM-ready
+    wire("handlers.dm_ready")          # ← NEW: persistent DM-ready system
     wire("handlers.dm_admin")
     wire("handlers.dmnow")
-    wire("handlers.dmready_cleanup")
+    wire("handlers.dmready_cleanup")   # (keep for now; safe with dm_ready.register)
 
     # Other stuff (must not register /start)
     wire("handlers.enforce_requirements")
@@ -66,4 +67,3 @@ if __name__ == "__main__":
 
     log.info("🚀 SuccuBot starting…")
     app.run()
-
