@@ -22,6 +22,7 @@ def _home_kb() -> InlineKeyboardMarkup:
     ])
 
 def register(app: Client):
+    # The ONLY /start
     @app.on_message(filters.command("start"))
     async def _start(client: Client, m: Message):
         u = m.from_user
@@ -44,4 +45,3 @@ def register(app: Client):
             reply_markup=_home_kb(),
             disable_web_page_preview=True,
         )
-
