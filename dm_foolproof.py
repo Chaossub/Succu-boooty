@@ -3,7 +3,6 @@ import os
 from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import MessageNotModified
-from pyrogram.handlers.handler import StopPropagation
 
 # mark/ping comes from unified DM-ready module
 from handlers.dm_ready import mark_from_start
@@ -51,9 +50,7 @@ def register(app: Client):
             reply_markup=_home_kb(),
             disable_web_page_preview=True,
         )
-
-        # block any other legacy /start handlers from also replying
-        raise StopPropagation
+        # NOTE: No StopPropagation in Pyrogram v2 — duplicates are prevented by wiring only this /start.
 
     # Router for Back/Main buttons
     @app.on_callback_query(filters.regex(r"^home$"))
@@ -64,4 +61,3 @@ def register(app: Client):
             reply_markup=_home_kb(),
             disable_web_page_preview=True
         )
-
