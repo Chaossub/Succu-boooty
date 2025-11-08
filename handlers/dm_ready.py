@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os, json, time, logging
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Set
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
@@ -25,9 +25,8 @@ def _home_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❓ Help", callback_data="help")],
     ])
 
-# --- ultra-simple persistence that always survives restarts ---
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+# --- persistence (survives restarts) ---
+DATA_DIR = Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 READY_FILE = DATA_DIR / "dm_ready.json"       # { "<user_id>": {...} }
 WELC_FILE  = DATA_DIR / "dm_welcomed.json"    # { "<user_id>": true }
 
@@ -49,18 +48,34 @@ def _fmt_owner_line(user) -> str:
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
     return f"✅ <b>DM-ready</b>: {user.first_name or 'User'} {uname}\n<code>{user.id}</code> • {ts}Z"
 
+# --- ultra-small de-dup to kill double /start triggers ---
+_INFLIGHT: Dict[int, float] = {}      # user_id -> last_ts
+DEDUP_WINDOW = 2.0                    # seconds
+
+def _already_processing(uid: int) -> bool:
+    now = time.time()
+    last = _INFLIGHT.get(uid, 0.0)
+    if now - last < DEDUP_WINDOW:
+        return True
+    _INFLIGHT[uid] = now
+    # prune old
+    for k, ts in list(_INFLIGHT.items()):
+        if now - ts > 5 * DEDUP_WINDOW:
+            _INFLIGHT.pop(k, None)
+    return False
+
 async def _mark_dm_ready_once_and_maybe_welcome(client: Client, m: Message):
     if not m.from_user or m.from_user.is_bot:
         return
-
     u = m.from_user
+    if _already_processing(u.id):
+        return  # second handler fired within the window → ignore
+
     uid_str = str(u.id)
 
-    # Load stores
     ready = _load_json(READY_FILE)
     welc  = _load_json(WELC_FILE)
 
-    # Add to DM-ready list if not present
     if uid_str not in ready:
         ready[uid_str] = {
             "id": u.id,
@@ -70,14 +85,12 @@ async def _mark_dm_ready_once_and_maybe_welcome(client: Client, m: Message):
             "ts": int(time.time()),
         }
         _save_json(READY_FILE, ready)
-        # Ping owner
         if OWNER_ID:
             try:
                 await client.send_message(OWNER_ID, _fmt_owner_line(u))
             except Exception:
                 pass
 
-    # Only show the big welcome ONCE lifetime per user
     if not welc.get(uid_str, False):
         await m.reply_text(
             WELCOME_TEXT,
@@ -86,12 +99,8 @@ async def _mark_dm_ready_once_and_maybe_welcome(client: Client, m: Message):
         )
         welc[uid_str] = True
         _save_json(WELC_FILE, welc)
-    else:
-        # If they've already seen it once, keep silent to avoid duplicates
-        pass
 
 def register(app: Client):
-    # Expose remover hook for cleanup modules
     async def _remove(uid: int):
         try:
             uid_str = str(uid)
@@ -103,12 +112,10 @@ def register(app: Client):
             pass
     setattr(app, "_succu_dm_store_remove", _remove)
 
-    # The ONLY /start in the whole bot
     @app.on_message(filters.private & filters.command("start"))
     async def _start(client: Client, m: Message):
         await _mark_dm_ready_once_and_maybe_welcome(client, m)
 
-    # Built-in owner command so it can’t “go missing”
     @app.on_message(filters.private & filters.command("dmreadylist"))
     async def _dmreadylist(client: Client, m: Message):
         if not m.from_user or m.from_user.id != OWNER_ID:
@@ -116,15 +123,13 @@ def register(app: Client):
         data = _load_json(READY_FILE)
         if not data:
             return await m.reply_text("ℹ️ No one is marked DM-ready yet.")
-        rows = list(data.values())
-        rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        rows = list(data.values()); rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
         lines = ["✅ <b>DM-ready users</b>"]
         for i, r in enumerate(rows, start=1):
             uname = f"@{r.get('username')}" if r.get("username") else ""
             lines.append(f"{i}. {r.get('first_name','User')} {uname} — <code>{r.get('id')}</code>")
         await m.reply_text("\n".join(lines), disable_web_page_preview=True)
 
-    # Optional: clear list (owner only)
     @app.on_message(filters.private & filters.command("dmreadyclear"))
     async def _dmreadyclear(client: Client, m: Message):
         if not m.from_user or m.from_user.id != OWNER_ID:
