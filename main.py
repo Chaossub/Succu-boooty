@@ -1,12 +1,9 @@
 # main.py
-import os, logging
-from threading import Thread
-from typing import List
-
+from __future__ import annotations
+import os
+import logging
 from dotenv import load_dotenv
-from pyrogram import Client
-from fastapi import FastAPI
-import uvicorn
+from pyrogram import Client, idle
 
 load_dotenv()
 
@@ -14,75 +11,65 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
 )
+
 log = logging.getLogger("SuccuBot")
 
-API_ID    = int(os.getenv("API_ID", "0") or "0")
-API_HASH  = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-OWNER_ID  = int(os.getenv("OWNER_ID", "0") or "0")
-log.info("👑 OWNER_ID = %s", OWNER_ID)
+# ── Owner / Supers ────────────────────────────────────────────────────────────
+OWNER_ID_ENV = (os.getenv("OWNER_ID") or "").strip()
+if not OWNER_ID_ENV:
+    # Fallback to your ID if not set in env
+    OWNER_ID_ENV = "6964994611"
+os.environ["OWNER_ID"] = OWNER_ID_ENV
+log.info("👑 OWNER_ID = %s", OWNER_ID_ENV)
 
-bot = Client(
-    "succubot",
+# ── Pyrogram Client ───────────────────────────────────────────────────────────
+API_ID = int(os.getenv("API_ID", "0") or "0")
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
+if not (API_ID and API_HASH and BOT_TOKEN):
+    raise RuntimeError("Missing API_ID / API_HASH / BOT_TOKEN env vars.")
+
+app = Client(
+    name=os.getenv("SESSION_NAME", "succubot"),
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=int(os.getenv("PYROGRAM_WORKERS", "16")),
-    in_memory=False,
+    workers=int(os.getenv("WORKERS", "8")),
+    in_memory=True,  # no local session file needed on hosts like Railway/Render
 )
 
-# IMPORTANT:
-#   Do NOT wire any other module that registers /start.
-#   If a legacy module still does, remove/comment that handler there.
-MODULES: List[str] = [
-    "handlers.dm_ready",          # ONLY /start + /dmreadylist lives here
-    "handlers.dmready_watch",     # leave/kick/ban cleanup
-    "handlers.dmready_cleanup",   # extra coverage
-    # The rest of your bot (must not define /start):
+# ── Safe wire helper ──────────────────────────────────────────────────────────
+def wire(module_path: str):
+    try:
+        mod = __import__(module_path, fromlist=["register"])
+        if hasattr(mod, "register"):
+            mod.register(app)  # type: ignore
+            log.info("✅ Wired: %s", module_path)
+        else:
+            log.warning("ℹ️ %s has no register()", module_path)
+    except Exception as e:
+        log.error("❌ Failed to wire %s: %s", module_path, e)
+
+# ── Which modules to wire (ONLY one /start comes from handlers.dm_ready) ─────
+MODULES = [
+    # DM-ready flow (single /start + persistence + admin list)
+    "handlers.dm_ready",
+    "handlers.dmready_admin",
+
+    # (optional) light panel/menu callbacks if you use them; they MUST NOT define /start
+    # Comment out if you don't use these.
+    "handlers.panels",
     "handlers.menu",
-    "handlers.contact_admins",
-    "handlers.help_panel",
-    "handlers.enforce_requirements",
-    "handlers.req_handlers",
-    "handlers.flyer",
-    "handlers.flyer_scheduler",
-    "handlers.schedulemsg",
-    "handlers.moderation",
-    "handlers.warnings",
-    "handlers.federation",
-    "handlers.summon",
-    "handlers.xp",
-    "handlers.fun",
-    "handlers.health",
-    "handlers.bloop",
-    "handlers.whoami",
-    # DO NOT include dm_foolproof or any legacy /start module
+
+    # If you have the legacy callback shim that DOES NOT register /start, you can keep it:
+    # "handlers.dm_portal",
 ]
 
-def wire(path: str):
-    try:
-        mod = __import__(path, fromlist=["register"])
-        if hasattr(mod, "register"):
-            mod.register(bot)
-            log.info("✅ Wired: %s", path)
-        else:
-            log.warning("ℹ️ No register() in %s", path)
-    except Exception as e:
-        log.error("❌ Failed to wire %s: %s", path, e, exc_info=True)
-
-# Tiny health server
-fast = FastAPI(title="SuccuBot Worker", version="1.0")
-@fast.get("/")
-def ok():
-    return {"ok": True}
-
-def run_http():
-    uvicorn.run(fast, host="0.0.0.0", port=int(os.getenv("PORT", "10000")), log_level="info")
-
 if __name__ == "__main__":
-    os.makedirs("data", exist_ok=True)
     for m in MODULES:
         wire(m)
-    Thread(target=run_http, daemon=True).start()
     log.info("🚀 SuccuBot starting…")
-    bot.run()
+    app.start()
+    idle()
+    app.stop()
