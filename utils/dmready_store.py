@@ -1,26 +1,26 @@
 # utils/dmready_store.py
 from __future__ import annotations
-import os, json, time, threading
+import os, json, threading
 from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 import pytz
 
 # Mongo optional
 try:
-    from pymongo import MongoClient, errors as mongo_errors
+    from pymongo import MongoClient  # type: ignore
 except Exception:
-    mongo_errors = None
-    MongoClient = None
+    MongoClient = None  # type: ignore
 
 LA_TZ = pytz.timezone("America/Los_Angeles")
 
 def _now_iso_local() -> str:
-    """Return current time in America/Los_Angeles in readable format."""
+    """Readable timestamp in America/Los_Angeles."""
     return datetime.now(LA_TZ).strftime("%Y-%m-%d %I:%M:%S %p %Z")
 
 class _MongoStore:
     def __init__(self, uri: str, dbname: str, coll: str = "dm_ready"):
         self.client = MongoClient(uri, serverSelectionTimeoutMS=3000)
+        # get_database(dbname) – explicit db (avoids "default database" issues)
         self.db = self.client.get_database(dbname)
         self.col = self.db[coll]
         try:
@@ -34,10 +34,12 @@ class _MongoStore:
         result = self.col.update_one(
             {"user_id": user_id},
             {
+                # First write wins (keep original time)
                 "$setOnInsert": {
-                    "first_seen": now,
                     "user_id": user_id,
+                    "first_seen": now,
                 },
+                # Keep user display info fresh and track last_seen
                 "$set": {
                     "first_name": row.get("first_name"),
                     "username": row.get("username"),
@@ -46,11 +48,12 @@ class _MongoStore:
             },
             upsert=True,
         )
-        doc = self.col.find_one({"user_id": user_id}) or {}
+        doc = self.col.find_one({"user_id": user_id}, {"_id": 0}) or {}
         created = bool(getattr(result, "upserted_id", None))
         return created, doc
 
     def all(self) -> List[Dict]:
+        # sort by first_seen ascending
         return list(self.col.find({}, {"_id": 0}).sort([("first_seen", 1)]))
 
     def remove(self, user_id: int) -> bool:
@@ -119,6 +122,7 @@ class _JsonStore:
         self._save([])
 
 class DMReadyStore:
+    """Prefers Mongo when configured; falls back to JSON."""
     def __init__(self):
         self._mongo: Optional[_MongoStore] = None
         uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or ""
@@ -126,12 +130,12 @@ class DMReadyStore:
         if uri and dbn and MongoClient:
             try:
                 self._mongo = _MongoStore(uri, dbn)
-                _ = self._mongo.all()
+                _ = self._mongo.all()  # smoke test/selects
             except Exception:
                 self._mongo = None
         self._json = _JsonStore(os.getenv("DMREADY_DB", "data/dm_ready.json"))
 
-    def mark(self, user_id: int, first_name: str, username: Optional[str]):
+    def mark(self, user_id: int, first_name: str, username: str | None):
         row = {"user_id": user_id, "first_name": first_name, "username": username}
         if self._mongo:
             try:
