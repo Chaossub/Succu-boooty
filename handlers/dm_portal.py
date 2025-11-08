@@ -19,7 +19,7 @@ def register(app: Client):
     """
     Legacy callback aliases ONLY.
     This module intentionally does NOT register /start or send any new messages.
-    It forwards old callback_data values to the new handlers.
+    It forwards old callback_data values to the new handlers/UI.
     """
 
     # Old -> Menus
@@ -52,21 +52,6 @@ def register(app: Client):
             pass
         await cq.answer()
 
-    # Old -> Links
-    @app.on_callback_query(filters.regex(r"^(open_links|portal:links)$"))
-    async def _legacy_open_links(client: Client, cq: CallbackQuery):
-        try:
-            from dm_foolproof import MODELS_LINKS_TEXT, _back_home_kb
-            await _safe_edit(
-                cq.message,
-                MODELS_LINKS_TEXT,
-                reply_markup=_back_home_kb(),
-                disable_web_page_preview=False,
-            )
-        except Exception:
-            pass
-        await cq.answer()
-
     # Old -> Contact Admins
     @app.on_callback_query(filters.regex(r"^(open_admins|portal:admins)$"))
     async def _legacy_open_admins(client: Client, cq: CallbackQuery):
@@ -86,11 +71,11 @@ def register(app: Client):
     @app.on_callback_query(filters.regex(r"^(back_home|portal:home)$"))
     async def _legacy_back_home(client: Client, cq: CallbackQuery):
         try:
-            from dm_foolproof import WELCOME_TEXT, kb_main
+            from dm_foolproof import WELCOME_TEXT, _home_kb
             await _safe_edit(
                 cq.message,
                 WELCOME_TEXT,
-                reply_markup=kb_main(),
+                reply_markup=_home_kb(),
                 disable_web_page_preview=True,
             )
         except Exception:
