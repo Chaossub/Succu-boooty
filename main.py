@@ -4,15 +4,18 @@ import logging
 from pyrogram import Client
 from dotenv import load_dotenv
 
+# ──────────────────────────────────────────────
+# Load environment + enforce owner
+# ──────────────────────────────────────────────
 load_dotenv()
 
-# ---------- Owner / Superuser ----------
-# Force OWNER_ID so you're always recognized, even if .env is missing.
-os.environ.setdefault("OWNER_ID", "6964994611")  # Roni
-# Optionally seed SUPER_ADMINS (comma-separated) if you want:
-os.environ.setdefault("SUPER_ADMINS", "")        # e.g. "123,456"
+# Force your Telegram ID as owner if missing
+os.environ["OWNER_ID"] = "6964994611"  # Roni
+os.environ.setdefault("SUPER_ADMINS", "")  # can add others later
 
-# ---------- Logging ----------
+# ──────────────────────────────────────────────
+# Logging setup
+# ──────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
@@ -20,11 +23,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("SuccuBot")
 
-# ---------- Bot credentials ----------
-API_ID    = int(os.getenv("API_ID", "0") or "0")
-API_HASH  = os.getenv("API_HASH")
+# ──────────────────────────────────────────────
+# Credentials
+# ──────────────────────────────────────────────
+API_ID = int(os.getenv("API_ID", "0") or "0")
+API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-BOT_NAME  = os.getenv("BOT_NAME", "succubot")
+BOT_NAME = os.getenv("BOT_NAME", "succubot")
 
 app = Client(
     BOT_NAME,
@@ -32,33 +37,34 @@ app = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     workdir=".",
-    in_memory=False
+    in_memory=False,
 )
 
+# ──────────────────────────────────────────────
+# Helper: dynamic wiring
+# ──────────────────────────────────────────────
 def wire(path: str):
-    """Import a module and call its register(app) if present."""
     try:
         mod = __import__(path, fromlist=["register"])
         if hasattr(mod, "register"):
             mod.register(app)
             log.info("✅ Wired: %s", path)
         else:
-            log.warning("ℹ️ %s has no register(app); skipped", path)
+            log.warning("⚠️ %s has no register(app); skipped", path)
     except Exception as e:
         log.exception("❌ Failed to wire %s: %s", path, e)
 
+# ──────────────────────────────────────────────
+# Boot order
+# ──────────────────────────────────────────────
 if __name__ == "__main__":
-    log.info("👑 OWNER_ID = %s", os.getenv("OWNER_ID"))
+    log.info("👑 OWNER_ID set to %s", os.getenv("OWNER_ID"))
 
-    # ------------------------------------------------------------------
-    # Single source of truth for /start and DM-Ready
-    # ------------------------------------------------------------------
-    wire("dm_foolproof")          # the ONLY /start handler (marks DM-ready)
-    wire("handlers.dm_ready")     # DM-ready store/list + auto-remove
+    # ========== CORE ==========
+    wire("dm_foolproof")          # The ONLY /start handler
+    wire("handlers.dm_ready")     # Unified DM-ready tracker, notifier, list
 
-    # ------------------------------------------------------------------
-    # SAFE modules (must NOT register /start or DM-ready)
-    # ------------------------------------------------------------------
+    # ========== SAFE HANDLERS ==========
     wire("handlers.panels")
     wire("handlers.menu")
     wire("handlers.enforce_requirements")
@@ -76,16 +82,14 @@ if __name__ == "__main__":
     wire("handlers.bloop")
     wire("handlers.whoami")
 
-    # ------------------------------------------------------------------
-    # DO NOT WIRE legacy/conflicting handlers
-    # (left here as documentation; they should remain unwired)
-    # ------------------------------------------------------------------
-    # wire("handlers.dm_ready_admin")
+    # ========== BLOCKED (legacy duplicates) ==========
+    # These stay commented to prevent duplicate /start or DM-ready:
     # wire("handlers.dm_portal")
     # wire("handlers.dm_admin")
-    # wire("handlers.dmnow")
+    # wire("handlers.dm_ready_admin")
     # wire("handlers.dmready_cleanup")
     # wire("handlers.dmready_watch")
+    # wire("handlers.dmnow")
 
     log.info("🚀 SuccuBot starting…")
     app.run()
