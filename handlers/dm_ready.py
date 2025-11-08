@@ -1,14 +1,11 @@
 # handlers/dm_ready.py
 from __future__ import annotations
-import os
-import time
-import logging
+import os, json, time, logging
+from pathlib import Path
+from typing import Dict
+
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-
-# Use your existing JSON-backed store (already in your repo)
-# Falls back to JSON and persists across restarts.
-from utils.dmready_store import DMReadyStore
 
 log = logging.getLogger("dm_ready")
 
@@ -28,55 +25,109 @@ def _home_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❓ Help", callback_data="help")],
     ])
 
-_store = DMReadyStore()
+# --- ultra-simple persistence that always survives restarts ---
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+READY_FILE = DATA_DIR / "dm_ready.json"       # { "<user_id>": {...} }
+WELC_FILE  = DATA_DIR / "dm_welcomed.json"    # { "<user_id>": true }
+
+def _load_json(p: Path) -> Dict:
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _save_json(p: Path, obj: Dict):
+    tmp = p.with_suffix(".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+    tmp.replace(p)
 
 def _fmt_owner_line(user) -> str:
     uname = f"@{user.username}" if getattr(user, "username", None) else ""
     ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
     return f"✅ <b>DM-ready</b>: {user.first_name or 'User'} {uname}\n<code>{user.id}</code> • {ts}Z"
 
-async def _mark_dm_ready_once(client: Client, m: Message):
+async def _mark_dm_ready_once_and_maybe_welcome(client: Client, m: Message):
     if not m.from_user or m.from_user.is_bot:
         return
+
     u = m.from_user
-    # Check if already recorded
-    already = _store.get(u.id)
-    if already:
-        return
-    # Persist basic info
-    _store.add({
-        "id": u.id,
-        "user_id": u.id,               # for compatibility with older tools
-        "first_name": u.first_name or "",
-        "last_name": u.last_name or "",
-        "username": u.username or "",
-        "ts": int(time.time()),
-    })
-    # Notify owner quietly; ignore errors
-    if OWNER_ID:
-        try:
-            await client.send_message(OWNER_ID, _fmt_owner_line(u))
-        except Exception:
-            pass
+    uid_str = str(u.id)
 
-def register(app: Client):
+    # Load stores
+    ready = _load_json(READY_FILE)
+    welc  = _load_json(WELC_FILE)
 
-    # Expose a remover hook for cleanup/watch modules
-    async def _remove(uid: int):
-        try:
-            _store.remove_dm_ready_global(uid)
-        except Exception:
-            pass
-    setattr(app, "_succu_dm_store_remove", _remove)
+    # Add to DM-ready list if not present
+    if uid_str not in ready:
+        ready[uid_str] = {
+            "id": u.id,
+            "first_name": u.first_name or "",
+            "last_name": u.last_name or "",
+            "username": u.username or "",
+            "ts": int(time.time()),
+        }
+        _save_json(READY_FILE, ready)
+        # Ping owner
+        if OWNER_ID:
+            try:
+                await client.send_message(OWNER_ID, _fmt_owner_line(u))
+            except Exception:
+                pass
 
-    @app.on_message(filters.private & filters.command("start"))
-    async def _start(client: Client, m: Message):
-        # 1) mark DM-ready once
-        await _mark_dm_ready_once(client, m)
-        # 2) send the welcome with single, consistent UI
+    # Only show the big welcome ONCE lifetime per user
+    if not welc.get(uid_str, False):
         await m.reply_text(
             WELCOME_TEXT,
             reply_markup=_home_kb(),
             disable_web_page_preview=True
         )
-        log.info("Handled /start for %s", m.from_user.id if m.from_user else "unknown")
+        welc[uid_str] = True
+        _save_json(WELC_FILE, welc)
+    else:
+        # If they've already seen it once, keep silent to avoid duplicates
+        pass
+
+def register(app: Client):
+    # Expose remover hook for cleanup modules
+    async def _remove(uid: int):
+        try:
+            uid_str = str(uid)
+            ready = _load_json(READY_FILE)
+            if uid_str in ready:
+                del ready[uid_str]
+                _save_json(READY_FILE, ready)
+        except Exception:
+            pass
+    setattr(app, "_succu_dm_store_remove", _remove)
+
+    # The ONLY /start in the whole bot
+    @app.on_message(filters.private & filters.command("start"))
+    async def _start(client: Client, m: Message):
+        await _mark_dm_ready_once_and_maybe_welcome(client, m)
+
+    # Built-in owner command so it can’t “go missing”
+    @app.on_message(filters.private & filters.command("dmreadylist"))
+    async def _dmreadylist(client: Client, m: Message):
+        if not m.from_user or m.from_user.id != OWNER_ID:
+            return
+        data = _load_json(READY_FILE)
+        if not data:
+            return await m.reply_text("ℹ️ No one is marked DM-ready yet.")
+        rows = list(data.values())
+        rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        lines = ["✅ <b>DM-ready users</b>"]
+        for i, r in enumerate(rows, start=1):
+            uname = f"@{r.get('username')}" if r.get("username") else ""
+            lines.append(f"{i}. {r.get('first_name','User')} {uname} — <code>{r.get('id')}</code>")
+        await m.reply_text("\n".join(lines), disable_web_page_preview=True)
+
+    # Optional: clear list (owner only)
+    @app.on_message(filters.private & filters.command("dmreadyclear"))
+    async def _dmreadyclear(client: Client, m: Message):
+        if not m.from_user or m.from_user.id != OWNER_ID:
+            return
+        _save_json(READY_FILE, {})
+        await m.reply_text("🧹 Cleared DM-ready list.")
