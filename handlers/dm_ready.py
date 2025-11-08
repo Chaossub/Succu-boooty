@@ -8,8 +8,8 @@ from pyrogram.types import Message, ChatMemberUpdated
 from pyrogram.handlers import MessageHandler, ChatMemberUpdatedHandler
 
 # ==== CONFIG ====
-GROUP_ID = -1002823762054   # your main group
-OWNER_ID = 6964994611       # you (super admin for /dmreadylist)
+GROUP_ID = -1002823762054     # your main group
+OWNER_ID = 6964994611         # you (super admin for listing etc.)
 
 
 # ---------- Storage (Mongo first, JSON resilient fallback) ----------
@@ -154,7 +154,7 @@ class DMReadyStore:
 store = DMReadyStore()
 
 
-# ---------- Handlers ----------
+# ---------- Internal helpers ----------
 async def _notify_owner(client: Client, user_id: int, first_name: str, username: Optional[str], since_iso: str):
     tag = f"@{username}" if username else f"{first_name} ({user_id})"
     when = since_iso[:19].replace("T", " ")
@@ -170,7 +170,6 @@ async def _notify_owner(client: Client, user_id: int, first_name: str, username:
     except Exception:
         # owner hasn't started the bot yet or cannot be messaged; ignore
         pass
-
 
 async def _mark_and_ack(client: Client, user):
     newly_marked = store.mark_ready(
@@ -191,17 +190,18 @@ async def _mark_and_ack(client: Client, user):
     return newly_marked
 
 
-# 1) Mark on /start in private (your bot already greets in dm_foolproof; we only mark & notify)
+# ---------- Handlers ----------
+# A) Mark on /start in private — highest priority to beat older handlers
 async def on_start_private(client: Client, msg: Message):
     if msg.chat.type == enums.ChatType.PRIVATE and msg.from_user:
         await _mark_and_ack(client, msg.from_user)
 
-# 2) Also mark on any other private message (safety net)
+# B) Safety net: any other private message also marks (first time only)
 async def on_any_private(client: Client, msg: Message):
     if msg.chat.type == enums.ChatType.PRIVATE and msg.from_user:
         await _mark_and_ack(client, msg.from_user)
 
-# 3) Auto-remove when they leave your group
+# C) Auto-remove when they leave your group
 async def on_member_update(client: Client, event: ChatMemberUpdated):
     new = event.new_chat_member
     if not new:
@@ -212,40 +212,32 @@ async def on_member_update(client: Client, event: ChatMemberUpdated):
         if removed:
             print(f"[DM-READY] Removed {user_id} (left group)")
 
-# 4) OWNER-only: list DM-ready
+# D) OWNER-only: list DM-ready (works anywhere; ignored for others)
 async def dmready_list(client: Client, msg: Message):
     u = msg.from_user
     if not u or u.id != OWNER_ID:
         return  # super-admin only
-
     rows = store.list_all()
     if not rows:
         await msg.reply_text("No one is DM-ready yet.")
         return
-
     lines = []
     for r in rows[:100]:
         tag = f"@{r['username']}" if r.get("username") else f"{r.get('first_name','User')} ({r['user_id']})"
         when = r.get("since", "")[:19].replace("T", " ")
         lines.append(f"• {tag} — since {when} UTC")
-
-    extras = ""
     if len(rows) > 100:
-        extras = f"\n… and {len(rows) - 100} more."
-
+        lines.append(f"… and {len(rows) - 100} more.")
     await msg.reply_text(
-        f"**DM-ready users:** {len(rows)}\n" + "\n".join(lines) + extras,
+        f"**DM-ready users:** {len(rows)}\n" + "\n".join(lines),
         disable_web_page_preview=True
     )
 
 
 # ---------- Register for main.py ----------
 def register(app: Client):
-    # Mark on /start in private (no extra greeting text here to avoid duplicate)
-    app.add_handler(MessageHandler(on_start_private, filters.private & filters.command(["start"])))
-    # Mark on any other private message too (first time only shows confirmation once)
-    app.add_handler(MessageHandler(on_any_private, filters.private & ~filters.service & ~filters.command(["start"])))
-    # Auto-remove when leaving your group
-    app.add_handler(ChatMemberUpdatedHandler(on_member_update, filters.chat(GROUP_ID)))
-    # OWNER-only list command (works anywhere; ignored for others)
-    app.add_handler(MessageHandler(dmready_list, filters.command(["dmreadylist"])))
+    # Use group=0 (highest priority) so these run before older handlers that might swallow commands
+    app.add_handler(MessageHandler(on_start_private, filters.private & filters.command(["start"])), group=0)
+    app.add_handler(MessageHandler(on_any_private, filters.private & ~filters.service & ~filters.command(["start"])), group=0)
+    app.add_handler(ChatMemberUpdatedHandler(on_member_update, filters.chat(GROUP_ID)), group=0)
+    app.add_handler(MessageHandler(dmready_list, filters.command(["dmreadylist"])), group=0)
