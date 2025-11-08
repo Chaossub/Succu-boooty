@@ -1,8 +1,8 @@
 # handlers/dm_ready.py
 from __future__ import annotations
-import os, json, time, logging
+import os, json, time, logging, errno
 from pathlib import Path
-from typing import Dict, Set
+from typing import Dict
 
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
@@ -25,9 +25,11 @@ def _home_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❓ Help", callback_data="help")],
     ])
 
-# --- persistence (survives restarts) ---
+# ── persistence ───────────────────────────────────────────────────────────────
 DATA_DIR = Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
-READY_FILE = DATA_DIR / "dm_ready.json"       # { "<user_id>": {...} }
+LOCK_DIR = DATA_DIR / "locks"; LOCK_DIR.mkdir(parents=True, exist_ok=True)
+
+READY_FILE = DATA_DIR / "dm_ready.json"       # { "<user_id>": {..., "ts": int} }
 WELC_FILE  = DATA_DIR / "dm_welcomed.json"    # { "<user_id>": true }
 
 def _load_json(p: Path) -> Dict:
@@ -45,65 +47,96 @@ def _save_json(p: Path, obj: Dict):
 
 def _fmt_owner_line(user) -> str:
     uname = f"@{user.username}" if getattr(user, "username", None) else ""
-    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
-    return f"✅ <b>DM-ready</b>: {user.first_name or 'User'} {uname}\n<code>{user.id}</code> • {ts}Z"
+    ts_iso = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    return f"✅ <b>DM-ready</b>: {user.first_name or 'User'} {uname}\n<code>{user.id}</code> • {ts_iso}Z"
 
-# --- ultra-small de-dup to kill double /start triggers ---
-_INFLIGHT: Dict[int, float] = {}      # user_id -> last_ts
-DEDUP_WINDOW = 2.0                    # seconds
+# ── atomic per-user /start lock (prevents double welcome) ─────────────────────
+LOCK_TTL = 5  # seconds
 
-def _already_processing(uid: int) -> bool:
-    now = time.time()
-    last = _INFLIGHT.get(uid, 0.0)
-    if now - last < DEDUP_WINDOW:
+def _lock_path(uid: int) -> Path:
+    return LOCK_DIR / f"dmstart_{uid}.lock"
+
+def _try_lock(uid: int) -> bool:
+    """Create a lock file atomically. Return True if acquired, False if someone else holds it."""
+    p = _lock_path(uid)
+    now = int(time.time())
+    try:
+        # O_CREAT|O_EXCL ensures atomic "create only if missing"
+        fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, "w") as f:
+            f.write(str(now))
         return True
-    _INFLIGHT[uid] = now
-    # prune old
-    for k, ts in list(_INFLIGHT.items()):
-        if now - ts > 5 * DEDUP_WINDOW:
-            _INFLIGHT.pop(k, None)
-    return False
+    except OSError as e:
+        if e.errno != errno.EEXIST:
+            return False
+        # If exists but stale, reclaim
+        try:
+            with p.open("r") as f:
+                ts = int(f.read().strip() or "0")
+        except Exception:
+            ts = 0
+        if now - ts > LOCK_TTL:
+            try:
+                p.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return _try_lock(uid)
+        return False
 
+def _unlock(uid: int):
+    try:
+        _lock_path(uid).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+# ── core logic ────────────────────────────────────────────────────────────────
 async def _mark_dm_ready_once_and_maybe_welcome(client: Client, m: Message):
     if not m.from_user or m.from_user.is_bot:
         return
     u = m.from_user
-    if _already_processing(u.id):
-        return  # second handler fired within the window → ignore
+    uid = u.id
+    uid_str = str(uid)
 
-    uid_str = str(u.id)
+    # hard race guard
+    if not _try_lock(uid):
+        return
+    try:
+        ready = _load_json(READY_FILE)
+        welc  = _load_json(WELC_FILE)
 
-    ready = _load_json(READY_FILE)
-    welc  = _load_json(WELC_FILE)
+        # First-time DM-ready → store and ping owner
+        if uid_str not in ready:
+            ready[uid_str] = {
+                "id": uid,
+                "first_name": u.first_name or "",
+                "last_name": u.last_name or "",
+                "username": u.username or "",
+                "ts": int(time.time()),  # ORIGINAL mark time
+            }
+            _save_json(READY_FILE, ready)
+            if OWNER_ID:
+                try:
+                    await client.send_message(OWNER_ID, _fmt_owner_line(u))
+                except Exception:
+                    pass
 
-    if uid_str not in ready:
-        ready[uid_str] = {
-            "id": u.id,
-            "first_name": u.first_name or "",
-            "last_name": u.last_name or "",
-            "username": u.username or "",
-            "ts": int(time.time()),
-        }
-        _save_json(READY_FILE, ready)
-        if OWNER_ID:
-            try:
-                await client.send_message(OWNER_ID, _fmt_owner_line(u))
-            except Exception:
-                pass
-
-    if not welc.get(uid_str, False):
-        await m.reply_text(
-            WELCOME_TEXT,
-            reply_markup=_home_kb(),
-            disable_web_page_preview=True
-        )
-        welc[uid_str] = True
-        _save_json(WELC_FILE, welc)
+        # Welcome only once per user across restarts
+        if not welc.get(uid_str, False):
+            await m.reply_text(
+                WELCOME_TEXT,
+                reply_markup=_home_kb(),
+                disable_web_page_preview=True
+            )
+            welc[uid_str] = True
+            _save_json(WELC_FILE, welc)
+    finally:
+        _unlock(uid)
 
 def register(app: Client):
+    # expose remover for watchers
     async def _remove(uid: int):
+        uid_str = str(uid)
         try:
-            uid_str = str(uid)
             ready = _load_json(READY_FILE)
             if uid_str in ready:
                 del ready[uid_str]
@@ -123,11 +156,17 @@ def register(app: Client):
         data = _load_json(READY_FILE)
         if not data:
             return await m.reply_text("ℹ️ No one is marked DM-ready yet.")
-        rows = list(data.values()); rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+
+        # newest first
+        rows = list(data.values())
+        rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+
         lines = ["✅ <b>DM-ready users</b>"]
         for i, r in enumerate(rows, start=1):
             uname = f"@{r.get('username')}" if r.get("username") else ""
-            lines.append(f"{i}. {r.get('first_name','User')} {uname} — <code>{r.get('id')}</code>")
+            ts = int(r.get("ts", 0))
+            iso = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(ts)) + "Z"
+            lines.append(f"{i}. {r.get('first_name','User')} {uname} — <code>{r.get('id')}</code> • {iso}")
         await m.reply_text("\n".join(lines), disable_web_page_preview=True)
 
     @app.on_message(filters.private & filters.command("dmreadyclear"))
