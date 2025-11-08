@@ -4,18 +4,12 @@ import logging
 from pyrogram import Client
 from dotenv import load_dotenv
 
-# ──────────────────────────────────────────────
-# Load environment + enforce owner
-# ──────────────────────────────────────────────
 load_dotenv()
 
-# Force your Telegram ID as owner if missing
-os.environ["OWNER_ID"] = "6964994611"  # Roni
-os.environ.setdefault("SUPER_ADMINS", "")  # can add others later
+# Force owner so commands work even if .env is missing
+os.environ["OWNER_ID"] = "6964994611"              # Roni
+os.environ.setdefault("SUPER_ADMINS", "")          # comma-separated if you add any
 
-# ──────────────────────────────────────────────
-# Logging setup
-# ──────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
@@ -23,13 +17,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("SuccuBot")
 
-# ──────────────────────────────────────────────
-# Credentials
-# ──────────────────────────────────────────────
-API_ID = int(os.getenv("API_ID", "0") or "0")
-API_HASH = os.getenv("API_HASH")
+API_ID    = int(os.getenv("API_ID", "0") or "0")
+API_HASH  = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-BOT_NAME = os.getenv("BOT_NAME", "succubot")
+BOT_NAME  = os.getenv("BOT_NAME", "succubot")
 
 app = Client(
     BOT_NAME,
@@ -37,12 +28,9 @@ app = Client(
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
     workdir=".",
-    in_memory=False,
+    in_memory=False
 )
 
-# ──────────────────────────────────────────────
-# Helper: dynamic wiring
-# ──────────────────────────────────────────────
 def wire(path: str):
     try:
         mod = __import__(path, fromlist=["register"])
@@ -50,21 +38,18 @@ def wire(path: str):
             mod.register(app)
             log.info("✅ Wired: %s", path)
         else:
-            log.warning("⚠️ %s has no register(app); skipped", path)
+            log.warning("ℹ️ %s has no register(app); skipped", path)
     except Exception as e:
         log.exception("❌ Failed to wire %s: %s", path, e)
 
-# ──────────────────────────────────────────────
-# Boot order
-# ──────────────────────────────────────────────
 if __name__ == "__main__":
-    log.info("👑 OWNER_ID set to %s", os.getenv("OWNER_ID"))
+    log.info("👑 OWNER_ID = %s", os.getenv("OWNER_ID"))
 
-    # ========== CORE ==========
-    wire("dm_foolproof")          # The ONLY /start handler
-    wire("handlers.dm_ready")     # Unified DM-ready tracker, notifier, list
+    # Single /start + unified DM-ready
+    wire("dm_foolproof")          # the ONLY /start
+    wire("handlers.dm_ready")     # DM-ready store, list, auto-remove, ping owner
 
-    # ========== SAFE HANDLERS ==========
+    # Safe modules (no /start & no DM-ready in these)
     wire("handlers.panels")
     wire("handlers.menu")
     wire("handlers.enforce_requirements")
@@ -82,8 +67,7 @@ if __name__ == "__main__":
     wire("handlers.bloop")
     wire("handlers.whoami")
 
-    # ========== BLOCKED (legacy duplicates) ==========
-    # These stay commented to prevent duplicate /start or DM-ready:
+    # Leave these UNWIRED to avoid conflicts
     # wire("handlers.dm_portal")
     # wire("handlers.dm_admin")
     # wire("handlers.dm_ready_admin")
@@ -93,4 +77,3 @@ if __name__ == "__main__":
 
     log.info("🚀 SuccuBot starting…")
     app.run()
-
