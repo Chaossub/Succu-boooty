@@ -1,4 +1,4 @@
-# handlers/dm_ready.py — single source of truth for /start + DM-ready
+# handlers/dm_ready.py
 from __future__ import annotations
 import os
 from pyrogram import Client, filters
@@ -26,12 +26,7 @@ def register(app: Client):
     async def _start(client: Client, m: Message):
         u = m.from_user
         if u and not u.is_bot:
-            created, doc = store.mark(
-                user_id=u.id,
-                first_name=u.first_name or "User",
-                username=u.username
-            )
-            # Notify owner once (only when first created)
+            created, doc = store.mark(u.id, u.first_name or "User", u.username)
             if created and OWNER_ID:
                 handle = f"@{u.username}" if u.username else ""
                 when = doc.get("first_seen", "—")
@@ -49,3 +44,4 @@ def register(app: Client):
             reply_markup=_home_kb(),
             disable_web_page_preview=True,
         )
+
