@@ -1,11 +1,19 @@
 # dm_foolproof.py
-from pyrogram import Client, filters, enums
+# Simple welcome system (no DM-ready logic)
+from __future__ import annotations
+import logging
+from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import MessageNotModified
-from handlers.dm_ready import mark_from_start
+from utils.mongo_helpers import get_mongo
+
+log = logging.getLogger("dm_foolproof")
+
+_mongo_client, _mongo_db = get_mongo()
+log.info("dm_foolproof wired (mongo=%s)", _mongo_db is not None)
 
 WELCOME_TEXT = (
-    "🔥 **Welcome to SuccuBot** 🔥\n"
+    "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
     "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
     "✨ Use the menu below to navigate!"
 )
@@ -30,12 +38,8 @@ async def _safe_edit(msg, text: str, **kwargs):
         return
 
 def register(app: Client):
-
     @app.on_message(filters.command("start"))
-    async def _start(c: Client, m):
-        if m.chat and m.chat.type == enums.ChatType.PRIVATE and m.from_user:
-            await mark_from_start(c, m.from_user)
-
+    async def _start(_: Client, m):
         await m.reply_text(
             WELCOME_TEXT,
             reply_markup=_home_kb(),
