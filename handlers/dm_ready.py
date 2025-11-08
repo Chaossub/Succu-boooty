@@ -8,6 +8,7 @@ from typing import Dict, Any
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from pyrogram.enums import ChatType
 
 from utils.mongo_helpers import get_mongo
 from utils.dmready_store import DMReadyStore
@@ -16,6 +17,9 @@ log = logging.getLogger("dm_ready")
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 WATCH_GROUP_ID = int(os.getenv("DMREADY_WATCH_GROUP", "-1002823762054") or "-1002823762054")
+
+# Ensure local data dir exists (for JSON fallback persistence)
+os.makedirs("data", exist_ok=True)
 
 _mongo_client, _mongo_db = get_mongo()
 mongo_ok = _mongo_db is not None
@@ -81,7 +85,8 @@ def register(app: Client):
 
     @app.on_message(filters.command("start"))
     async def _mark_on_start(client: Client, m: Message):
-        if not m.from_user or m.chat.type.name != "PRIVATE":
+        # Must be a private DM with the bot
+        if not m.from_user or m.chat is None or m.chat.type != ChatType.PRIVATE:
             return
 
         uid = m.from_user.id
@@ -92,6 +97,7 @@ def register(app: Client):
         if _add_ready(doc):
             await _notify_owner(client, doc)
 
+    # expose remover for dmready_cleanup/dmready_watch
     async def _remove(user_id: int) -> bool:
         if mongo_ok and _coll is not None:
             try:
