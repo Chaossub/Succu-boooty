@@ -1,111 +1,82 @@
 # handlers/dm_ready.py
-# Marks users as DM-ready on /start and stores persistently
 from __future__ import annotations
 import os
 import time
 import logging
-from typing import Dict, Any
-
 from pyrogram import Client, filters
-from pyrogram.types import Message
-from pyrogram.enums import ChatType
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 
-from utils.mongo_helpers import get_mongo
+# Use your existing JSON-backed store (already in your repo)
+# Falls back to JSON and persists across restarts.
 from utils.dmready_store import DMReadyStore
 
 log = logging.getLogger("dm_ready")
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
-WATCH_GROUP_ID = int(os.getenv("DMREADY_WATCH_GROUP", "-1002823762054") or "-1002823762054")
 
-# Ensure local data dir exists (for JSON fallback persistence)
-os.makedirs("data", exist_ok=True)
+WELCOME_TEXT = (
+    "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
+    "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+    "✨ Use the menu below to navigate!"
+)
 
-_mongo_client, _mongo_db = get_mongo()
-mongo_ok = _mongo_db is not None
-if mongo_ok:
-    try:
-        _coll = _mongo_db["dm_ready"]
-        _coll.create_index("user_id", unique=True)
-    except Exception as e:
-        log.error("Mongo collection prep failed: %s", e)
-        _coll = None
-        mongo_ok = False
-else:
-    _coll = None
+def _home_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💕 Menus", callback_data="menus")],
+        [InlineKeyboardButton("👑 Contact Admins", callback_data="admins")],
+        [InlineKeyboardButton("🔥 Find Our Models Elsewhere", callback_data="models")],
+        [InlineKeyboardButton("❓ Help", callback_data="help")],
+    ])
 
 _store = DMReadyStore()
 
-def _now_iso() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+def _fmt_owner_line(user) -> str:
+    uname = f"@{user.username}" if getattr(user, "username", None) else ""
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+    return f"✅ <b>DM-ready</b>: {user.first_name or 'User'} {uname}\n<code>{user.id}</code> • {ts}Z"
 
-def _doc_from_message(m: Message) -> Dict[str, Any]:
+async def _mark_dm_ready_once(client: Client, m: Message):
+    if not m.from_user or m.from_user.is_bot:
+        return
     u = m.from_user
-    return {
-        "user_id": u.id,
+    # Check if already recorded
+    already = _store.get(u.id)
+    if already:
+        return
+    # Persist basic info
+    _store.add({
+        "id": u.id,
+        "user_id": u.id,               # for compatibility with older tools
         "first_name": u.first_name or "",
         "last_name": u.last_name or "",
         "username": u.username or "",
-        "when": _now_iso(),
-    }
-
-def _already_marked(user_id: int) -> bool:
-    if mongo_ok and _coll is not None:
+        "ts": int(time.time()),
+    })
+    # Notify owner quietly; ignore errors
+    if OWNER_ID:
         try:
-            return _coll.find_one({"user_id": user_id}) is not None
+            await client.send_message(OWNER_ID, _fmt_owner_line(u))
         except Exception:
-            return _store.exists(user_id)
-    return _store.exists(user_id)
-
-def _add_ready(doc: Dict[str, Any]) -> bool:
-    if mongo_ok and _coll is not None:
-        try:
-            _coll.update_one({"user_id": doc["user_id"]}, {"$set": doc}, upsert=True)
-            return True
-        except Exception as e:
-            log.warning("Mongo upsert failed: %s", e)
-    return _store.add(doc)
-
-async def _notify_owner(app: Client, doc: Dict[str, Any]) -> None:
-    if not OWNER_ID:
-        return
-    handle = f"@{doc['username']}" if doc.get("username") else ""
-    txt = (
-        f"✅ <b>DM-ready</b>: {doc.get('first_name','User')} {handle}\n"
-        f"<code>{doc['user_id']}</code> • {doc['when']}"
-    )
-    try:
-        await app.send_message(OWNER_ID, txt, disable_web_page_preview=True)
-    except Exception:
-        pass
+            pass
 
 def register(app: Client):
-    log.info("✅ dm_ready wired (owner=%s, group=%s, mongo=%s)",
-             OWNER_ID, WATCH_GROUP_ID, mongo_ok)
 
-    @app.on_message(filters.command("start"))
-    async def _mark_on_start(client: Client, m: Message):
-        # Must be a private DM with the bot
-        if not m.from_user or m.chat is None or m.chat.type != ChatType.PRIVATE:
-            return
-
-        uid = m.from_user.id
-        if _already_marked(uid):
-            return
-
-        doc = _doc_from_message(m)
-        if _add_ready(doc):
-            await _notify_owner(client, doc)
-
-    # expose remover for dmready_cleanup/dmready_watch
-    async def _remove(user_id: int) -> bool:
-        if mongo_ok and _coll is not None:
-            try:
-                res = _coll.delete_one({"user_id": user_id})
-                if res.deleted_count:
-                    return True
-            except Exception:
-                pass
-        return _store.remove(user_id)
-
+    # Expose a remover hook for cleanup/watch modules
+    async def _remove(uid: int):
+        try:
+            _store.remove_dm_ready_global(uid)
+        except Exception:
+            pass
     setattr(app, "_succu_dm_store_remove", _remove)
+
+    @app.on_message(filters.private & filters.command("start"))
+    async def _start(client: Client, m: Message):
+        # 1) mark DM-ready once
+        await _mark_dm_ready_once(client, m)
+        # 2) send the welcome with single, consistent UI
+        await m.reply_text(
+            WELCOME_TEXT,
+            reply_markup=_home_kb(),
+            disable_web_page_preview=True
+        )
+        log.info("Handled /start for %s", m.from_user.id if m.from_user else "unknown")
