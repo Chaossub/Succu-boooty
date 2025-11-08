@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ---------- Logging ----------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
@@ -14,7 +13,6 @@ logging.basicConfig(
 )
 log = logging.getLogger("SuccuBot")
 
-# ---------- Bot credentials ----------
 API_ID    = int(os.getenv("API_ID", "0") or "0")
 API_HASH  = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -30,33 +28,24 @@ app = Client(
 )
 
 def wire(path: str):
-    """Import a module and call its register(app) if present."""
     try:
         mod = __import__(path, fromlist=["register"])
         if hasattr(mod, "register"):
             mod.register(app)
             log.info("✅ Wired: %s", path)
         else:
-            log.warning("ℹ️  %s has no register(app); skipped", path)
+            log.warning("ℹ️ %s has no register(app); skipped", path)
     except Exception as e:
         log.exception("❌ Failed to wire %s: %s", path, e)
 
-
 if __name__ == "__main__":
-    # ------------------------------------------------------------------
-    # IMPORTANT: Only ONE /start source and ONE DM-ready implementation.
-    # ------------------------------------------------------------------
-    # /start (welcome) lives ONLY here:
-    wire("dm_foolproof")
+    # Only one /start, only one DM-ready implementation
+    wire("dm_foolproof")          # the ONLY /start handler
+    wire("handlers.dm_ready")     # DM-ready store/list + auto-remove
 
-    # DM-ready storage + owner tools + auto-remove on leave:
-    wire("handlers.dm_ready")
-
-    # ------------------------------------------------------------------
-    # SAFE modules (must NOT register /start or DM-ready themselves)
-    # ------------------------------------------------------------------
+    # SAFE modules (must not register /start or DM-ready)
     wire("handlers.panels")
-    wire("handlers.menu")              # safe; no /start
+    wire("handlers.menu")
     wire("handlers.enforce_requirements")
     wire("handlers.req_handlers")
     wire("handlers.flyer")
@@ -72,16 +61,13 @@ if __name__ == "__main__":
     wire("handlers.bloop")
     wire("handlers.whoami")
 
-    # ------------------------------------------------------------------
-    # DO NOT WIRE THESE (legacy/overlapping handlers):
-    # ------------------------------------------------------------------
-    # wire("handlers.dm_ready_admin")   # legacy DM-ready admin
-    # wire("handlers.dm_portal")        # may touch /start or DM-ready
-    # wire("handlers.dm_admin")         # legacy DM controls
-    # wire("handlers.dmnow")            # legacy DM list/now
-    # wire("handlers.dmready_cleanup")  # merged into handlers.dm_ready
-    # wire("handlers.dmready_watch")    # merged into handlers.dm_ready
-    # (Leave commented out to avoid duplicate logic.)
+    # DO NOT WIRE legacy/conflicting handlers:
+    # wire("handlers.dm_ready_admin")
+    # wire("handlers.dm_portal")
+    # wire("handlers.dm_admin")
+    # wire("handlers.dmnow")
+    # wire("handlers.dmready_cleanup")
+    # wire("handlers.dmready_watch")
 
     log.info("🚀 SuccuBot starting…")
     app.run()
