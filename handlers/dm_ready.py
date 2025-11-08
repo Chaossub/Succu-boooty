@@ -1,193 +1,142 @@
 # handlers/dm_ready.py
-import os, json, threading
-from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List
+import os
+import json
+import time
+import logging
+from typing import Dict, Any, List
 
-from pyrogram import Client, filters, enums
-from pyrogram.types import Message, ChatMemberUpdated
-from pyrogram.handlers import MessageHandler, ChatMemberUpdatedHandler
+from pyrogram import Client, filters
+from pyrogram.types import Message, User, ChatMemberUpdated
+from pyrogram.enums import ChatType, ChatMemberStatus
 
-GROUP_ID = -1002823762054
-OWNER_ID = 6964994611
+log = logging.getLogger("dm_ready")
 
-class DMReadyStore:
-    def __init__(self):
-        self._lock = threading.RLock()
-        self._mongo_ok = False
-        self._coll = None
-        self._init_mongo()
-        self._json_path = os.path.join("data", "dm_ready.json")
-        os.makedirs("data", exist_ok=True)
-        if not os.path.exists(self._json_path):
-            with open(self._json_path, "w", encoding="utf-8") as f:
-                json.dump({"users": {}}, f)
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
+SUPER_ADMINS = {
+    int(x) for x in (
+        os.getenv("SUPER_ADMINS", "").replace(" ", "").split(",")
+        if os.getenv("SUPER_ADMINS") else []
+    ) if x
+}
 
-    def _init_mongo(self):
-        uri = os.getenv("MONGO_URI")
-        if not uri:
-            self._mongo_ok = False
-            return
+SANCTUARY_GROUP_ID = int(os.getenv("SANCTUARY_GROUP_ID", "-1002823762054"))
+
+DB_PATH = os.getenv("DMREADY_DB", "data/dm_ready.json")
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+
+# --------- Tiny JSON store (persistent across restarts) ---------
+class _Store:
+    def __init__(self, path: str):
+        self.path = path
+        self._data: Dict[str, Dict[str, Any]] = {}
+        self._load()
+
+    def _load(self):
         try:
-            from pymongo import MongoClient, ASCENDING
-            db_name = os.getenv("MONGO_DB") or os.getenv("MONGO_DB_NAME") or "chaossunflowerbusiness321"
-            self._mongo = MongoClient(uri, serverSelectionTimeoutMS=2000)
-            self._db = self._mongo[db_name]
-            self._coll = self._db["dm_ready"]
-            self._coll.create_index([("user_id", ASCENDING)], unique=True)
-            self._db.command("ping")
-            self._mongo_ok = True
+            with open(self.path, "r", encoding="utf-8") as f:
+                self._data = json.load(f)
         except Exception:
-            self._mongo_ok = False
-            self._coll = None
+            self._data = {}
 
-    def _fallback_to_json(self):
-        self._mongo_ok = False
-        self._coll = None
+    def _save(self):
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self._data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.path)
 
-    def _now_iso(self) -> str:
-        return datetime.now(timezone.utc).isoformat()
+    def get(self, uid: int) -> Dict[str, Any] | None:
+        return self._data.get(str(uid))
 
-    def _json_load(self) -> Dict[str, Any]:
-        with self._lock:
-            with open(self._json_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+    def set(self, uid: int, row: Dict[str, Any]) -> None:
+        self._data[str(uid)] = row
+        self._save()
 
-    def _json_save(self, data: Dict[str, Any]) -> None:
-        with self._lock:
-            tmp = self._json_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, self._json_path)
-
-    def mark_ready(self, user_id: int, first_name: str, username: Optional[str]) -> bool:
-        if self._mongo_ok and self._coll is not None:
-            try:
-                if self._coll.find_one({"user_id": user_id}):
-                    return False
-                self._coll.insert_one({
-                    "user_id": user_id,
-                    "first_name": first_name,
-                    "username": username,
-                    "since": self._now_iso()
-                })
-                return True
-            except Exception:
-                self._fallback_to_json()
-
-        data = self._json_load()
-        users = data.setdefault("users", {})
-        if str(user_id) in users:
-            return False
-        users[str(user_id)] = {
-            "first_name": first_name,
-            "username": username,
-            "since": self._now_iso()
-        }
-        self._json_save(data)
-        return True
-
-    def remove(self, user_id: int) -> bool:
-        if self._mongo_ok and self._coll is not None:
-            try:
-                res = self._coll.delete_one({"user_id": user_id})
-                return bool(res.deleted_count)
-            except Exception:
-                self._fallback_to_json()
-
-        data = self._json_load()
-        users = data.get("users", {})
-        if str(user_id) in users:
-            users.pop(str(user_id), None)
-            data["users"] = users
-            self._json_save(data)
+    def remove(self, uid: int) -> bool:
+        if str(uid) in self._data:
+            self._data.pop(str(uid), None)
+            self._save()
             return True
         return False
 
-    def list_all(self) -> List[Dict[str, Any]]:
-        if self._mongo_ok and self._coll is not None:
-            try:
-                return list(self._coll.find({}, {"_id": 0}).sort("since", 1))
-            except Exception:
-                self._fallback_to_json()
+    def all(self) -> List[Dict[str, Any]]:
+        return list(self._data.values())
 
-        data = self._json_load()
-        out = []
-        for k, v in data.get("users", {}).items():
-            row = {"user_id": int(k)}
-            row.update(v)
-            out.append(row)
-        out.sort(key=lambda r: r.get("since") or "")
-        return out
+_store = _Store(DB_PATH)
 
-    def get(self, user_id: int) -> Optional[Dict[str, Any]]:
-        if self._mongo_ok and self._coll is not None:
-            try:
-                doc = self._coll.find_one({"user_id": user_id}, {"_id": 0})
-                if doc:
-                    return doc
-            except Exception:
-                self._fallback_to_json()
-        data = self._json_load()
-        v = data.get("users", {}).get(str(user_id))
-        return {"user_id": user_id, **v} if v else None
+def _is_owner_or_super(uid: int) -> bool:
+    return uid == OWNER_ID or uid in SUPER_ADMINS
 
-store = DMReadyStore()
+# --------- Public helper used by dm_foolproof ---------
+async def mark_from_start(client: Client, u: User):
+    """Idempotently mark a user DM-ready and ping owner once."""
+    if not u or u.is_bot:
+        return
 
-async def _notify_owner(client: Client, user_id: int, first_name: str, username: Optional[str], since_iso: str):
-    tag = f"@{username}" if username else f"{first_name} ({user_id})"
-    when = since_iso[:19].replace("T", " ")
-    text = (
-        "🔔 *New DM-Ready*\n"
-        f"• Name: {first_name}\n"
-        f"• User: {tag}\n"
-        f"• ID: `{user_id}`\n"
-        f"• Time: {when} UTC"
-    )
-    try:
-        await client.send_message(OWNER_ID, text, disable_web_page_preview=True)
-    except Exception:
-        pass
+    exists = _store.get(u.id)
+    if exists:
+        return  # already marked; do not spam owner
 
-# called by dm_foolproof on /start
-async def mark_from_start(client: Client, user) -> bool:
-    newly = store.mark_ready(user.id, user.first_name or "", user.username)
-    if newly:
+    now = int(time.time())
+    row = {
+        "user_id": u.id,
+        "first_name": u.first_name,
+        "last_name": u.last_name,
+        "username": u.username,
+        "when_ts": now,
+    }
+    _store.set(u.id, row)
+
+    # Notify owner
+    if OWNER_ID:
+        name = u.first_name or "User"
+        handle = f" @{u.username}" if u.username else ""
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
         try:
-            await client.send_message(user.id, "You’re now DM-ready ✅")
-        except Exception:
-            pass
-        rec = store.get(user.id)
-        since_iso = rec.get("since") if rec else datetime.now(timezone.utc).isoformat()
-        await _notify_owner(client, user.id, user.first_name or "User", user.username, since_iso)
-    return newly
-
-async def on_any_private(client: Client, msg: Message):
-    if msg.chat.type == enums.ChatType.PRIVATE and msg.from_user:
-        await mark_from_start(client, msg.from_user)
-
-async def on_member_update(client: Client, ev: ChatMemberUpdated):
-    st = ev.new_chat_member.status if ev.new_chat_member else None
-    if st in (enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.KICKED):
-        if store.remove(ev.new_chat_member.user.id):
-            print(f"[DM-READY] Removed {ev.new_chat_member.user.id} (left group)")
-
-async def dmready_list_cmd(client: Client, msg: Message):
-    if not msg.from_user or msg.from_user.id != OWNER_ID:
-        return
-    rows = store.list_all()
-    if not rows:
-        await msg.reply_text("No one is DM-ready yet.")
-        return
-    lines = []
-    for r in rows[:100]:
-        tag = f"@{r['username']}" if r.get("username") else f"{r.get('first_name','User')} ({r['user_id']})"
-        when = r.get("since","")[:19].replace("T"," ")
-        lines.append(f"• {tag} — since {when} UTC")
-    if len(rows) > 100:
-        lines.append(f"… and {len(rows) - 100} more.")
-    await msg.reply_text(f"**DM-ready users:** {len(rows)}\n" + "\n".join(lines), disable_web_page_preview=True)
+            await client.send_message(
+                OWNER_ID,
+                f"✅ <b>DM-ready:</b> {name}{handle}\n"
+                f"<code>{u.id}</code> • {ts}",
+                disable_web_page_preview=True
+            )
+        except Exception as e:
+            log.warning("Owner ping failed: %s", e)
 
 def register(app: Client):
-    app.add_handler(MessageHandler(on_any_private, filters.private & ~filters.service & ~filters.command(["start"])), group=0)
-    app.add_handler(ChatMemberUpdatedHandler(on_member_update, filters.chat(GROUP_ID)), group=0)
-    app.add_handler(MessageHandler(dmready_list_cmd, filters.command(["dmreadylist"])), group=0)
+    log.info("✅ dm_ready wired (owner=%s, group=%s, db=%s)", OWNER_ID, SANCTUARY_GROUP_ID, DB_PATH)
+
+    # --------- Admin list ----------
+    @app.on_message(filters.command("dmreadylist"))
+    async def _dmready_list(c: Client, m: Message):
+        uid = m.from_user.id if m.from_user else 0
+        if not _is_owner_or_super(uid):
+            return await m.reply_text("❌ You’re not allowed to use this command.")
+
+        rows = sorted(_store.all(), key=lambda r: r.get("when_ts", 0), reverse=True)
+        if not rows:
+            return await m.reply_text("ℹ️ No one is marked DM-ready yet.")
+
+        lines = ["✅ <b>DM-ready users</b>"]
+        for i, r in enumerate(rows, start=1):
+            handle = f"@{r.get('username')}" if r.get("username") else ""
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r.get("when_ts", 0)))
+            lines.append(f"{i}. {r.get('first_name','User')} {handle} — <code>{r['user_id']}</code> • {ts}")
+
+        await m.reply_text("\n".join(lines), disable_web_page_preview=True)
+
+    # --------- Auto-remove on leave/kick/ban in Sanctuary ----------
+    @app.on_chat_member_updated()
+    async def _on_member_updated(c: Client, upd: ChatMemberUpdated):
+        chat = upd.chat
+        if not chat or chat.type == ChatType.PRIVATE or chat.id != SANCTUARY_GROUP_ID:
+            return
+
+        user = (upd.new_chat_member.user
+                if upd and upd.new_chat_member and upd.new_chat_member.user
+                else (upd.old_chat_member.user if upd and upd.old_chat_member else None))
+        if not user:
+            return
+
+        if upd.new_chat_member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+            removed = _store.remove(user.id)
+            if removed:
+                log.info("🧹 Removed DM-ready for %s (%s) after leaving Sanctuary", user.first_name, user.id)
