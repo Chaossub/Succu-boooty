@@ -1,51 +1,50 @@
 # utils/dmready_store.py
 from __future__ import annotations
 import os, json, time, threading
+from datetime import datetime
 from typing import Optional, List, Dict, Tuple
+import pytz
 
 # Mongo optional
-_MONGO_ERR = None
 try:
     from pymongo import MongoClient, errors as mongo_errors
-except Exception as e:  # pragma: no cover
+except Exception:
     mongo_errors = None
     MongoClient = None
-    _MONGO_ERR = e  # informative only
 
-def _now_iso() -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+LA_TZ = pytz.timezone("America/Los_Angeles")
+
+def _now_iso_local() -> str:
+    """Return current time in America/Los_Angeles in readable format."""
+    return datetime.now(LA_TZ).strftime("%Y-%m-%d %I:%M:%S %p %Z")
 
 class _MongoStore:
     def __init__(self, uri: str, dbname: str, coll: str = "dm_ready"):
         self.client = MongoClient(uri, serverSelectionTimeoutMS=3000)
         self.db = self.client.get_database(dbname)
         self.col = self.db[coll]
-        # ensure unique user_id
         try:
             self.col.create_index("user_id", unique=True)
         except Exception:
             pass
 
     def mark(self, row: Dict) -> Tuple[bool, Dict]:
-        """Upsert that preserves first_seen; returns (created, doc)."""
         user_id = row["user_id"]
-        now = _now_iso()
+        now = _now_iso_local()
         result = self.col.update_one(
             {"user_id": user_id},
             {
-                # preserve first_seen on insert
                 "$setOnInsert": {
                     "first_seen": now,
                     "user_id": user_id,
                 },
-                # but keep fresh profile bits
                 "$set": {
                     "first_name": row.get("first_name"),
                     "username": row.get("username"),
                     "last_seen": now,
-                }
+                },
             },
-            upsert=True
+            upsert=True,
         )
         doc = self.col.find_one({"user_id": user_id}) or {}
         created = bool(getattr(result, "upserted_id", None))
@@ -81,16 +80,14 @@ class _JsonStore:
 
     def _save(self, rows: List[Dict]) -> None:
         with self._lock:
-            tmp = {"rows": rows}
             with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(tmp, f, ensure_ascii=False, indent=2)
+                json.dump({"rows": rows}, f, ensure_ascii=False, indent=2)
 
     def mark(self, row: Dict) -> Tuple[bool, Dict]:
         rows = self._load()
-        now = _now_iso()
+        now = _now_iso_local()
         for r in rows:
             if r["user_id"] == row["user_id"]:
-                # update profile and last_seen only
                 r["first_name"] = row.get("first_name")
                 r["username"] = row.get("username")
                 r["last_seen"] = now
@@ -104,7 +101,6 @@ class _JsonStore:
             "last_seen": now,
         }
         rows.append(newr)
-        rows.sort(key=lambda x: x["first_seen"])
         self._save(rows)
         return True, newr
 
@@ -113,32 +109,29 @@ class _JsonStore:
 
     def remove(self, user_id: int) -> bool:
         rows = self._load()
-        n2 = [r for r in rows if r["user_id"] != user_id]
-        changed = len(n2) != len(rows)
+        new_rows = [r for r in rows if r["user_id"] != user_id]
+        changed = len(new_rows) != len(rows)
         if changed:
-            self._save(n2)
+            self._save(new_rows)
         return changed
 
     def clear(self) -> None:
         self._save([])
 
 class DMReadyStore:
-    """Mongo-backed if possible; JSON fallback."""
     def __init__(self):
         self._mongo: Optional[_MongoStore] = None
         uri = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or ""
         dbn = os.getenv("MONGO_DBNAME") or os.getenv("MONGO_DB") or ""
-        if uri and dbn and MongoClient is not None:
+        if uri and dbn and MongoClient:
             try:
                 self._mongo = _MongoStore(uri, dbn)
-                # quick probe
                 _ = self._mongo.all()
             except Exception:
-                self._mongo = None  # fallback to JSON
+                self._mongo = None
         self._json = _JsonStore(os.getenv("DMREADY_DB", "data/dm_ready.json"))
 
-    # API
-    def mark(self, user_id: int, first_name: str, username: Optional[str]) -> Tuple[bool, Dict]:
+    def mark(self, user_id: int, first_name: str, username: Optional[str]):
         row = {"user_id": user_id, "first_name": first_name, "username": username}
         if self._mongo:
             try:
@@ -173,5 +166,4 @@ class DMReadyStore:
                 pass
         self._json.clear()
 
-# shared singleton (some handlers import this)
 global_store = DMReadyStore()
