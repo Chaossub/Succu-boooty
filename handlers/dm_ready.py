@@ -1,16 +1,19 @@
-# handlers/dm_ready.py
+# handlers/dm_ready.py  — MongoDB-backed DM-ready tracker
 import os
-import json
 import time
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, User, ChatMemberUpdated
 from pyrogram.enums import ChatType, ChatMemberStatus
 
+from pymongo import MongoClient, ASCENDING
+from pymongo.errors import DuplicateKeyError
+
 log = logging.getLogger("dm_ready")
 
+# ---- Owner / admins ----
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 SUPER_ADMINS = {
     int(x) for x in (
@@ -19,90 +22,110 @@ SUPER_ADMINS = {
     ) if x
 }
 
-SANCTUARY_GROUP_ID = int(os.getenv("SANCTUARY_GROUP_ID", "-1002823762054"))
-
-DB_PATH = os.getenv("DMREADY_DB", "data/dm_ready.json")
-os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
-# --------- Tiny JSON store (persistent across restarts) ---------
-class _Store:
-    def __init__(self, path: str):
-        self.path = path
-        self._data: Dict[str, Dict[str, Any]] = {}
-        self._load()
-
-    def _load(self):
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                self._data = json.load(f)
-        except Exception:
-            self._data = {}
-
-    def _save(self):
-        tmp = self.path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, self.path)
-
-    def get(self, uid: int) -> Dict[str, Any] | None:
-        return self._data.get(str(uid))
-
-    def set(self, uid: int, row: Dict[str, Any]) -> None:
-        self._data[str(uid)] = row
-        self._save()
-
-    def remove(self, uid: int) -> bool:
-        if str(uid) in self._data:
-            self._data.pop(str(uid), None)
-            self._save()
-            return True
-        return False
-
-    def all(self) -> List[Dict[str, Any]]:
-        return list(self._data.values())
-
-_store = _Store(DB_PATH)
-
 def _is_owner_or_super(uid: int) -> bool:
     return uid == OWNER_ID or uid in SUPER_ADMINS
 
-# --------- Public helper used by dm_foolproof ---------
-async def mark_from_start(client: Client, u: User):
-    """Idempotently mark a user DM-ready and ping owner once."""
-    if not u or u.is_bot:
-        return
+# ---- Sanctuary group for auto-removal ----
+SANCTUARY_GROUP_ID = int(os.getenv("SANCTUARY_GROUP_ID", "-1002823762054"))
 
-    exists = _store.get(u.id)
-    if exists:
-        return  # already marked; do not spam owner
+# ---- Mongo client / DB / collection ----
+MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
+if not MONGO_URI:
+    # keep a loud log so you notice quickly
+    log.warning("MONGODB_URI not set; dm_ready will FAIL to persist.")
+client = MongoClient(MONGO_URI) if MONGO_URI else None
 
-    now = int(time.time())
-    row = {
+# prefer a db name inside the URI; otherwise allow env override
+def _get_db():
+    if not client:
+        return None
+    try:
+        db = client.get_database()  # uses default db from URI if present
+        if db.name is None or db.name == "admin":
+            # allow override via env if URI had no db
+            name = os.getenv("MONGO_DB", os.getenv("DB_NAME", "chaossunflowerbusiness321"))
+            db = client[name]
+        return db
+    except Exception as e:
+        log.error("Mongo get_database failed: %s", e)
+        return None
+
+db = _get_db()
+col = db["dm_ready"] if db else None
+if col:
+    try:
+        col.create_index([("user_id", ASCENDING)], unique=True, name="uniq_user_id")
+        col.create_index([("when_ts", ASCENDING)], name="by_time")
+        log.info("✅ dm_ready collection ready (DB=%s, coll=%s)", db.name, col.name)
+    except Exception as e:
+        log.warning("dm_ready index create failed: %s", e)
+
+# --------- helpers ---------
+def _row_for(u: User, when_ts: Optional[int] = None) -> Dict[str, Any]:
+    return {
         "user_id": u.id,
         "first_name": u.first_name,
         "last_name": u.last_name,
         "username": u.username,
-        "when_ts": now,
+        "when_ts": when_ts or int(time.time()),
     }
-    _store.set(u.id, row)
 
-    # Notify owner
-    if OWNER_ID:
-        name = u.first_name or "User"
-        handle = f" @{u.username}" if u.username else ""
-        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
-        try:
-            await client.send_message(
-                OWNER_ID,
-                f"✅ <b>DM-ready:</b> {name}{handle}\n"
-                f"<code>{u.id}</code> • {ts}",
-                disable_web_page_preview=True
-            )
-        except Exception as e:
-            log.warning("Owner ping failed: %s", e)
+def _get(u_id: int) -> Optional[Dict[str, Any]]:
+    if not col: return None
+    return col.find_one({"user_id": u_id})
+
+def _add(row: Dict[str, Any]) -> bool:
+    if not col: return False
+    try:
+        col.insert_one(row)
+        return True
+    except DuplicateKeyError:
+        return False
+    except Exception as e:
+        log.error("dm_ready insert failed: %s", e)
+        return False
+
+def _remove(u_id: int) -> bool:
+    if not col: return False
+    try:
+        res = col.delete_one({"user_id": u_id})
+        return res.deleted_count > 0
+    except Exception as e:
+        log.error("dm_ready remove failed: %s", e)
+        return False
+
+def _all() -> List[Dict[str, Any]]:
+    if not col: return []
+    return list(col.find({}, {"_id": 0}).sort("when_ts", -1))
+
+# --------- public helper used by /start ---------
+async def mark_from_start(client: Client, u: User):
+    """Idempotently mark a user DM-ready and ping owner once."""
+    if not u or u.is_bot or not col:
+        return
+    if _get(u.id):
+        return  # already marked
+
+    row = _row_for(u)
+    if _add(row):
+        # Notify owner once
+        if OWNER_ID:
+            name = u.first_name or "User"
+            handle = f" @{u.username}" if u.username else ""
+            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(row["when_ts"]))
+            try:
+                await client.send_message(
+                    OWNER_ID,
+                    f"✅ <b>DM-ready:</b> {name}{handle}\n"
+                    f"<code>{u.id}</code> • {ts}",
+                    disable_web_page_preview=True
+                )
+            except Exception as e:
+                log.warning("Owner ping failed: %s", e)
 
 def register(app: Client):
-    log.info("✅ dm_ready wired (owner=%s, group=%s, db=%s)", OWNER_ID, SANCTUARY_GROUP_ID, DB_PATH)
+    log.info("✅ dm_ready wired (owner=%s, group=%s, mongo=%s)",
+             OWNER_ID, SANCTUARY_GROUP_ID, bool(col))
 
     # --------- Admin list ----------
     @app.on_message(filters.command("dmreadylist"))
@@ -111,7 +134,7 @@ def register(app: Client):
         if not _is_owner_or_super(uid):
             return await m.reply_text("❌ You’re not allowed to use this command.")
 
-        rows = sorted(_store.all(), key=lambda r: r.get("when_ts", 0), reverse=True)
+        rows = _all()
         if not rows:
             return await m.reply_text("ℹ️ No one is marked DM-ready yet.")
 
@@ -120,7 +143,6 @@ def register(app: Client):
             handle = f"@{r.get('username')}" if r.get("username") else ""
             ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r.get("when_ts", 0)))
             lines.append(f"{i}. {r.get('first_name','User')} {handle} — <code>{r['user_id']}</code> • {ts}")
-
         await m.reply_text("\n".join(lines), disable_web_page_preview=True)
 
     # --------- Auto-remove on leave/kick/ban in Sanctuary ----------
@@ -137,6 +159,5 @@ def register(app: Client):
             return
 
         if upd.new_chat_member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
-            removed = _store.remove(user.id)
-            if removed:
+            if _remove(user.id):
                 log.info("🧹 Removed DM-ready for %s (%s) after leaving Sanctuary", user.first_name, user.id)
