@@ -1,8 +1,12 @@
 # dm_foolproof.py
 import os
-from pyrogram import Client, filters
+from pyrogram import Client, filters, enums
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from pyrogram.errors import MessageNotModified
+from pyrogram.handlers.handler import StopPropagation
+
+# mark/ping comes from unified DM-ready module
+from handlers.dm_ready import mark_from_start
 
 # ──────────────── Welcome text ────────────────
 WELCOME_TEXT = (
@@ -25,7 +29,6 @@ async def _safe_edit(msg, text: str, **kwargs):
     try:
         return await msg.edit_text(text, **kwargs)
     except MessageNotModified:
-        # If text didn't change, try updating only the keyboard
         if "reply_markup" in kwargs:
             try:
                 return await msg.edit_reply_markup(kwargs["reply_markup"])
@@ -38,12 +41,19 @@ def register(app: Client):
 
     # The ONLY /start handler in the bot
     @app.on_message(filters.command("start"))
-    async def _start(_: Client, m):
+    async def _start(c: Client, m):
+        # mark DM-ready only in private chats (first time shows once + pings owner)
+        if m.chat and m.chat.type == enums.ChatType.PRIVATE and m.from_user:
+            await mark_from_start(c, m.from_user)
+
         await m.reply_text(
             WELCOME_TEXT,
             reply_markup=_home_kb(),
             disable_web_page_preview=True,
         )
+
+        # block any other legacy /start handlers from also replying
+        raise StopPropagation
 
     # Router for Back/Main buttons
     @app.on_callback_query(filters.regex(r"^home$"))
