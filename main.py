@@ -6,6 +6,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ---------- Owner / Superuser ----------
+# Force OWNER_ID so you're always recognized, even if .env is missing.
+os.environ.setdefault("OWNER_ID", "6964994611")  # Roni
+# Optionally seed SUPER_ADMINS (comma-separated) if you want:
+os.environ.setdefault("SUPER_ADMINS", "")        # e.g. "123,456"
+
+# ---------- Logging ----------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
@@ -13,6 +20,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("SuccuBot")
 
+# ---------- Bot credentials ----------
 API_ID    = int(os.getenv("API_ID", "0") or "0")
 API_HASH  = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -28,6 +36,7 @@ app = Client(
 )
 
 def wire(path: str):
+    """Import a module and call its register(app) if present."""
     try:
         mod = __import__(path, fromlist=["register"])
         if hasattr(mod, "register"):
@@ -39,11 +48,17 @@ def wire(path: str):
         log.exception("❌ Failed to wire %s: %s", path, e)
 
 if __name__ == "__main__":
-    # Only one /start and one DM-ready implementation
-    wire("dm_foolproof")          # the ONLY /start handler
+    log.info("👑 OWNER_ID = %s", os.getenv("OWNER_ID"))
+
+    # ------------------------------------------------------------------
+    # Single source of truth for /start and DM-Ready
+    # ------------------------------------------------------------------
+    wire("dm_foolproof")          # the ONLY /start handler (marks DM-ready)
     wire("handlers.dm_ready")     # DM-ready store/list + auto-remove
 
-    # SAFE modules (must not register /start or DM-ready)
+    # ------------------------------------------------------------------
+    # SAFE modules (must NOT register /start or DM-ready)
+    # ------------------------------------------------------------------
     wire("handlers.panels")
     wire("handlers.menu")
     wire("handlers.enforce_requirements")
@@ -61,7 +76,10 @@ if __name__ == "__main__":
     wire("handlers.bloop")
     wire("handlers.whoami")
 
-    # DO NOT WIRE legacy/conflicting handlers:
+    # ------------------------------------------------------------------
+    # DO NOT WIRE legacy/conflicting handlers
+    # (left here as documentation; they should remain unwired)
+    # ------------------------------------------------------------------
     # wire("handlers.dm_ready_admin")
     # wire("handlers.dm_portal")
     # wire("handlers.dm_admin")
@@ -71,3 +89,4 @@ if __name__ == "__main__":
 
     log.info("🚀 SuccuBot starting…")
     app.run()
+
