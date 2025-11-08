@@ -39,7 +39,7 @@ def wire(path: str):
         log.exception("❌ Failed to wire %s: %s", path, e)
 
 if __name__ == "__main__":
-    # Only one /start, only one DM-ready implementation
+    # Only one /start and one DM-ready implementation
     wire("dm_foolproof")          # the ONLY /start handler
     wire("handlers.dm_ready")     # DM-ready store/list + auto-remove
 
