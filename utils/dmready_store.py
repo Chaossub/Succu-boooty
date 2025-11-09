@@ -1,71 +1,113 @@
 # utils/dmready_store.py
 from __future__ import annotations
-import os
-from dataclasses import dataclass
-from typing import List, Optional, Dict
+import os, json, threading
+from dataclasses import dataclass, asdict
+from typing import Dict, List, Optional
 
-from pymongo import MongoClient, ASCENDING
-from pymongo.errors import DuplicateKeyError
+DATA_DIR = os.getenv("DATA_DIR", "./data")
+os.makedirs(DATA_DIR, exist_ok=True)
+JSON_PATH = os.path.join(DATA_DIR, "dmready.json")
 
-# ---- Mongo wiring ----
-MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
-DB_NAME   = os.getenv("MONGO_DB") or os.getenv("MONGO_DBNAME") or "succubot"
-
-_mcli = MongoClient(MONGO_URL, serverSelectionTimeoutMS=10000)
-_db   = _mcli[DB_NAME]
-_col  = _db.get_collection("dm_ready")
-
-# Ensure unique index on user_id once
-try:
-    _col.create_index([("user_id", ASCENDING)], unique=True, name="uniq_user_id")
-except Exception:
-    pass
+_lock = threading.RLock()
 
 @dataclass
-class DMReadyRecord:
+class DMReadyRow:
     user_id: int
-    username: str
-    first_marked_iso: str  # UTC ISO string
+    username: str = ""
+    first_name: str = ""
+    last_name: str = ""
+    # ISO-8601 UTC string of the very first time we marked this user DM-ready
+    first_marked_iso: str = ""
 
 class DMReadyStore:
-    def __init__(self):
-        self.col = _col
+    """
+    Pure JSON backend; no Mongo.
+    File lives at DATA_DIR/dmready.json and is protected by a threading lock.
+    """
 
-    def ensure_dm_ready_first_seen(self, *, user_id: int, username: str, when_iso: str) -> DMReadyRecord:
+    def __init__(self, json_path: str = JSON_PATH):
+        self.json_path = json_path
+        self._rows: Dict[str, DMReadyRow] = {}
+        self._load()
+
+    # ---------- private ----------
+    def _load(self) -> None:
+        with _lock:
+            if not os.path.exists(self.json_path):
+                self._rows = {}
+                return
+            try:
+                with open(self.json_path, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                self._rows = {}
+                for k, v in (raw or {}).items():
+                    self._rows[k] = DMReadyRow(**v)
+            except Exception:
+                # corrupted file -> start fresh but don't crash the bot
+                self._rows = {}
+
+    def _save(self) -> None:
+        with _lock:
+            data = {k: asdict(v) for k, v in self._rows.items()}
+            tmp = self.json_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.json_path)
+
+    # ---------- public API ----------
+    def ensure_dm_ready_first_seen(
+        self,
+        *,
+        user_id: int,
+        username: str = "",
+        first_name: str = "",
+        last_name: str = "",
+        when_iso_now_utc: str,
+    ) -> str:
         """
-        Idempotently ensure a DM-ready record exists.
-        - On first time: inserts { user_id, username, first_marked_iso=when_iso }
-        - On subsequent times: updates username (if changed), keeps original first_marked_iso
-        Returns the stored record (with the original timestamp).
+        If user_id has never been marked, set first_marked_iso=when_iso_now_utc.
+        Return the existing/first timestamp (idempotent).
         """
-        # set username always, but timestamp only on insert
-        self.col.update_one(
-            {"user_id": user_id},
-            {
-                "$set": {"username": username or ""},
-                "$setOnInsert": {"first_marked_iso": when_iso}
-            },
-            upsert=True
-        )
-        doc = self.col.find_one({"user_id": user_id}, {"_id": 0, "user_id": 1, "username": 1, "first_marked_iso": 1})
-        # Fallback, but should not be needed
-        if not doc:
-            doc = {"user_id": user_id, "username": username or "", "first_marked_iso": when_iso}
-        return DMReadyRecord(
-            user_id=int(doc.get("user_id", user_id)),
-            username=doc.get("username", "") or "",
-            first_marked_iso=doc.get("first_marked_iso", when_iso) or when_iso,
-        )
+        key = str(user_id)
+        with _lock:
+            row = self._rows.get(key)
+            if row is None:
+                row = DMReadyRow(
+                    user_id=user_id,
+                    username=username or "",
+                    first_name=first_name or "",
+                    last_name=last_name or "",
+                    first_marked_iso=when_iso_now_utc,
+                )
+                self._rows[key] = row
+                self._save()
+                return row.first_marked_iso
 
-    def all(self) -> List[DMReadyRecord]:
-        recs: List[DMReadyRecord] = []
-        for d in self.col.find({}, {"_id": 0}).sort("first_marked_iso", ASCENDING):
-            recs.append(DMReadyRecord(
-                user_id=int(d.get("user_id", 0)),
-                username=d.get("username", "") or "",
-                first_marked_iso=d.get("first_marked_iso", "") or "",
-            ))
-        return recs
+            # Already seen: keep the original timestamp, but refresh metadata if missing
+            changed = False
+            if username and username != row.username:
+                row.username = username; changed = True
+            if first_name and first_name != row.first_name:
+                row.first_name = first_name; changed = True
+            if last_name and last_name != row.last_name:
+                row.last_name = last_name; changed = True
+            if changed:
+                self._save()
+            return row.first_marked_iso or when_iso_now_utc
 
-# singleton
+    def all(self) -> List[DMReadyRow]:
+        with _lock:
+            return list(self._rows.values())
+
+    def get(self, user_id: int) -> Optional[DMReadyRow]:
+        return self._rows.get(str(user_id))
+
+    def delete(self, user_id: int) -> None:
+        with _lock:
+            if str(user_id) in self._rows:
+                del self._rows[str(user_id)]
+                self._save()
+
+# Global singleton used by handlers
 global_store = DMReadyStore()
+
