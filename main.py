@@ -1,57 +1,48 @@
 # main.py
-import os, logging
-from dotenv import load_dotenv
-from pyrogram import Client, idle
+import os
+from pyrogram import Client
+from pyrogram.enums import ParseMode
 
-load_dotenv()
+# Handlers
+from handlers import panels, dm_ready
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s"
-)
-log = logging.getLogger("SuccuBot")
-
-API_ID = int(os.getenv("API_ID", "0") or "0")
+# ────────────── ENVIRONMENT SETUP ──────────────
+API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-OWNER_ID = os.getenv("OWNER_ID", "6964994611")
-os.environ["OWNER_ID"] = str(OWNER_ID)
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 
-# Path for JSON persistence (create folder if needed)
-os.environ.setdefault("DMREADY_DB", "data/dm_ready.json")
+if not all([API_ID, API_HASH, BOT_TOKEN]):
+    raise ValueError("Missing one or more required environment variables: API_ID, API_HASH, BOT_TOKEN")
 
-if not (API_ID and API_HASH and BOT_TOKEN):
-    raise SystemExit("Missing API_ID, API_HASH, or BOT_TOKEN")
-
+# ────────────── BOT INITIALIZATION ──────────────
 app = Client(
-    "succubot",
+    "SuccuBot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    in_memory=True,
+    parse_mode=ParseMode.MARKDOWN,
 )
 
-def wire(path: str):
-    try:
-        mod = __import__(path, fromlist=["register"])
-        mod.register(app)
-        log.info("✅ Wired: %s", path)
-    except Exception as e:
-        log.error("❌ Failed to wire %s: %s", path, e)
+# ────────────── LOAD HANDLERS ──────────────
+def main():
+    print("✅ Starting SuccuBot...")
 
-MODULES = [
-    "handlers.dm_ready",
-    "handlers.dm_ready_admin",  # admin list/remove/clear, LA time
-    # add your other modules here…
-]
+    # Register handler modules
+    panels.register(app)
+    dm_ready.register(app)
 
+    # Add any other handler imports here (moderation, federation, etc.)
+    # Example:
+    # from handlers import moderation, federation, fun
+    # moderation.register(app)
+    # federation.register(app)
+    # fun.register(app)
+
+    print("✅ Handlers loaded. Running bot...\n")
+    app.run()
+    print("❌ Bot stopped.")
+
+# ────────────── ENTRY POINT ──────────────
 if __name__ == "__main__":
-    for m in MODULES:
-        wire(m)
-    log.info("👑 OWNER_ID = %s", OWNER_ID)
-    log.info("🚀 SuccuBot starting…")
-    app.start()
-    idle()
-    app.stop()
-
-
+    main()
