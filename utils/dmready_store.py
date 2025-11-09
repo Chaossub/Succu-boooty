@@ -1,121 +1,83 @@
 # utils/dmready_store.py
 from __future__ import annotations
-
-import json
-import os
+import json, os
 from dataclasses import dataclass, asdict
 from threading import RLock
 from typing import Dict, List, Optional
 from datetime import datetime, timezone
 
-# Where to keep the persistent file. You can override with DMREADY_JSON in env.
 DEFAULT_PATH = os.getenv("DMREADY_JSON", "data/dmready.json")
 
-def _ensure_parent_dir(path: str) -> None:
+def _ensure_dir(path: str):
     parent = os.path.dirname(os.path.abspath(path))
-    if parent and not os.path.isdir(parent):
+    if not os.path.isdir(parent):
         os.makedirs(parent, exist_ok=True)
 
 @dataclass
 class DMReadyUser:
     user_id: int
     username: str
-    # ISO string, always stored in UTC with "Z"
     first_marked_iso: str
 
     @staticmethod
-    def now_iso() -> str:
-        return datetime.now(tz=timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    def now_iso():
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 class DMReadyStore:
-    """
-    Thread-safe JSON-backed store. Only the FIRST time a user is marked will be kept.
-    """
+    """Persistent JSON-based DM-ready list with thread-safety."""
     def __init__(self, path: str = DEFAULT_PATH):
-        self._path = path
-        self._lock = RLock()
-        self._users: Dict[str, DMReadyUser] = {}
-        self._loaded = False
-        _ensure_parent_dir(self._path)
+        self.path = path
+        self.lock = RLock()
+        self.users: Dict[str, DMReadyUser] = {}
+        _ensure_dir(self.path)
+        self._load()
 
-    # ---------- low-level ----------
-    def _load_unlocked(self) -> None:
-        if self._loaded:
-            return
-        self._loaded = True
-        if not os.path.isfile(self._path):
-            self._users = {}
+    def _load(self):
+        if not os.path.isfile(self.path):
+            self._save()
             return
         try:
-            with open(self._path, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception:
-            self._users = {}
-            return
-        users = {}
-        for uid_str, rec in (raw.get("users") or {}).items():
-            try:
-                users[uid_str] = DMReadyUser(
-                    user_id=int(rec.get("user_id", int(uid_str))),
-                    username=rec.get("username") or "",
-                    first_marked_iso=rec.get("first_marked_iso") or DMReadyUser.now_iso(),
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for uid, rec in (data.get("users") or {}).items():
+                self.users[uid] = DMReadyUser(
+                    user_id=int(rec["user_id"]),
+                    username=rec.get("username", ""),
+                    first_marked_iso=rec.get("first_marked_iso", DMReadyUser.now_iso()),
                 )
-            except Exception:
-                continue
-        self._users = users
+        except Exception:
+            self.users = {}
 
-    def _save_unlocked(self) -> None:
-        data = {
-            "users": {uid: asdict(rec) for uid, rec in self._users.items()}
-        }
-        tmp = self._path + ".tmp"
+    def _save(self):
+        data = {"users": {uid: asdict(u) for uid, u in self.users.items()}}
+        tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, self._path)
-
-    # ---------- public API ----------
-    def ensure_loaded(self) -> None:
-        with self._lock:
-            self._load_unlocked()
+        os.replace(tmp, self.path)
 
     def ensure_dm_ready_first_seen(self, user_id: int, username: str, when_iso: Optional[str] = None) -> DMReadyUser:
-        """
-        Create the record if missing. Never overwrites an existing first_marked_iso.
-        Returns the stored record.
-        """
-        with self._lock:
-            self._load_unlocked()
-            key = str(user_id)
-            if key in self._users:
-                # May refresh username if it changed (safe, does not touch the timestamp)
-                existing = self._users[key]
-                if username and username != existing.username:
-                    existing.username = username
-                    self._save_unlocked()
-                return existing
+        """Adds user only once, keeps the first timestamp."""
+        with self.lock:
+            uid = str(user_id)
+            if uid in self.users:
+                rec = self.users[uid]
+                if username and username != rec.username:
+                    rec.username = username
+                    self._save()
+                return rec
             rec = DMReadyUser(
                 user_id=user_id,
                 username=username or "",
-                first_marked_iso=(when_iso or DMReadyUser.now_iso()),
+                first_marked_iso=when_iso or DMReadyUser.now_iso(),
             )
-            self._users[key] = rec
-            self._save_unlocked()
+            self.users[uid] = rec
+            self._save()
             return rec
 
-    def get(self, user_id: int) -> Optional[DMReadyUser]:
-        with self._lock:
-            self._load_unlocked()
-            return self._users.get(str(user_id))
-
     def all(self) -> List[DMReadyUser]:
-        """Return all users as a list (alias kept for handler compatibility)."""
-        with self._lock:
-            self._load_unlocked()
-            return list(self._users.values())
+        with self.lock:
+            return list(self.users.values())
 
-    # Convenience alias some code prefers
-    def all_records(self) -> List[DMReadyUser]:
-        return self.all()
-
-# A single global instance you can import
+# Global singleton
 global_store = DMReadyStore()
+
