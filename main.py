@@ -24,14 +24,12 @@ API_HASH  = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
 OWNER_ID  = int(os.getenv("OWNER_ID", "0") or 0)
-TIMEZONE  = os.getenv("TIMEZONE", "America/Los_Angeles")  # default: LA
+TIMEZONE  = os.getenv("TIMEZONE", "America/Los_Angeles")
 TZ        = timezone(TIMEZONE)
 
-# Data dir for JSON persistence (warm chats, dm-ready cache, etc.)
+# JSON persistence (optional helpers used by some handlers)
 DATA_DIR = Path(os.getenv("DATA_DIR", "data")).resolve()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-# Make these paths available to all handlers via env (no imports needed)
 os.environ.setdefault("DATA_DIR", str(DATA_DIR))
 os.environ.setdefault("WARM_CHATS_PATH", str(DATA_DIR / "warm_chats.json"))
 os.environ.setdefault("DMREADY_JSON_PATH", str(DATA_DIR / "dm_ready.json"))
@@ -40,11 +38,31 @@ os.environ.setdefault("DMREADY_JSON_PATH", str(DATA_DIR / "dm_ready.json"))
 # Logging
 # ──────────────────────────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
-)
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s [%(levelname)s] %(name)s - %(message)s")
 log = logging.getLogger("SuccuBot")
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MongoDB (shared client)
+# ──────────────────────────────────────────────────────────────────────────────
+from pymongo import MongoClient
+import builtins
+
+MONGO_URL = os.getenv("MONGO_URL", "").strip()
+MONGO_DB  = os.getenv("MONGO_DB", "succubot").strip()
+
+mongo_client: Optional[MongoClient] = None
+if MONGO_URL:
+    try:
+        mongo_client = MongoClient(MONGO_URL, connect=True, serverSelectionTimeoutMS=8000)
+        # will raise if cannot connect in ~8s
+        mongo_client.admin.command("ping")
+        builtins.mongo_client = mongo_client
+        log.info("🗄️  Mongo connected (DB=%s)", MONGO_DB)
+    except Exception as e:
+        log.error("❌ Mongo connection failed: %s", e)
+        # continue starting; handlers that require mongo should handle None gracefully
+else:
+    log.warning("⚠️  MONGO_URL not set — handlers expecting Mongo must handle None.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Pyrogram client
@@ -58,28 +76,27 @@ app = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    in_memory=True,  # no local session file
+    in_memory=True,
     parse_mode="html",
 )
+
+# expose common things to handlers via app
+setattr(app, "scheduler", None)  # will be set below
+setattr(app, "tz", TZ)
+setattr(app, "owner_id", OWNER_ID)
+setattr(app, "mongo", mongo_client)
+setattr(app, "mongo_db_name", MONGO_DB)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Scheduler (shared)
 # ──────────────────────────────────────────────────────────────────────────────
 scheduler = AsyncIOScheduler(timezone=TIMEZONE)
-
-# Expose to handlers (they can pick it up via getattr(client, 'scheduler', …))
 setattr(app, "scheduler", scheduler)
-setattr(app, "tz", TZ)
-setattr(app, "owner_id", OWNER_ID)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Handler loader
 # ──────────────────────────────────────────────────────────────────────────────
 def _wire_module(mod_path: str, reg_name: str = "register") -> bool:
-    """
-    Import a module by dotted path and call its `register(app)` if present.
-    Returns True if successfully wired.
-    """
     try:
         mod = importlib.import_module(mod_path)
     except Exception as e:
@@ -92,7 +109,7 @@ def _wire_module(mod_path: str, reg_name: str = "register") -> bool:
         return False
 
     try:
-        func(app)  # register all handlers inside this module
+        func(app)
         log.info("✅ Wired: %s", mod_path)
         return True
     except Exception as e:
@@ -101,14 +118,10 @@ def _wire_module(mod_path: str, reg_name: str = "register") -> bool:
 
 
 def wire_handlers() -> None:
-    """
-    Wire essential modules in a controlled order, then auto-discover the rest
-    under handlers/ (skipping ones we already loaded).
-    """
     base_pkg = "handlers"
     loaded = set()
 
-    # 1) Critical first (welcome/panels/menu so UI always renders)
+    # 1) Core UI first
     priority = [
         "handlers.welcome",
         "handlers.panels",
@@ -117,25 +130,25 @@ def wire_handlers() -> None:
         "handlers.help_cmd",
     ]
 
-    # 2) DM-Ready flow (admin & user)
+    # 2) DM-ready flow
     priority += [
-        "handlers.dm_ready",         # /dmready, /dmreadylist
-        "handlers.dm_ready_admin",   # admin-only views
-        "handlers.dm_admin",         # if you use it
-        "handlers.dm_portal",        # if you use it
-        "handlers.dmnow",            # now helper
-        "handlers.dmready_watch",    # background checks (optional)
-        "handlers.dmready_cleanup",  # maintenance (optional)
+        "handlers.dm_ready",
+        "handlers.dm_ready_admin",
+        "handlers.dm_admin",
+        "handlers.dm_portal",
+        "handlers.dmnow",
+        "handlers.dmready_watch",
+        "handlers.dmready_cleanup",
     ]
 
-    # 3) Warmup + schedulers (both, as requested)
+    # 3) Warmup + schedulers
     priority += [
-        "handlers.hi",               # /hi warmup -> writes warm_chats.json
-        "handlers.flyer_scheduler",  # your flyer auto-posts (daily themes)
-        "handlers.schedulesmsg",     # your general scheduled messages
+        "handlers.hi",
+        "handlers.flyer_scheduler",
+        "handlers.schedulemsg",     # ✅ fixed (was schedulesmsg)
     ]
 
-    # 4) Moderation / xp / fun / federation / membership / summons, etc.
+    # 4) The rest
     priority += [
         "handlers.moderation",
         "handlers.warnings",
@@ -152,14 +165,17 @@ def wire_handlers() -> None:
         "handlers.exemptions",
         "handlers.federation",
         "handlers.flyer",
+        "handlers.createmenu",
+        "handlers.contact_admins",
+        "handlers.bloop",
+        "handlers.warmup",
     ]
 
-    # Wire priority list
     for dotted in priority:
         if _wire_module(dotted):
             loaded.add(dotted)
 
-    # 5) Auto-discover the rest of handlers/ and wire anything with register(app)
+    # Auto-discover anything else in handlers/
     pkg = importlib.import_module(base_pkg)
     pkg_path = Path(pkg.__file__).parent
     for m in pkgutil.iter_modules([str(pkg_path)]):
@@ -174,8 +190,6 @@ def wire_handlers() -> None:
 async def _startup():
     log.info("👑 OWNER_ID = %s", OWNER_ID or "unset")
     wire_handlers()
-
-    # Start shared scheduler
     if not scheduler.running:
         scheduler.start()
         log.info("⏰ Scheduler started (%s)", TIMEZONE)
@@ -184,7 +198,7 @@ async def _main():
     async with app:
         await _startup()
         log.info("🚀 SuccuBot is up and running.")
-        await asyncio.Event().wait()  # keep alive
+        await asyncio.Event().wait()
 
 if __name__ == "__main__":
     try:
