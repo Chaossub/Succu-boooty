@@ -1,3 +1,4 @@
+# handlers/panels.py
 import os, time
 from typing import Dict, Optional, List
 from pyrogram import Client, filters
@@ -49,6 +50,30 @@ async def _safe_edit(msg, text: str, **kwargs):
             except Exception: pass
         return
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Home (used by /start).  Helpers only; /start is registered in handlers/dm_ready.py
+# ──────────────────────────────────────────────────────────────────────────────
+def home_text() -> str:
+    return (
+        "🔥 <b>Welcome to SuccuBot</b> 🔥\n"
+        "I’m your naughty little helper inside the Sanctuary — ready to keep "
+        "things fun, flirty, and flowing.\n\n"
+        "✨ Use the menu below to navigate!"
+    )
+
+def home_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💞 Menus", callback_data="menus")],
+            [InlineKeyboardButton("🔥 Contact Admins", callback_data="admins")],
+            [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models")],
+            [InlineKeyboardButton("❓ Help", callback_data="help")],
+        ]
+    )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Internal keyboards for sub-panels
+# ──────────────────────────────────────────────────────────────────────────────
 def _menus_kb() -> InlineKeyboardMarkup:
     order = ["roni","ruby","rin","savy"]
     btns = [InlineKeyboardButton(MODELS[k]["name"], callback_data=f"menu:{k}") for k in order]
@@ -95,6 +120,9 @@ def _back_main_kb() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🏠 Main", callback_data="home")]
     ])
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Callback handlers
+# ──────────────────────────────────────────────────────────────────────────────
 def register(app: Client):
 
     @app.on_callback_query(filters.regex(r"^menus$"))
