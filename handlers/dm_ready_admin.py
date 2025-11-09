@@ -45,5 +45,4 @@ def register(app: Client):
             at = f"@{rec.username}" if rec.username else ""
             lines.append(f"{i}. {at} — `{rec.user_id}` — { _fmt_la(rec.first_marked_iso) }")
 
-        text = "\n".join(lines)
-        await m.reply_text(text, disable_web_page_preview=True)
+        await m.reply_text("\n".join(lines), disable_web_page_preview=True)
