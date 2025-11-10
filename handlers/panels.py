@@ -61,19 +61,39 @@ def _menu_keyboard(name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 def register(app):
+
+    # ── /start: the 4-button home you expect ─────────────────────────────
+    @app.on_message(filters.command("start"))
+    async def start_cmd(_, m: Message):
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("💞 Menus", callback_data=ROOT_CB)],
+                [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
+                [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
+                [InlineKeyboardButton("❓ Help", callback_data="help:open")],
+            ]
+        )
+        await m.reply_text(
+            "🔥 **Welcome to SuccuBot**\n"
+            "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+            "✨ Use the menu below to navigate!",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+
     # /menu → choose a model
     @app.on_message(filters.command("menu"))
     async def menu_cmd(_, m: Message):
-        await m.reply_text("💕 <b>Choose a model:</b>", reply_markup=_models_keyboard())
+        await m.reply_text("💕 **Choose a model:**", reply_markup=_models_keyboard())
 
     # Back to model list
     @app.on_callback_query(filters.regex(f"^{ROOT_CB}$"))
     async def root_cb(_, cq: CallbackQuery):
         try:
-            await cq.message.edit_text("💕 <b>Choose a model:</b>", reply_markup=_models_keyboard())
+            await cq.message.edit_text("💕 **Choose a model:**", reply_markup=_models_keyboard())
         except Exception:
             await cq.answer()
-            await cq.message.reply_text("💕 <b>Choose a model:</b>", reply_markup=_models_keyboard())
+            await cq.message.reply_text("💕 **Choose a model:**", reply_markup=_models_keyboard())
 
     # Pick a specific model → show saved menu + Book/Tip
     @app.on_callback_query(filters.regex(r"^panels:pick:.+"))
@@ -81,7 +101,7 @@ def register(app):
         raw = cq.data[len(PICK_CB_P):]
         name = _clean(raw)
         text = store.get_menu(name) or "No menu saved yet.\n\nUse /createmenu <Name> <text…> to set one."
-        content = f"<b>{name} — Menu</b>\n\n{text}"
+        content = f"**{name} — Menu**\n\n{text}"
         try:
             await cq.message.edit_text(
                 content,
@@ -104,7 +124,7 @@ def register(app):
         if url:
             # Send a small message with the link so it’s clickable
             await cq.message.reply_text(
-                f"📖 <b>Booking for {name}</b>\n{url}",
+                f"📖 **Booking for {name}**\n{url}",
                 disable_web_page_preview=False
             )
         else:
@@ -117,7 +137,7 @@ def register(app):
         url = _get_url("TIP", name)
         if url:
             await cq.message.reply_text(
-                f"💸 <b>Tip {name}</b>\n{url}",
+                f"💸 **Tip {name}**\n{url}",
                 disable_web_page_preview=False
             )
         else:
