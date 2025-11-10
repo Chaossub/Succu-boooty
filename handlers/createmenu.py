@@ -1,14 +1,11 @@
-# handlers/createmenu.py
-# /createmenu <model> <text...>  -> saves to persistent store (Mongo if configured, else JSON)
+# /createmenu <Name> <text...>  -> saves to persistent store
 import os
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from utils.menu_store import store
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
-SUPER_ADMINS = {
-    int(x) for x in os.getenv("SUPER_ADMINS", "").replace(",", " ").split() if x.isdigit()
-}
+SUPER_ADMINS = {int(x) for x in os.getenv("SUPER_ADMINS", "").replace(",", " ").split() if x.isdigit()}
 
 def _allowed(user_id: int) -> bool:
     return user_id == OWNER_ID or user_id in SUPER_ADMINS
@@ -27,8 +24,8 @@ def register(app: Client):
             )
 
         name, text = parts[1].strip(), parts[2].strip()
-        store.set_menu(name, text)  # <- persists (Mongo/JSON via utils.menu_store)
+        store.set_menu(name, text)
         await m.reply_text(
-            f"✅ Saved menu for <b>{name}</b>.\nOpen <b>/showmenu {name}</b> to see it.",
+            f"✅ Saved menu for <b>{name}</b>.\nOpen <b>/showmenu {name}</b> or tap it in <b>/menus</b>.",
             disable_web_page_preview=True,
         )
