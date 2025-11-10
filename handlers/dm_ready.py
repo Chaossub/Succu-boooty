@@ -1,184 +1,169 @@
 # handlers/dm_ready.py
-from __future__ import annotations
-import os, json
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+import os, json, threading
 from datetime import datetime, timezone
-from pyrogram import Client, filters
-from pyrogram.types import Message
+from typing import Optional, Dict, Any, List
 
-# -------- time utils (LA) ----------
-try:
-    import pytz
-    LA_TZ = pytz.timezone("America/Los_Angeles")
-except Exception:
-    LA_TZ = None  # fallback without pytz
+from pyrogram import Client, filters, enums
+from pyrogram.types import Message, ChatMemberUpdated
 
-def _iso_now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat()
+GROUP_ID = -1002823762054  # your group
 
-def _iso_to_la_str(iso: str) -> str:
-    if not iso:
-        return "-"
-    try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        if LA_TZ:
-            dt = dt.astimezone(LA_TZ)
-        else:
-            # naive fallback: show UTC with suffix
-            return dt.strftime("%Y-%m-%d %I:%M %p") + " UTC"
-        return dt.strftime("%Y-%m-%d %I:%M %p PT")
-    except Exception:
-        return iso
-
-# -------- persistence layer ----------
+# ---------- Storage (Mongo first, JSON fallback) ----------
 class DMReadyStore:
-    """
-    Mongo if MONGO_URL* is present; otherwise JSON file at data/dmready.json.
-    API:
-      - ensure_dm_ready_first_seen(user_id, username, first_name, last_name, when_iso_now_utc) -> str(created_at_iso)
-      - get_first_mark_iso(user_id) -> Optional[str]
-      - all() -> List[Dict]
-    """
     def __init__(self):
-        self.mode = "json"
-        self._col = None
-
-        mongo_url = os.getenv("MONGO_URL") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
-        if mongo_url:
+        self._lock = threading.RLock()
+        self._mongo_ok = False
+        self._coll = None
+        uri = os.getenv("MONGO_URI")
+        if uri:
             try:
                 from pymongo import MongoClient, ASCENDING
-                db_name = os.getenv("MONGO_DB") or os.getenv("MONGO_DBNAME") or "succubot"
-                cli = MongoClient(mongo_url, serverSelectionTimeoutMS=8000)
-                db = cli[db_name]
-                self._col = db.get_collection("dm_ready_users")
-                # ensure useful index (unique by user_id ensures idempotency)
-                self._col.create_index("user_id", unique=True)
-                self.mode = "mongo"
+                self._mongo = MongoClient(uri)
+                self._db = self._mongo.get_database()  # default from URI
+                self._coll = self._db["dm_ready"]
+                self._coll.create_index([("user_id", ASCENDING)], unique=True)
+                self._mongo_ok = True
             except Exception:
-                self.mode = "json"
-                self._col = None
+                self._mongo_ok = False
 
-        # JSON fallback
-        self._path = Path("data/dmready.json")
-        if self.mode == "json":
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            if not self._path.exists():
-                self._path.write_text("{}", encoding="utf-8")
+        self._json_path = os.path.join("data", "dm_ready.json")
+        if not self._mongo_ok:
+            os.makedirs("data", exist_ok=True)
+            if not os.path.exists(self._json_path):
+                with open(self._json_path, "w", encoding="utf-8") as f:
+                    json.dump({"users": {}}, f)
 
-    # ------ JSON helpers ------
-    def _jload(self) -> Dict[str, Dict]:
-        try:
-            return json.loads(self._path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
+    # ----- helpers -----
+    def _now_iso(self) -> str:
+        return datetime.now(timezone.utc).isoformat()
 
-    def _jdump(self, data: Dict[str, Dict]) -> None:
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self._path)
+    def _json_load(self) -> Dict[str, Any]:
+        with self._lock:
+            with open(self._json_path, "r", encoding="utf-8") as f:
+                return json.load(f)
 
-    # ------ Public API ------
-    def ensure_dm_ready_first_seen(
-        self,
-        user_id: int,
-        username: str,
-        first_name: str,
-        last_name: str,
-        when_iso_now_utc: str,
-    ) -> str:
-        """Create on first seen, do nothing on repeats. Returns the first_seen ISO string."""
-        if self.mode == "mongo":
-            from pymongo import ReturnDocument
-            # upsert without changing first_seen after it exists
-            existing = self._col.find_one({"user_id": user_id})
-            if existing:
-                return existing.get("first_marked_iso", "")
-            doc = {
+    def _json_save(self, data: Dict[str, Any]) -> None:
+        with self._lock:
+            tmp = self._json_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, self._json_path)
+
+    # ----- public API -----
+    def mark_ready(self, user_id: int, first_name: str, username: Optional[str]) -> bool:
+        """
+        Returns True if newly marked; False if already present.
+        """
+        if self._mongo_ok:
+            doc = self._coll.find_one({"user_id": user_id})
+            if doc:
+                return False
+            self._coll.insert_one({
                 "user_id": user_id,
-                "username": username or "",
-                "first_name": first_name or "",
-                "last_name": last_name or "",
-                "first_marked_iso": when_iso_now_utc,
-            }
-            try:
-                self._col.insert_one(doc)
-            except Exception:
-                pass
-            return when_iso_now_utc
-
-        # JSON mode
-        data = self._jload()
-        key = str(user_id)
-        if key in data:
-            return data[key].get("first_marked_iso", "")
-        data[key] = {
-            "user_id": user_id,
-            "username": username or "",
-            "first_name": first_name or "",
-            "last_name": last_name or "",
-            "first_marked_iso": when_iso_now_utc,
+                "first_name": first_name,
+                "username": username,
+                "since": self._now_iso()
+            })
+            return True
+        data = self._json_load()
+        users = data.get("users", {})
+        if str(user_id) in users:
+            return False
+        users[str(user_id)] = {
+            "first_name": first_name,
+            "username": username,
+            "since": self._now_iso()
         }
-        self._jdump(data)
-        return when_iso_now_utc
+        data["users"] = users
+        self._json_save(data)
+        return True
 
-    def get_first_mark_iso(self, user_id: int) -> Optional[str]:
-        if self.mode == "mongo":
-            rec = self._col.find_one({"user_id": user_id}) or {}
-            return rec.get("first_marked_iso")
-        data = self._jload()
-        rec = data.get(str(user_id)) or {}
-        return rec.get("first_marked_iso")
+    def remove(self, user_id: int) -> bool:
+        """
+        Returns True if removed; False if not present.
+        """
+        if self._mongo_ok:
+            res = self._coll.delete_one({"user_id": user_id})
+            return bool(res.deleted_count)
+        data = self._json_load()
+        users = data.get("users", {})
+        if str(user_id) in users:
+            users.pop(str(user_id), None)
+            data["users"] = users
+            self._json_save(data)
+            return True
+        return False
 
-    def all(self) -> List[Dict]:
-        if self.mode == "mongo":
-            return list(self._col.find({}, {"_id": 0}))
-        data = self._jload()
-        return list(data.values())
+    def list_all(self) -> List[Dict[str, Any]]:
+        if self._mongo_ok:
+            return list(self._coll.find({}, {"_id": 0}).sort("since", 1))
+        data = self._json_load()
+        users = data.get("users", {})
+        out = []
+        for k, v in users.items():
+            row = {"user_id": int(k)}
+            row.update(v)
+            out.append(row)
+        out.sort(key=lambda r: r.get("since") or "")
+        return out
 
-# single shared store
 store = DMReadyStore()
-OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 
-# ---------- helper you call from other handlers ----------
-async def mark_dm_ready_from_message(m: Message) -> None:
-    """Idempotent: records first time we ever saw this user in DM."""
-    if not m or not m.from_user:
+# ---------- Handlers ----------
+# 1) FIRST DM contact → mark them once, silently on duplicates
+@Client.on_message(filters.private & ~filters.service)
+async def dm_first_contact(client: Client, msg: Message):
+    user = msg.from_user
+    if not user:
         return
-    u = m.from_user
-    store.ensure_dm_ready_first_seen(
-        user_id=u.id,
-        username=u.username or "",
-        first_name=u.first_name or "",
-        last_name=u.last_name or "",
-        when_iso_now_utc=_iso_now_utc(),
+    newly_marked = store.mark_ready(
+        user_id=user.id,
+        first_name=user.first_name or "",
+        username=user.username
     )
+    if newly_marked:
+        try:
+            await msg.reply_text("You’re now DM-ready ✅")
+        except Exception:
+            pass  # If replies are disabled, just skip
 
-# ---------- owner/admin command ----------
-def register(app: Client):
-    @app.on_message(filters.private & filters.user(OWNER_ID) & filters.command("dmreadylist"))
-    async def _dmreadylist(_: Client, m: Message):
-        users = store.all()
-        # sort by first_marked_iso (oldest first)
-        def _key(rec: Dict) -> Tuple[str, int]:
-            return (rec.get("first_marked_iso") or "", rec.get("user_id") or 0)
-        users.sort(key=_key)
+# 2) Auto-remove when they leave your group
+@Client.on_chat_member_updated(filters.chat(GROUP_ID))
+async def on_member_update(client: Client, event: ChatMemberUpdated):
+    # Remove when they leave or are kicked
+    new = event.new_chat_member
+    if not new:
+        return
+    status = new.status
+    if status in (enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.KICKED):
+        user_id = new.user.id
+        removed = store.remove(user_id)
+        if removed:
+            # Optional: log to your admin chat or print
+            print(f"[DM-READY] Removed {user_id} (left group)")
 
-        if not users:
-            await m.reply_text("✅ DM-ready users: none yet.")
-            return
+# 3) Admin utility: list DM-ready (callable in group by owner/admins)
+@Client.on_message(filters.command(["dmready", "dmreadylist"]) & filters.chat(GROUP_ID))
+async def dmready_list(client: Client, msg: Message):
+    # You can tighten permissions here if you want:
+    # if msg.from_user and msg.from_user.id not in {6964994611}: return
+    rows = store.list_all()
+    if not rows:
+        await msg.reply_text("No one is DM-ready yet.")
+        return
 
-        lines: List[str] = ["✅ *DM-ready users* —"]
-        for i, r in enumerate(users, start=1):
-            uid = r.get("user_id")
-            un = r.get("username") or ""
-            first_seen_la = _iso_to_la_str(r.get("first_marked_iso") or "")
-            if un:
-                who = f"@{un} — {uid}"
-            else:
-                who = f"{uid}"
-            lines.append(f"{i}. {who} — {first_seen_la}")
+    # Keep it compact
+    lines = []
+    for r in rows[:100]:
+        tag = f"@{r['username']}" if r.get("username") else f"{r.get('first_name','User')} ({r['user_id']})"
+        when = r.get("since", "")[:19].replace("T", " ")
+        lines.append(f"• {tag} — since {when} UTC")
 
-        await m.reply_text("\n".join(lines), disable_web_page_preview=True)
+    extras = ""
+    if len(rows) > 100:
+        extras = f"\n… and {len(rows) - 100} more."
+
+    await msg.reply_text(
+        f"**DM-ready users:** {len(rows)}\n" + "\n".join(lines) + extras,
+        disable_web_page_preview=True
+    )
