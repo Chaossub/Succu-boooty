@@ -1,185 +1,124 @@
 # handlers/panels.py
-import os, time
-from typing import Dict, Optional
-from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
-from pyrogram.errors import MessageNotModified, BadRequest
+# Model picker → show saved menu text + Book/Tip buttons
+import os
+from typing import List
+from pyrogram import filters
+from pyrogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    Message,
+)
+from utils.menu_store import store
 
-# bring in the DM-ready helper (DO NOT register /start here)
-from handlers.dm_ready import mark_dm_ready_from_message
+# ======= CONFIG =======
+# Default models (2x2 grid). You can override with MODELS env: e.g. "Roni,Ruby,Rin,Savy,Jade"
+_DEFAULT_MODELS = ["Roni", "Ruby", "Rin", "Savy"]
+_MODELS_ENV = os.getenv("MODELS", "")
+MODELS: List[str] = [x.strip() for x in _MODELS_ENV.split(",") if x.strip()] or _DEFAULT_MODELS
 
-def _int_or_zero(v: Optional[str]) -> int:
-    try: return int(v) if v else 0
-    except ValueError: return 0
+# Optional per-model links (set in environment):
+#   <NAME>_BOOK_URL, <NAME>_TIP_URL
+# e.g. RONI_BOOK_URL, RONI_TIP_URL, RUBY_BOOK_URL, RUBY_TIP_URL, etc.
+def _norm(name: str) -> str:
+    # ENV keys: upper + alnum only
+    return "".join(ch for ch in name.upper() if ch.isalnum())
 
-# ------- Models (for Menus page) -------
-MODELS: Dict[str, Dict] = {
-    "roni": {"name": os.getenv("RONI_NAME", "Roni"),
-             "username": os.getenv("RONI_USERNAME", ""),
-             "uid": _int_or_zero(os.getenv("RONI_ID"))},
-    "ruby": {"name": os.getenv("RUBY_NAME", "Ruby"),
-             "username": os.getenv("RUBY_USERNAME", ""),
-             "uid": _int_or_zero(os.getenv("RUBY_ID"))},
-    "rin":  {"name": os.getenv("RIN_NAME", "Rin"),
-             "username": os.getenv("RIN_USERNAME", ""),
-             "uid": _int_or_zero(os.getenv("RIN_ID"))},
-    "savy": {"name": os.getenv("SAVY_NAME", "Savy"),
-             "username": os.getenv("SAVY_USERNAME", ""),
-             "uid": _int_or_zero(os.getenv("SAVY_ID"))},
-}
+def _get_url(kind: str, name: str) -> str | None:
+    # kind in {"BOOK", "TIP"}
+    key = f"{_norm(name)}_{kind}_URL"
+    return os.getenv(key)
 
-def _tg_url(username: str) -> str:
-    return f"https://t.me/{username}" if username else "https://t.me/"
+# Callback namespaces (avoid collisions with other modules)
+ROOT_CB     = "panels:root"
+PICK_CB_P   = "panels:pick:"   # panels:pick:<Name>
+BOOK_CB_P   = "panels:book:"   # panels:book:<Name>
+TIP_CB_P    = "panels:tip:"    # panels:tip:<Name>
 
-async def _safe_edit(msg, text: str, **kwargs):
-    try:
-        return await msg.edit_text(text, **kwargs)
-    except MessageNotModified:
-        if "reply_markup" in kwargs:
-            try: return await msg.edit_reply_markup(kwargs["reply_markup"])
-            except MessageNotModified: return
-        return
-    except BadRequest:
-        if "reply_markup" in kwargs:
-            try: return await msg.edit_reply_markup(kwargs["reply_markup"])
-            except Exception: pass
-        return
+def _clean(name: str) -> str:
+    return name.strip().strip("»«‘’“”\"'`").strip()
 
-# -------- Keyboards --------
-def _home_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💕 Menus", callback_data="menus")],
-        [InlineKeyboardButton("🫶 Contact Admins", callback_data="admins")],
-        [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models")],
-        [InlineKeyboardButton("❓ Help", callback_data="help")],
-    ])
-
-def _menus_kb() -> InlineKeyboardMarkup:
-    order = ["roni","ruby","rin","savy"]
-    btns = [InlineKeyboardButton(MODELS[k]["name"], callback_data=f"menu:{k}") for k in order]
-    rows = [btns[i:i+2] for i in range(0, len(btns), 2)]
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="home"),
-                 InlineKeyboardButton("🏠 Main", callback_data="home")])
+def _models_keyboard() -> InlineKeyboardMarkup:
+    # 2x2 layout, then back/main
+    rows = []
+    row = []
+    for i, n in enumerate(MODELS, 1):
+        row.append(InlineKeyboardButton(n, callback_data=f"{PICK_CB_P}{n}"))
+        if i % 2 == 0:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data=ROOT_CB),
+                 InlineKeyboardButton("🏠 Main", callback_data="help:open")])
     return InlineKeyboardMarkup(rows)
 
-def _model_menu_kb(model_key: str, username: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📖 Book", url=_tg_url(username))],
-        [InlineKeyboardButton("💸 Tip", callback_data=f"tip:{model_key}")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="menus")],
-    ])
+def _menu_keyboard(name: str) -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("📖 Book", callback_data=f"{BOOK_CB_P}{name}")],
+        [InlineKeyboardButton("💸 Tip",  callback_data=f"{TIP_CB_P}{name}")],
+        [InlineKeyboardButton("⬅ Back", callback_data=ROOT_CB)],
+    ]
+    return InlineKeyboardMarkup(buttons)
 
-def _admins_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("💬 Contact Roni", url=_tg_url(os.getenv("RONI_USERNAME","")))],
-        [InlineKeyboardButton("💬 Contact Ruby", url=_tg_url(os.getenv("RUBY_USERNAME","")))],
-        [InlineKeyboardButton("⬅️ Back", callback_data="home"),
-         InlineKeyboardButton("🏠 Main", callback_data="home")],
-    ])
+def register(app):
+    # /menu → choose a model
+    @app.on_message(filters.command("menu"))
+    async def menu_cmd(_, m: Message):
+        await m.reply_text("💕 <b>Choose a model:</b>", reply_markup=_models_keyboard())
 
-def _help_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧾 Buyer Requirements", callback_data="help:reqs")],
-        [InlineKeyboardButton("📜 Buyer Rules", callback_data="help:rules")],
-        [InlineKeyboardButton("🎲 Game Rules", callback_data="help:games")],
-        [InlineKeyboardButton("🕊️ Exemptions", callback_data="help:ex")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="home"),
-         InlineKeyboardButton("🏠 Main", callback_data="home")],
-    ])
+    # Back to model list
+    @app.on_callback_query(filters.regex(f"^{ROOT_CB}$"))
+    async def root_cb(_, cq: CallbackQuery):
+        try:
+            await cq.message.edit_text("💕 <b>Choose a model:</b>", reply_markup=_models_keyboard())
+        except Exception:
+            await cq.answer()
+            await cq.message.reply_text("💕 <b>Choose a model:</b>", reply_markup=_models_keyboard())
 
-def _sub_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Back", callback_data="help")],
-        [InlineKeyboardButton("🏠 Main", callback_data="home")],
-    ])
+    # Pick a specific model → show saved menu + Book/Tip
+    @app.on_callback_query(filters.regex(r"^panels:pick:.+"))
+    async def pick_cb(_, cq: CallbackQuery):
+        raw = cq.data[len(PICK_CB_P):]
+        name = _clean(raw)
+        text = store.get_menu(name) or "No menu saved yet.\n\nUse /createmenu <Name> <text…> to set one."
+        content = f"<b>{name} — Menu</b>\n\n{text}"
+        try:
+            await cq.message.edit_text(
+                content,
+                reply_markup=_menu_keyboard(name),
+                disable_web_page_preview=True
+            )
+        except Exception:
+            await cq.answer()
+            await cq.message.reply_text(
+                content,
+                reply_markup=_menu_keyboard(name),
+                disable_web_page_preview=True
+            )
 
-def _back_main_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("⬅️ Back", callback_data="home"),
-         InlineKeyboardButton("🏠 Main", callback_data="home")]
-    ])
+    # Book button
+    @app.on_callback_query(filters.regex(r"^panels:book:.+"))
+    async def book_cb(_, cq: CallbackQuery):
+        name = _clean(cq.data[len(BOOK_CB_P):])
+        url = _get_url("BOOK", name)
+        if url:
+            # Send a small message with the link so it’s clickable
+            await cq.message.reply_text(
+                f"📖 <b>Booking for {name}</b>\n{url}",
+                disable_web_page_preview=False
+            )
+        else:
+            await cq.answer("No booking link set for this model.", show_alert=True)
 
-# -------- Handlers --------
-def register(app: Client):
-
-    # The ONLY /start handler: shows the welcome + buttons,
-    # and also records DM-ready first-seen (idempotent)
-    @app.on_message(filters.private & filters.command("start"))
-    async def _start_panel(c: Client, m: Message):
-        # mark DM-ready once (persists; works with Mongo or JSON)
-        await mark_dm_ready_from_message(m)
-
-        text = (
-            "🔥 **Welcome to SuccuBot** 🔥\n"
-            "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
-            "✨ Use the menu below to navigate!"
-        )
-        await m.reply_text(
-            text,
-            reply_markup=_home_kb(),
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex(r"^home$"))
-    async def _home(_: Client, q: CallbackQuery):
-        await _safe_edit(q.message,
-                         "💕 **Main Menu**\nChoose an option:",
-                         reply_markup=_home_kb(),
-                         disable_web_page_preview=True)
-
-    @app.on_callback_query(filters.regex(r"^menus$"))
-    async def _show_menus(_: Client, q: CallbackQuery):
-        await _safe_edit(q.message, "💕 Choose a model:", reply_markup=_menus_kb())
-
-    @app.on_callback_query(filters.regex(r"^menu:(roni|ruby|rin|savy)$"))
-    async def _show_model_menu(_: Client, q: CallbackQuery):
-        key = q.matches[0].group(1)
-        meta = MODELS[key]
-        title = f"**{meta['name']} — Menu**"
-        body  = (os.getenv(f"{key.upper()}_MENU_TEXT") or "").strip()
-        caption = f"{title}\n\n{body}" if body else title
-
-        await _safe_edit(
-            q.message,
-            caption,
-            reply_markup=_model_menu_kb(key, meta["username"]),
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex(r"^tip:(roni|ruby|rin|savy)$"))
-    async def _tip_stub(_: Client, q: CallbackQuery):
-        await q.answer("💸 Tips: coming soon!", show_alert=True)
-
-    @app.on_callback_query(filters.regex(r"^admins$"))
-    async def _show_admins(_: Client, q: CallbackQuery):
-        await _safe_edit(q.message, "👑 Contact Admins", reply_markup=_admins_kb())
-
-    @app.on_callback_query(filters.regex(r"^models$"))
-    async def _show_elsewhere(_: Client, q: CallbackQuery):
-        text = (os.getenv("FIND_MODELS_TEXT") or "Set FIND_MODELS_TEXT in ENV.").strip()
-        await _safe_edit(q.message, text, reply_markup=_back_main_kb(), disable_web_page_preview=True)
-
-    @app.on_callback_query(filters.regex(r"^help$"))
-    async def _show_help(_: Client, q: CallbackQuery):
-        await _safe_edit(q.message, "❓ Help", reply_markup=_help_kb())
-
-    @app.on_callback_query(filters.regex(r"^help:reqs$"))
-    async def _h_reqs(_: Client, q: CallbackQuery):
-        text = os.getenv("BUYER_REQUIREMENTS_TEXT") or "Set BUYER_REQUIREMENTS_TEXT in ENV."
-        await _safe_edit(q.message, f"🧾 **Buyer Requirements**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
-
-    @app.on_callback_query(filters.regex(r"^help:rules$"))
-    async def _h_rules(_: Client, q: CallbackQuery):
-        text = os.getenv("BUYER_RULES_TEXT") or "Set BUYER_RULES_TEXT in ENV."
-        await _safe_edit(q.message, f"📜 **Buyer Rules**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
-
-    @app.on_callback_query(filters.regex(r"^help:games$"))
-    async def _h_games(_: Client, q: CallbackQuery):
-        text = os.getenv("GAME_RULES_TEXT") or "Set GAME_RULES_TEXT in ENV."
-        await _safe_edit(q.message, f"🎲 **Game Rules**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
-
-    @app.on_callback_query(filters.regex(r"^help:ex$"))
-    async def _h_ex(_: Client, q: CallbackQuery):
-        text = os.getenv("EXEMPTIONS_TEXT") or "Set EXEMPTIONS_TEXT in ENV."
-        await _safe_edit(q.message, f"🕊️ **Exemptions**\n\n{text}", reply_markup=_sub_kb(), disable_web_page_preview=True)
-
+    # Tip button
+    @app.on_callback_query(filters.regex(r"^panels:tip:.+"))
+    async def tip_cb(_, cq: CallbackQuery):
+        name = _clean(cq.data[len(TIP_CB_P):])
+        url = _get_url("TIP", name)
+        if url:
+            await cq.message.reply_text(
+                f"💸 <b>Tip {name}</b>\n{url}",
+                disable_web_page_preview=False
+            )
+        else:
+            await cq.answer("No tip link set for this model.", show_alert=True)
