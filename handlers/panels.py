@@ -60,33 +60,36 @@ def _menu_keyboard(name: str) -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(buttons)
 
+def _main_keyboard() -> InlineKeyboardMarkup:
+    """Main home screen keyboard (same as /start)"""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💞 Menus", callback_data=ROOT_CB)],
+            [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
+            [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
+            [InlineKeyboardButton("❓ Help", callback_data="help:open")],
+        ]
+    )
+
 def register(app):
 
-    # ── /start: the 4-button home you expect ─────────────────────────────
+    # ── /start: main home screen ─────────────────────────────
     @app.on_message(filters.command("start"))
     async def start_cmd(_, m: Message):
-        kb = InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("💞 Menus", callback_data=ROOT_CB)],
-                [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
-                [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
-                [InlineKeyboardButton("❓ Help", callback_data="help:open")],
-            ]
-        )
         await m.reply_text(
             "🔥 **Welcome to SuccuBot**\n"
             "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
             "✨ Use the menu below to navigate!",
-            reply_markup=kb,
+            reply_markup=_main_keyboard(),
             disable_web_page_preview=True,
         )
 
-    # /menu → choose a model
+    # ── /menu: choose a model ─────────────────────────────
     @app.on_message(filters.command("menu"))
     async def menu_cmd(_, m: Message):
         await m.reply_text("💕 **Choose a model:**", reply_markup=_models_keyboard())
 
-    # Back to model list
+    # ── Back to model list ─────────────────────────────
     @app.on_callback_query(filters.regex(f"^{ROOT_CB}$"))
     async def root_cb(_, cq: CallbackQuery):
         try:
@@ -95,7 +98,7 @@ def register(app):
             await cq.answer()
             await cq.message.reply_text("💕 **Choose a model:**", reply_markup=_models_keyboard())
 
-    # Pick a specific model → show saved menu + Book/Tip
+    # ── Pick a specific model → show saved menu + Book/Tip ─────────────────────────────
     @app.on_callback_query(filters.regex(r"^panels:pick:.+"))
     async def pick_cb(_, cq: CallbackQuery):
         raw = cq.data[len(PICK_CB_P):]
@@ -116,13 +119,12 @@ def register(app):
                 disable_web_page_preview=True
             )
 
-    # Book button
+    # ── Book button ─────────────────────────────
     @app.on_callback_query(filters.regex(r"^panels:book:.+"))
     async def book_cb(_, cq: CallbackQuery):
         name = _clean(cq.data[len(BOOK_CB_P):])
         url = _get_url("BOOK", name)
         if url:
-            # Send a small message with the link so it’s clickable
             await cq.message.reply_text(
                 f"📖 **Booking for {name}**\n{url}",
                 disable_web_page_preview=False
@@ -130,7 +132,7 @@ def register(app):
         else:
             await cq.answer("No booking link set for this model.", show_alert=True)
 
-    # Tip button
+    # ── Tip button ─────────────────────────────
     @app.on_callback_query(filters.regex(r"^panels:tip:.+"))
     async def tip_cb(_, cq: CallbackQuery):
         name = _clean(cq.data[len(TIP_CB_P):])
@@ -142,3 +144,14 @@ def register(app):
             )
         else:
             await cq.answer("No tip link set for this model.", show_alert=True)
+
+    # ── Return to main /start screen (🏠 Main) ─────────────────────────────
+    @app.on_callback_query(filters.regex("^help:open$"))
+    async def main_home_cb(_, cq: CallbackQuery):
+        await cq.message.edit_text(
+            "🔥 **Welcome back to SuccuBot**\n"
+            "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+            "✨ Use the menu below to navigate!",
+            reply_markup=_main_keyboard(),
+            disable_web_page_preview=True,
+        )
