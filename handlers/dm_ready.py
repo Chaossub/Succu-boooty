@@ -1,169 +1,136 @@
 # handlers/dm_ready.py
-import os, json, threading
+from __future__ import annotations
+
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List
+from typing import Optional, Tuple
 
-from pyrogram import Client, filters, enums
-from pyrogram.types import Message, ChatMemberUpdated
+from pyrogram import Client, filters
+from pyrogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    Message,
+    CallbackQuery,
+)
 
-GROUP_ID = -1002823762054  # your group
+from utils.db import get_db
+from utils.config import (
+    OWNER_ID,
+    DM_READY_COLLECTION,   # e.g. "dm_ready"
+)
+from utils.logger import log
 
-# ---------- Storage (Mongo first, JSON fallback) ----------
-class DMReadyStore:
-    def __init__(self):
-        self._lock = threading.RLock()
-        self._mongo_ok = False
-        self._coll = None
-        uri = os.getenv("MONGO_URI")
-        if uri:
-            try:
-                from pymongo import MongoClient, ASCENDING
-                self._mongo = MongoClient(uri)
-                self._db = self._mongo.get_database()  # default from URI
-                self._coll = self._db["dm_ready"]
-                self._coll.create_index([("user_id", ASCENDING)], unique=True)
-                self._mongo_ok = True
-            except Exception:
-                self._mongo_ok = False
+COLL_NAME = DM_READY_COLLECTION or "dm_ready"
+_db = None
+_col = None
 
-        self._json_path = os.path.join("data", "dm_ready.json")
-        if not self._mongo_ok:
-            os.makedirs("data", exist_ok=True)
-            if not os.path.exists(self._json_path):
-                with open(self._json_path, "w", encoding="utf-8") as f:
-                    json.dump({"users": {}}, f)
 
-    # ----- helpers -----
-    def _now_iso(self) -> str:
-        return datetime.now(timezone.utc).isoformat()
-
-    def _json_load(self) -> Dict[str, Any]:
-        with self._lock:
-            with open(self._json_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-
-    def _json_save(self, data: Dict[str, Any]) -> None:
-        with self._lock:
-            tmp = self._json_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, self._json_path)
-
-    # ----- public API -----
-    def mark_ready(self, user_id: int, first_name: str, username: Optional[str]) -> bool:
-        """
-        Returns True if newly marked; False if already present.
-        """
-        if self._mongo_ok:
-            doc = self._coll.find_one({"user_id": user_id})
-            if doc:
-                return False
-            self._coll.insert_one({
-                "user_id": user_id,
-                "first_name": first_name,
-                "username": username,
-                "since": self._now_iso()
-            })
-            return True
-        data = self._json_load()
-        users = data.get("users", {})
-        if str(user_id) in users:
-            return False
-        users[str(user_id)] = {
-            "first_name": first_name,
-            "username": username,
-            "since": self._now_iso()
-        }
-        data["users"] = users
-        self._json_save(data)
-        return True
-
-    def remove(self, user_id: int) -> bool:
-        """
-        Returns True if removed; False if not present.
-        """
-        if self._mongo_ok:
-            res = self._coll.delete_one({"user_id": user_id})
-            return bool(res.deleted_count)
-        data = self._json_load()
-        users = data.get("users", {})
-        if str(user_id) in users:
-            users.pop(str(user_id), None)
-            data["users"] = users
-            self._json_save(data)
-            return True
-        return False
-
-    def list_all(self) -> List[Dict[str, Any]]:
-        if self._mongo_ok:
-            return list(self._coll.find({}, {"_id": 0}).sort("since", 1))
-        data = self._json_load()
-        users = data.get("users", {})
-        out = []
-        for k, v in users.items():
-            row = {"user_id": int(k)}
-            row.update(v)
-            out.append(row)
-        out.sort(key=lambda r: r.get("since") or "")
-        return out
-
-store = DMReadyStore()
-
-# ---------- Handlers ----------
-# 1) FIRST DM contact → mark them once, silently on duplicates
-@Client.on_message(filters.private & ~filters.service)
-async def dm_first_contact(client: Client, msg: Message):
-    user = msg.from_user
-    if not user:
-        return
-    newly_marked = store.mark_ready(
-        user_id=user.id,
-        first_name=user.first_name or "",
-        username=user.username
-    )
-    if newly_marked:
+def _col_ref():
+    global _db, _col
+    if _col is None:
+        _db = get_db()
+        _col = _db[COLL_NAME]
+        # helpful index; ignore if it exists
         try:
-            await msg.reply_text("You’re now DM-ready ✅")
+            _col.create_index("user_id", unique=True)
         except Exception:
-            pass  # If replies are disabled, just skip
+            pass
+    return _col
 
-# 2) Auto-remove when they leave your group
-@Client.on_chat_member_updated(filters.chat(GROUP_ID))
-async def on_member_update(client: Client, event: ChatMemberUpdated):
-    # Remove when they leave or are kicked
-    new = event.new_chat_member
-    if not new:
-        return
-    status = new.status
-    if status in (enums.ChatMemberStatus.LEFT, enums.ChatMemberStatus.KICKED):
-        user_id = new.user.id
-        removed = store.remove(user_id)
-        if removed:
-            # Optional: log to your admin chat or print
-            print(f"[DM-READY] Removed {user_id} (left group)")
 
-# 3) Admin utility: list DM-ready (callable in group by owner/admins)
-@Client.on_message(filters.command(["dmready", "dmreadylist"]) & filters.chat(GROUP_ID))
-async def dmready_list(client: Client, msg: Message):
-    # You can tighten permissions here if you want:
-    # if msg.from_user and msg.from_user.id not in {6964994611}: return
-    rows = store.list_all()
-    if not rows:
-        await msg.reply_text("No one is DM-ready yet.")
-        return
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-    # Keep it compact
-    lines = []
-    for r in rows[:100]:
-        tag = f"@{r['username']}" if r.get("username") else f"{r.get('first_name','User')} ({r['user_id']})"
-        when = r.get("since", "")[:19].replace("T", " ")
-        lines.append(f"• {tag} — since {when} UTC")
 
-    extras = ""
-    if len(rows) > 100:
-        extras = f"\n… and {len(rows) - 100} more."
-
-    await msg.reply_text(
-        f"**DM-ready users:** {len(rows)}\n" + "\n".join(lines) + extras,
-        disable_web_page_preview=True
+def _status_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("💌 I’m DM-ready", callback_data="dmr:toggle")]]
     )
+
+
+def set_ready(user_id: int, username: Optional[str]) -> Tuple[bool, dict]:
+    """
+    Upsert 'dm-ready' state (true) and touch timestamps.
+    Returns (created_or_updated, doc).
+    """
+    col = _col_ref()
+    update = {
+        "$set": {
+            "user_id": user_id,
+            "username": username,
+            "ready": True,
+            "last_marked_iso": _now_iso(),
+        },
+        "$setOnInsert": {"first_marked_iso": _now_iso()},
+    }
+    res = col.update_one({"user_id": user_id}, update, upsert=True)
+    doc = col.find_one({"user_id": user_id}) or {}
+    return (res.matched_count == 0, doc)
+
+
+def clear_all() -> int:
+    col = _col_ref()
+    res = col.update_many({"ready": True}, {"$set": {"ready": False}})
+    return res.modified_count
+
+
+def is_ready(user_id: int) -> bool:
+    doc = _col_ref().find_one({"user_id": user_id}, {"ready": 1})
+    return bool(doc and doc.get("ready"))
+
+
+# --- function other modules import ---
+def mark_dm_ready_from_message(message: Message) -> None:
+    """
+    Public helper for other handlers (e.g. panels) to mark a user as DM-ready
+    when appropriate.
+    """
+    if not message or not message.from_user:
+        return
+    uid = message.from_user.id
+    uname = message.from_user.username
+    set_ready(uid, uname)
+# -------------------------------------
+
+
+# -------- Handlers (wired via register(app)) --------
+async def _cmd_dmready(client: Client, message: Message):
+    if not message.from_user:
+        return
+    created, doc = set_ready(message.from_user.id, message.from_user.username)
+    if created:
+        txt = "Marked you as **DM-ready**. Models can safely DM you now. 💌"
+    else:
+        txt = "You’re **DM-ready**. I refreshed your time stamp. 💌"
+
+    await message.reply_text(txt, reply_markup=_status_kb(), disable_web_page_preview=True)
+
+
+async def _cb_toggle(client: Client, cq: CallbackQuery):
+    if not cq.from_user:
+        return
+    created, doc = set_ready(cq.from_user.id, cq.from_user.username)
+    await cq.answer("Saved. You’re DM-ready. 💌", show_alert=False)
+
+    try:
+        await cq.message.edit_reply_markup(_status_kb())
+    except Exception:
+        # message might be not editable; that's ok
+        pass
+
+
+async def _cmd_dmresetall(client: Client, message: Message):
+    if message.from_user and message.from_user.id == OWNER_ID:
+        n = clear_all()
+        await message.reply_text(f"✅ Cleared DM-ready flag from **{n}** users.")
+    else:
+        await message.reply_text("Owner only.")
+
+
+def register(app: Client):
+    """
+    Required by main.py loader. Wire instance-specific handlers here.
+    """
+    log.info("✅ handlers.dm_ready registered")
+    app.add_handler(filters.command(["dmready"]) & filters.private, _cmd_dmready)
+    app.add_handler(filters.callback_query("dmr:toggle"), _cb_toggle)
+    app.add_handler(filters.command(["dmresetall"]) & filters.user(OWNER_ID), _cmd_dmresetall)
