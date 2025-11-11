@@ -1,9 +1,9 @@
 # handlers/panels.py
 # Model picker → show saved menu text + Book/Tip buttons
-# + "Find Our Models Elsewhere" panel (read from env)
+# + "Find Our Models Elsewhere" panel (reads FIND_MODELS_TEXT env)
 
 import os
-from typing import List
+from typing import List, Tuple, Optional
 from pyrogram import filters
 from pyrogram.types import (
     InlineKeyboardMarkup,
@@ -34,32 +34,18 @@ def _clean(name: str) -> str:
     return name.strip().strip("»«‘’“”\"'`").strip()
 
 # ───────────────────────────
-# "Models Elsewhere" (from env)
-# MODELS_ELSEWHERE="Label|https://url, Label2|https://url2"
+# Helpers
 # ───────────────────────────
-def _elsewhere_rows() -> list[list[InlineKeyboardButton]]:
-    raw = os.getenv("MODELS_ELSEWHERE", "")
-    rows: list[list[InlineKeyboardButton]] = []
-    for part in [p.strip() for p in raw.split(",") if p.strip()]:
-        if "|" not in part:
-            continue
-        label, url = [s.strip() for s in part.split("|", 1)]
-        if label and url.startswith("http"):
-            rows.append([InlineKeyboardButton(label, url=url)])
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data="home:main")])
-    return rows
+def _back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="home:main")]])
 
-# ───────────────────────────
-# Keyboards
-# ───────────────────────────
 def _models_keyboard() -> InlineKeyboardMarkup:
     rows = []
     row = []
     for i, n in enumerate(MODELS, 1):
         row.append(InlineKeyboardButton(n, callback_data=f"{PICK_CB_P}{n}"))
         if i % 2 == 0:
-            rows.append(row)
-            row = []
+            rows.append(row); row = []
     if row:
         rows.append(row)
     rows.append([
@@ -84,11 +70,36 @@ def _main_keyboard() -> InlineKeyboardMarkup:
     ])
 
 # ───────────────────────────
+# FIND_MODELS_TEXT support
+# - If env looks like "Label|URL, Label2|URL2" → render buttons
+# - Otherwise treat it as free text (links allowed)
+# ───────────────────────────
+def _elsewhere_content() -> Tuple[str, Optional[InlineKeyboardMarkup]]:
+    raw = (os.getenv("FIND_MODELS_TEXT") or "").strip()
+
+    if not raw:
+        txt = ("🍑 **Find Our Models Elsewhere**\n\n"
+               "_Set `FIND_MODELS_TEXT` in your environment to control this panel._")
+        return txt, _back_kb()
+
+    if "|" in raw and ("http://" in raw or "https://" in raw):
+        rows: list[list[InlineKeyboardButton]] = []
+        for part in [p.strip() for p in raw.split(",") if p.strip()]:
+            if "|" not in part: continue
+            label, url = [s.strip() for s in part.split("|", 1)]
+            if label and url.startswith(("http://","https://")):
+                rows.append([InlineKeyboardButton(label, url=url)])
+        if rows:
+            rows.append([InlineKeyboardButton("⬅ Back", callback_data="home:main")])
+            return "🍑 **Find Our Models Elsewhere**\nTap a link below:", InlineKeyboardMarkup(rows)
+
+    return raw, _back_kb()
+
+# ───────────────────────────
 # Handlers
 # ───────────────────────────
 def register(app):
 
-    # /start — main entry screen
     @app.on_message(filters.command("start"))
     async def start_cmd(_, m: Message):
         await m.reply_text(
@@ -99,12 +110,10 @@ def register(app):
             disable_web_page_preview=True
         )
 
-    # /menu — shortcut to model picker
     @app.on_message(filters.command("menu"))
     async def menu_cmd(_, m: Message):
         await m.reply_text("💕 **Choose a model:**", reply_markup=_models_keyboard())
 
-    # Back to model list
     @app.on_callback_query(filters.regex(f"^{ROOT_CB}$"))
     async def back_to_models(_, cq: CallbackQuery):
         try:
@@ -112,23 +121,19 @@ def register(app):
         finally:
             await cq.answer()
 
-    # Pick a specific model → show its saved menu
     @app.on_callback_query(filters.regex(r"^panels:pick:.+"))
     async def pick_cb(_, cq: CallbackQuery):
-        raw = cq.data[len(PICK_CB_P):]
-        name = _clean(raw)
+        name = _clean(cq.data[len(PICK_CB_P):])
         text = store.get_menu(name) or "No menu saved yet.\n\nUse /createmenu <Name> <text…> to set one."
-        content = f"**{name} — Menu**\n\n{text}"
         try:
             await cq.message.edit_text(
-                content,
+                f"**{name} — Menu**\n\n{text}",
                 reply_markup=_menu_keyboard(name),
                 disable_web_page_preview=True
             )
         finally:
             await cq.answer()
 
-    # Book button
     @app.on_callback_query(filters.regex(r"^panels:book:.+"))
     async def book_cb(_, cq: CallbackQuery):
         name = _clean(cq.data[len(BOOK_CB_P):])
@@ -138,7 +143,6 @@ def register(app):
         else:
             await cq.answer("No booking link set for this model.", show_alert=True)
 
-    # Tip button
     @app.on_callback_query(filters.regex(r"^panels:tip:.+"))
     async def tip_cb(_, cq: CallbackQuery):
         name = _clean(cq.data[len(TIP_CB_P):])
@@ -148,17 +152,14 @@ def register(app):
         else:
             await cq.answer("No tip link set for this model.", show_alert=True)
 
-    # 🍑 Find Our Models Elsewhere (inside panels)
     @app.on_callback_query(filters.regex(r"^models_elsewhere:open$"))
     async def elsewhere_cb(_, cq: CallbackQuery):
-        rows = _elsewhere_rows()
-        text = "🍑 **Find Our Models Elsewhere**\nTap a link below:"
+        text, kb = _elsewhere_content()
         try:
-            await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
+            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=False)
         finally:
             await cq.answer()
 
-    # Home button — returns to main /start screen
     @app.on_callback_query(filters.regex("^home:main$"))
     async def home_cb(_, cq: CallbackQuery):
         try:
