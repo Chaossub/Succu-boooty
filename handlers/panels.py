@@ -1,5 +1,7 @@
 # handlers/panels.py
 # Model picker → show saved menu text + Book/Tip buttons
+# + "Find Our Models Elsewhere" panel (read from env)
+
 import os
 from typing import List
 from pyrogram import filters
@@ -30,6 +32,22 @@ TIP_CB_P  = "panels:tip:"
 
 def _clean(name: str) -> str:
     return name.strip().strip("»«‘’“”\"'`").strip()
+
+# ───────────────────────────
+# "Models Elsewhere" (from env)
+# MODELS_ELSEWHERE="Label|https://url, Label2|https://url2"
+# ───────────────────────────
+def _elsewhere_rows() -> list[list[InlineKeyboardButton]]:
+    raw = os.getenv("MODELS_ELSEWHERE", "")
+    rows: list[list[InlineKeyboardButton]] = []
+    for part in [p.strip() for p in raw.split(",") if p.strip()]:
+        if "|" not in part:
+            continue
+        label, url = [s.strip() for s in part.split("|", 1)]
+        if label and url.startswith("http"):
+            rows.append([InlineKeyboardButton(label, url=url)])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data="home:main")])
+    return rows
 
 # ───────────────────────────
 # Keyboards
@@ -91,7 +109,7 @@ def register(app):
     async def back_to_models(_, cq: CallbackQuery):
         try:
             await cq.message.edit_text("💕 **Choose a model:**", reply_markup=_models_keyboard())
-        except Exception:
+        finally:
             await cq.answer()
 
     # Pick a specific model → show its saved menu
@@ -107,7 +125,7 @@ def register(app):
                 reply_markup=_menu_keyboard(name),
                 disable_web_page_preview=True
             )
-        except Exception:
+        finally:
             await cq.answer()
 
     # Book button
@@ -116,7 +134,7 @@ def register(app):
         name = _clean(cq.data[len(BOOK_CB_P):])
         url = _get_url("BOOK", name)
         if url:
-            await cq.message.reply_text(f"📖 **Booking for {name}**\n{url}")
+            await cq.message.reply_text(f"📖 **Booking for {name}**\n{url}", disable_web_page_preview=False)
         else:
             await cq.answer("No booking link set for this model.", show_alert=True)
 
@@ -126,9 +144,19 @@ def register(app):
         name = _clean(cq.data[len(TIP_CB_P):])
         url = _get_url("TIP", name)
         if url:
-            await cq.message.reply_text(f"💸 **Tip {name}**\n{url}")
+            await cq.message.reply_text(f"💸 **Tip {name}**\n{url}", disable_web_page_preview=False)
         else:
             await cq.answer("No tip link set for this model.", show_alert=True)
+
+    # 🍑 Find Our Models Elsewhere (inside panels)
+    @app.on_callback_query(filters.regex(r"^models_elsewhere:open$"))
+    async def elsewhere_cb(_, cq: CallbackQuery):
+        rows = _elsewhere_rows()
+        text = "🍑 **Find Our Models Elsewhere**\nTap a link below:"
+        try:
+            await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
+        finally:
+            await cq.answer()
 
     # Home button — returns to main /start screen
     @app.on_callback_query(filters.regex("^home:main$"))
@@ -141,5 +169,5 @@ def register(app):
                 reply_markup=_main_keyboard(),
                 disable_web_page_preview=True
             )
-        except Exception:
+        finally:
             await cq.answer()
