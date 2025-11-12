@@ -5,18 +5,18 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from utils.menu_store import store
 
-log = logging.getLogger("handlers.createmenu")
+log = logging.getLogger(__name__)
 
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 SUPER_ADMINS = {int(x) for x in os.getenv("SUPER_ADMINS", "").replace(",", " ").split() if x.isdigit()}
 
-def _allowed(user_id: int) -> bool:
-    return user_id == OWNER_ID or user_id in SUPER_ADMINS
+def _allowed(uid: int) -> bool:
+    return uid == OWNER_ID or uid in SUPER_ADMINS
 
 def register(app: Client):
     log.info("✅ handlers.createmenu ready (Mongo=%s)", store.uses_mongo())
 
-    @app.on_message(filters.private & filters.command("createmenu"))
+    @app.on_message(filters.command("createmenu"))
     async def createmenu(_, m: Message):
         if not (m.from_user and _allowed(m.from_user.id)):
             return await m.reply_text("❌ You’re not allowed to use this command.")
