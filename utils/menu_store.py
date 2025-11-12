@@ -1,16 +1,6 @@
-# utils/menu_store.py
 """
 Persistent store for model menus.
-- Uses MongoDB when available (recommended for cloud deploys).
-- Falls back to an atomic JSON file for local persistence across restarts.
-
-Env (Mongo preferred):
-  MONGO_URL or MONGO_URI
-  MONGO_DB or MONGO_DB_NAME or MONGO_DBNAME      (default: "succubot")
-  MONGO_MENU_COLLECTION or MENUS_COLLECTION      (default: "succubot_menus")
-
-JSON fallback:
-  MENU_STORE_PATH                                (default: "data/menus.json")
+Prefers Mongo (MONGO_URL/MONGO_URI), falls back to JSON (MENU_STORE_PATH).
 """
 import os, json, tempfile, threading, re
 from typing import Dict, Optional, List
@@ -32,7 +22,6 @@ _JSON_PATH = os.getenv("MENU_STORE_PATH", "data/menus.json")
 _WS_RE = re.compile(r"\s+", re.UNICODE)
 
 def _canon(name: str) -> str:
-    """Canonicalize a model name for keys: strip, replace NBSP, collapse ws, lower."""
     if not name:
         return ""
     s = str(name).replace("\u00A0", " ").strip()
@@ -40,7 +29,6 @@ def _canon(name: str) -> str:
     return s.casefold()
 
 def _pretty(name: str) -> str:
-    """Human-readable display name (trimmed & single spaced)."""
     if not name:
         return ""
     s = str(name).replace("\u00A0", " ").strip()
@@ -69,7 +57,6 @@ class MenuStore:
             os.makedirs(os.path.dirname(_JSON_PATH) or ".", exist_ok=True)
             self._load_json()
 
-    # ---------- public ----------
     def set_menu(self, model: str, text: str) -> None:
         key = _canon(model)
         disp = _pretty(model)
@@ -102,7 +89,6 @@ class MenuStore:
                     )
                     return legacy["text"]
                 return None
-            # JSON mode
             rec = self._cache.get(key)
             if rec:
                 return rec.get("text")
@@ -117,6 +103,7 @@ class MenuStore:
                 out: List[str] = []
                 for d in self._col.find({}, {"_id": 1, "name": 1}):
                     out.append(d.get("name") or d.get("_id") or "")
+                # hard de-dup (names might collide if old docs linger)
                 return sorted({ _pretty(n) for n in out if n })
             return sorted({ rec.get("name") or "" for rec in self._cache.values() if rec.get("name") })
 
@@ -127,7 +114,6 @@ class MenuStore:
     def uses_mongo(self) -> bool:
         return self._use_mongo
 
-    # ---------- json helpers ----------
     def _load_json(self):
         try:
             with open(_JSON_PATH, "r", encoding="utf-8") as f:
