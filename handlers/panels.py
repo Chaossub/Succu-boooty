@@ -2,12 +2,17 @@
 import os
 import logging
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery, Message
+from pyrogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    CallbackQuery,
+    Message,
+)
 from utils.menu_store import store
 
 log = logging.getLogger(__name__)
 
-### USERNAMES (NO @)
+# ---------- model usernames (no @) ----------
 RONI = os.getenv("RONI_USERNAME", "")
 RUBY = os.getenv("RUBY_USERNAME", "")
 RIN  = os.getenv("RIN_USERNAME", "")
@@ -16,89 +21,109 @@ SAVY = os.getenv("SAVY_USERNAME", "")
 MODELS = [
     ("Roni", RONI),
     ("Ruby", RUBY),
-    ("Rin", RIN),
+    ("Rin",  RIN),
     ("Savy", SAVY),
 ]
 
 
-def register(app: Client):
-    log.info("panels loaded")
+def _main_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💕 Menus", callback_data="menus:list")],
+        [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
+        [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
+        [InlineKeyboardButton("❓ Help", callback_data="help:open")],
+    ])
 
-    # ------------------ /start ------------------
+
+def register(app: Client):
+    log.info("✅ handlers.panels registered (2x2 model grid)")
+
+    # ---------- /start ----------
     @app.on_message(filters.command("start"))
     async def start_cmd(_, m: Message):
-        txt = (
+        text = (
             "🔥 Welcome to SuccuBot 🔥\n"
             "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
-            "😈 If you ever need to know exactly what I can do, press Help… 💋"
+            "😈 If you ever need to know exactly what I can do, just press the Help button and I’ll spill all my secrets… 💋"
         )
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💕 Menus", callback_data="menus:list")],
-            [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
-            [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
-            [InlineKeyboardButton("❓ Help", callback_data="help:open")],
-        ])
-        await m.reply(txt, reply_markup=kb)
+        await m.reply_text(text, reply_markup=_main_menu_kb())
 
-    # ------------------ Menus main ------------------
-    @app.on_callback_query(filters.regex("^menus:list$"))
-    async def menus_list(_, cq: CallbackQuery):
-        rows = []
-        for name, _ in MODELS:
-            rows.append([InlineKeyboardButton(name, callback_data=f"menus:model:{name}")])
+    # ---------- Menus: list models (2x2 grid) ----------
+    @app.on_callback_query(filters.regex(r"^menus:list$"))
+    async def menus_list_cb(_, cq: CallbackQuery):
+        rows: list[list[InlineKeyboardButton]] = []
+        current_row: list[InlineKeyboardButton] = []
+
+        for name, _username in MODELS:
+            current_row.append(
+                InlineKeyboardButton(name, callback_data=f"menus:model:{name}")
+            )
+            if len(current_row) == 2:
+                rows.append(current_row)
+                current_row = []
+
+        if current_row:
+            rows.append(current_row)
+
         rows.append([InlineKeyboardButton("⬅ Back", callback_data="panels:root")])
-        await cq.message.edit("📖 Menus\nTap a name to view.", reply_markup=InlineKeyboardMarkup(rows))
+
+        kb = InlineKeyboardMarkup(rows)
+        await cq.message.edit_text("📖 <b>Menus</b>\nTap a name to view.", reply_markup=kb)
         await cq.answer()
 
-    # ------------------ Individual model ------------------
+    # ---------- Individual model page ----------
     @app.on_callback_query(filters.regex(r"^menus:model:(.+)$"))
-    async def model_page(_, cq: CallbackQuery):
+    async def model_page_cb(_, cq: CallbackQuery):
         model = cq.data.split(":", 2)[2]
 
-        # find username
         username = ""
         for n, u in MODELS:
             if n == model:
-                username = u
+                username = u or ""
                 break
 
-        # get saved menu (optional)
-        menu = store.get_menu(model)
-        if menu:
-            text = f"<b>{model} — menu</b>\n\n{menu}"
+        menu_text = store.get_menu(model)
+        if menu_text:
+            text = f"<b>{model} — Menu</b>\n\n{menu_text}"
         else:
-            text = f"<b>{model} — menu</b>\n\n(no menu saved yet)"
+            text = f"<b>{model} — Menu</b>\n\n(no menu saved yet)"
+
+        if username:
+            book_button = InlineKeyboardButton("📖 Book", url=f"https://t.me/{username}")
+        else:
+            book_button = InlineKeyboardButton("📖 Book", callback_data="book:none")
 
         kb = InlineKeyboardMarkup([
             [
-                InlineKeyboardButton("📖 Book", url=f"https://t.me/{username}") if username
-                else InlineKeyboardButton("📖 Book", callback_data="book:none"),
+                book_button,
                 InlineKeyboardButton("💸 Tip (coming soon)", callback_data="tips:soon"),
             ],
             [InlineKeyboardButton("⬅ Back", callback_data="menus:list")],
             [InlineKeyboardButton("🏠 Main Menu", callback_data="panels:root")],
         ])
 
-        await cq.message.edit(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.message.edit_text(
+            text,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
         await cq.answer()
 
-    # ------------------ Back to main panel ------------------
-    @app.on_callback_query(filters.regex("^panels:root$"))
-    async def root(_, cq: CallbackQuery):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💕 Menus", callback_data="menus:list")],
-            [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
-            [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
-            [InlineKeyboardButton("❓ Help", callback_data="help:open")],
-        ])
-        await cq.message.edit("🔥 Main Menu", reply_markup=kb)
+    # ---------- Back to main menu ----------
+    @app.on_callback_query(filters.regex(r"^panels:root$"))
+    async def panels_root_cb(_, cq: CallbackQuery):
+        await cq.message.edit_text(
+            "🔥 Welcome back to SuccuBot\n"
+            "Use the menu below to navigate!",
+            reply_markup=_main_menu_kb(),
+        )
         await cq.answer()
 
-    # ------------------ tip/book placeholders ------------------
-    @app.on_callback_query(filters.regex("^tips:soon$"))
-    async def tsoon(_, cq):
+    # ---------- placeholders ----------
+    @app.on_callback_query(filters.regex(r"^tips:soon$"))
+    async def tips_soon_cb(_, cq: CallbackQuery):
         await cq.answer("Stripe tips coming soon 💕", show_alert=True)
 
-    @app.on_callback_query(filters.regex("^book:none$"))
-    async def bnone(_, cq):
+    @app.on_callback_query(filters.regex(r"^book:none$"))
+    async def book_none_cb(_, cq: CallbackQuery):
         await cq.answer("No booking link set yet 💕", show_alert=True)
