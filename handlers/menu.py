@@ -1,4 +1,3 @@
-# handlers/menu.py
 # Inline menu browser: /menus -> buttons of model names -> tap to view saved menu
 import logging
 from pyrogram import filters
@@ -32,18 +31,16 @@ def _find_name_ci(target: str) -> str | None:
 def _get_menu_ci(name: str) -> tuple[str | None, str | None]:
     """
     Try exact, then case-insensitive. Returns (actual_name, text).
-    actual_name is the canonical stored key (for buttons/back labels).
+    actual_name is the canonical stored display name (for buttons/back labels).
     """
     key = _clean(name)
     if not key:
         return None, None
 
-    # exact first
     txt = store.get_menu(key)
     if txt is not None:
         return key, txt
 
-    # case-insensitive fallback
     match = _find_name_ci(key)
     if match:
         txt = store.get_menu(match)
@@ -84,7 +81,7 @@ def register(app):
         log.info("showmenu: raw=%r -> key=%r found=%s", raw, name, text is not None)
         if text is None:
             return await m.reply(f"Menu '<b>{_clean(raw)}</b>' not found.")
-        await m.reply(text, disable_web_page_preview=True)
+        await m.reply_text(f"<b>{name} — Menu</b>\n\n{text}", disable_web_page_preview=True)
 
     # Open / refresh the list UI
     @app.on_callback_query(filters.regex(f"^{OPEN_CB}$|^{LIST_CB}$"))
