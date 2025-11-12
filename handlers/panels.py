@@ -1,21 +1,15 @@
 # handlers/panels.py
-import os
+# Your home /start panel with buttons; uses the store only to decide wording.
 import logging
+import os
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from utils.menu_store import store  # only for the Menus picker; safe if Mongo down
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message, CallbackQuery
+from utils.menu_store import store
 
-log = logging.getLogger("handlers.panels")
-
-WELCOME_TEXT = (
-    "🔥 <b>Welcome to SuccuBot</b>\n"
-    "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
-    "✨ Use the menu below to navigate!"
-)
-
+log = logging.getLogger(__name__)
 FIND_MODELS_TEXT = os.getenv("FIND_MODELS_TEXT", "Nothing here yet 💕")
 
-def _home_kb() -> InlineKeyboardMarkup:
+def _home_kb():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("💞 Menus", callback_data="panels:root")],
         [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
@@ -23,65 +17,57 @@ def _home_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❓ Help", callback_data="help:open")],
     ])
 
-def _models_kb() -> InlineKeyboardMarkup:
-    # Safe even if Mongo is unavailable (store falls back to JSON)
-    names = store.list_names()
-    rows = []
-    if names:
-        for n in names:
-            rows.append([InlineKeyboardButton(n, callback_data=f"menus:show:{n}")])
-    else:
-        rows.append([InlineKeyboardButton("➕ Create a menu with /createmenu", callback_data="panels:noop")])
-    rows.append([InlineKeyboardButton("⬅️ Back to Main", callback_data="portal:home")])
-    return InlineKeyboardMarkup(rows)
+def _menus_root_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 View Menus", callback_data="menus:open")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="portal:home")],
+    ])
 
 def register(app: Client):
     log.info("✅ handlers.panels registered (CI menu lookup)")
 
-    # ---- /start (private) ----
-    @app.on_message(filters.private & filters.command("start"))
-    async def start_cmd(_, m):
+    @app.on_message(filters.command("start"))
+    async def start_cmd(_, m: Message):
         try:
-            log.info("/start from uid=%s", getattr(m.from_user, "id", None))
-            await m.reply_text(WELCOME_TEXT, reply_markup=_home_kb(), disable_web_page_preview=True)
+            await m.reply_text(
+                "🔥 Welcome to SuccuBot\n"
+                "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
+                "✨ Use the menu below to navigate!",
+                reply_markup=_home_kb(),
+                disable_web_page_preview=True,
+            )
         except Exception as e:
-            log.exception("start_cmd failed: %s", e)
+            log.warning("start reply failed: %s", e)
 
-    # ---- open home from a button (used widely) ----
-    @app.on_callback_query(filters.regex("^portal:home$|^panels:root$"))
-    async def home_cb(_, cq: CallbackQuery):
+    @app.on_callback_query(filters.regex("^panels:root$"))
+    async def menus_root(_, cq: CallbackQuery):
         try:
-            await cq.message.edit_text(WELCOME_TEXT, reply_markup=_home_kb(), disable_web_page_preview=True)
-        except Exception:
-            # if message can't be edited (e.g., same text), reply instead
-            await cq.message.reply_text(WELCOME_TEXT, reply_markup=_home_kb(), disable_web_page_preview=True)
+            await cq.message.edit_text(
+                "💕 <b>Menus</b>",
+                reply_markup=_menus_root_kb(),
+                disable_web_page_preview=True,
+            )
         finally:
             await cq.answer()
 
-    # ---- models elsewhere (backstop if not provided by help_panel) ----
+    # Fallback for models_elsewhere if main didn't install one
     @app.on_callback_query(filters.regex("^models_elsewhere:open$"))
-    async def models_elsewhere_cb(_, cq: CallbackQuery):
+    async def _models_elsewhere_cb(_, cq: CallbackQuery):
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back to Main", callback_data="portal:home")]])
         try:
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back to Main", callback_data="portal:home")]])
-            await cq.message.edit_text(FIND_MODELS_TEXT or "Nothing here yet 💕", reply_markup=kb, disable_web_page_preview=True)
-        except Exception:
-            await cq.message.reply_text(FIND_MODELS_TEXT or "Nothing here yet 💕",
-                                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back to Main", callback_data="portal:home")]]),
-                                        disable_web_page_preview=True)
+            await cq.message.edit_text(FIND_MODELS_TEXT, reply_markup=kb, disable_web_page_preview=True)
         finally:
             await cq.answer()
 
-    # ---- no-op to swallow taps on informational rows ----
-    @app.on_callback_query(filters.regex("^panels:noop$"))
-    async def noop_cb(_, cq: CallbackQuery):
-        await cq.answer("Use /createmenu to add one ✨", show_alert=False)
-
-    # ---- Menus picker page (list) ----
-    @app.on_callback_query(filters.regex("^menus:list$|^panels:menus$"))
-    async def menus_list_cb(_, cq: CallbackQuery):
+    # Bridge to the list UI inside handlers.menu
+    @app.on_callback_query(filters.regex("^menus:open$"))
+    async def _open_lists(_, cq: CallbackQuery):
         try:
-            await cq.message.edit_text("📖 <b>Menus</b>\nTap a name to view.", reply_markup=_models_kb(), disable_web_page_preview=True)
+            # trigger the list callback in handlers.menu by sending its list callback data
+            await cq.message.edit_text("📖 <b>Menus</b>\nTap a name to view.",
+                                       reply_markup=None, disable_web_page_preview=True)
+            await cq.message.click(0)  # harmless if no buttons; real list is provided by handlers.menu
         except Exception:
-            await cq.message.reply_text("📖 <b>Menus</b>\nTap a name to view.", reply_markup=_models_kb(), disable_web_page_preview=True)
+            pass
         finally:
             await cq.answer()
