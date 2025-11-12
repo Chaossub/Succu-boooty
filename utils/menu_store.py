@@ -1,6 +1,16 @@
+# utils/menu_store.py
 """
 Persistent store for model menus.
-Prefers Mongo (MONGO_URL/MONGO_URI), falls back to JSON (MENU_STORE_PATH).
+- Uses MongoDB when available (recommended for cloud deploys).
+- Falls back to an atomic JSON file for local persistence across restarts.
+
+Env (Mongo preferred):
+  MONGO_URL or MONGO_URI
+  MONGO_DB or MONGO_DB_NAME or MONGO_DBNAME      (default: "succubot")
+  MONGO_MENU_COLLECTION or MENUS_COLLECTION      (default: "succubot_menus")
+
+JSON fallback:
+  MENU_STORE_PATH                                (default: "data/menus.json")
 """
 import os, json, tempfile, threading, re
 from typing import Dict, Optional, List
@@ -22,6 +32,7 @@ _JSON_PATH = os.getenv("MENU_STORE_PATH", "data/menus.json")
 _WS_RE = re.compile(r"\s+", re.UNICODE)
 
 def _canon(name: str) -> str:
+    """Canonicalize a model name for keys: strip, replace NBSP, collapse ws, lower."""
     if not name:
         return ""
     s = str(name).replace("\u00A0", " ").strip()
@@ -29,6 +40,7 @@ def _canon(name: str) -> str:
     return s.casefold()
 
 def _pretty(name: str) -> str:
+    """Return the human readable display name (trimmed & single spaced)."""
     if not name:
         return ""
     s = str(name).replace("\u00A0", " ").strip()
@@ -39,7 +51,7 @@ class MenuStore:
     def __init__(self):
         self._lock = threading.RLock()
         self._use_mongo = False
-        # key -> {"name": display, "text": text}
+        # cache shape: key -> {"name": display, "text": text}
         self._cache: Dict[str, Dict[str, str]] = {}
 
         if _MONGO_URL:
@@ -57,7 +69,12 @@ class MenuStore:
             os.makedirs(os.path.dirname(_JSON_PATH) or ".", exist_ok=True)
             self._load_json()
 
+    # ---------- public ----------
     def set_menu(self, model: str, text: str) -> None:
+        """
+        Save menu, and if using Mongo, immediately refresh local cache so buttons
+        show the new content without waiting for a restart.
+        """
         key = _canon(model)
         disp = _pretty(model)
         with self._lock:
@@ -67,6 +84,13 @@ class MenuStore:
                     {"$set": {"name": disp, "text": str(text)}},
                     upsert=True,
                 )
+                # Force-refresh cache from Mongo so taps right after /createmenu work.
+                doc = self._col.find_one({"_id": key}, {"name": 1, "text": 1})
+                if doc:
+                    self._cache[key] = {
+                        "name": doc.get("name", disp),
+                        "text": doc.get("text", str(text)),
+                    }
             else:
                 self._cache[key] = {"name": disp, "text": str(text)}
                 self._save_json()
@@ -76,12 +100,14 @@ class MenuStore:
         disp = _pretty(model)
         with self._lock:
             if self._use_mongo:
+                # Primary lookup by canonical key
                 doc = self._col.find_one({"_id": key}, {"text": 1})
                 if doc and "text" in doc:
                     return doc["text"]
-                # legacy mixed-case key fallback + migrate
+                # Legacy fallback: older docs saved with mixed-case _id
                 legacy = self._col.find_one({"_id": disp}, {"text": 1})
                 if legacy and "text" in legacy:
+                    # migrate to canonical key for stability
                     self._col.update_one(
                         {"_id": key},
                         {"$set": {"name": disp, "text": legacy["text"]}},
@@ -89,12 +115,13 @@ class MenuStore:
                     )
                     return legacy["text"]
                 return None
+            # JSON mode + legacy support
             rec = self._cache.get(key)
             if rec:
                 return rec.get("text")
-            legacy = self._cache.get(disp.casefold())
-            if legacy:
-                return legacy.get("text")
+            rec = self._cache.get(disp.casefold())
+            if rec:
+                return rec.get("text")
             return None
 
     def all_models(self) -> List[str]:
@@ -103,7 +130,7 @@ class MenuStore:
                 out: List[str] = []
                 for d in self._col.find({}, {"_id": 1, "name": 1}):
                     out.append(d.get("name") or d.get("_id") or "")
-                # hard de-dup (names might collide if old docs linger)
+                # normalize and unique + sorted (prevents dup-looking buttons)
                 return sorted({ _pretty(n) for n in out if n })
             return sorted({ rec.get("name") or "" for rec in self._cache.values() if rec.get("name") })
 
@@ -114,6 +141,7 @@ class MenuStore:
     def uses_mongo(self) -> bool:
         return self._use_mongo
 
+    # ---------- json helpers ----------
     def _load_json(self):
         try:
             with open(_JSON_PATH, "r", encoding="utf-8") as f:
@@ -131,8 +159,9 @@ class MenuStore:
             self._cache = {}
 
     def _save_json(self):
-        tmp_fd, tmp_path = tempfile.mkstemp(prefix="menus.", suffix=".json",
-                                            dir=os.path.dirname(_JSON_PATH) or ".")
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix="menus.", suffix=".json", dir=os.path.dirname(_JSON_PATH) or "."
+        )
         try:
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
                 json.dump(self._cache, f, ensure_ascii=False, indent=2)
@@ -144,4 +173,5 @@ class MenuStore:
             except Exception:
                 pass
 
+# Shared instance
 store = MenuStore()
