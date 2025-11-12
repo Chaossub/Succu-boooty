@@ -140,10 +140,10 @@ async def mark_dm_ready_from_message(m: Message) -> None:
         log.error("mark_dm_ready_from_message failed: %s", e)
 
 def register(app: Client):
-    log.info("✅ handlers.dm_ready wired")
+    log.info("✅ handlers.dm_ready wired (OWNER_ID=%s)", OWNER_ID)
 
-    # Do NOT filter by user here; always trigger, then check inside.
-    @app.on_message(filters.private & filters.command("dmreadylist"))
+    # Run these commands FIRST so they can't be swallowed by other DM handlers
+    @app.on_message(filters.private & filters.command("dmreadylist"), group=-1)
     async def _dmreadylist(_: Client, m: Message):
         try:
             uid = m.from_user.id if m.from_user else 0
@@ -175,5 +175,26 @@ def register(app: Client):
 
         except Exception as e:
             log.exception("/dmreadylist crashed: %s", e)
-            # Still tell you something so it never feels dead.
             await m.reply_text(f"❌ dmreadylist failed: {e}")
+
+    @app.on_message(filters.private & filters.command("whoami"), group=-1)
+    async def _whoami(_: Client, m: Message):
+        try:
+            u = m.from_user
+            if not u:
+                await m.reply_text("No user info.")
+                return
+            await m.reply_text(
+                f"ID: {u.id}\nUsername: @{u.username or '—'}\nName: {u.first_name} {u.last_name or ''}".strip()
+            )
+        except Exception as e:
+            log.exception("/whoami crashed: %s", e)
+            await m.reply_text(f"❌ whoami failed: {e}")
+
+    # Passive tracker (later group so it never blocks commands)
+    @app.on_message(
+        filters.private & ~filters.service & ~filters.command(["dmreadylist", "whoami"]),
+        group=10
+    )
+    async def _mark_all_private(_: Client, m: Message):
+        await mark_dm_ready_from_message(m)
