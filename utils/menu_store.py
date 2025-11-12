@@ -11,8 +11,10 @@ Env (Mongo preferred):
 JSON fallback:
   MENU_STORE_PATH                                (default: "data/menus.json")
 """
-import os, json, tempfile, threading, re
+import os, json, tempfile, threading, re, logging
 from typing import Dict, Optional, List
+
+log = logging.getLogger(__name__)
 
 _MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGO_URI")
 _MONGO_DB  = (
@@ -31,20 +33,19 @@ _JSON_PATH = os.getenv("MENU_STORE_PATH", "data/menus.json")
 _WS_RE = re.compile(r"\s+", re.UNICODE)
 
 def _canon(name: str) -> str:
-    """Canonicalize a model name for keys: strip, replace NBSP, collapse ws, lower."""
+    """Canonical key: collapse whitespace, strip, lower; NBSP -> space."""
     if not name:
         return ""
-    # normalize whitespace variants and sneaky NBSPs
-    s = str(name).replace("\u00A0", " ").strip()
-    s = _WS_RE.sub(" ", s)
-    return s.casefold()
+    s = str(name).replace("\u00A0", " ")
+    s = _WS_RE.sub(" ", s).strip().casefold()
+    return s
 
 def _pretty(name: str) -> str:
-    """Return the human readable display name (trimmed & single spaced)."""
+    """Pretty display: single spaces, trimmed."""
     if not name:
         return ""
-    s = str(name).replace("\u00A0", " ").strip()
-    s = _WS_RE.sub(" ", s)
+    s = str(name).replace("\u00A0", " ")
+    s = _WS_RE.sub(" ", s).strip()
     return s
 
 class MenuStore:
@@ -56,18 +57,20 @@ class MenuStore:
         if _MONGO_URL:
             try:
                 from pymongo import MongoClient
-                self._mc = MongoClient(_MONGO_URL, serverSelectionTimeoutMS=3000)
+                self._mc = MongoClient(_MONGO_URL, serverSelectionTimeoutMS=4000)
                 self._mc.admin.command("ping")
                 self._col = self._mc[_MONGO_DB][_MENU_COLL]
-                # helpful index on display name if you ever want to search
                 self._col.create_index("name", unique=False)
                 self._use_mongo = True
-            except Exception:
+                log.info("MenuStore: Mongo OK db=%s coll=%s", _MONGO_DB, _MENU_COLL)
+            except Exception as e:
+                log.warning("MenuStore: Mongo unavailable, falling back to JSON: %s", e)
                 self._use_mongo = False
 
         if not self._use_mongo:
             os.makedirs(os.path.dirname(_JSON_PATH) or ".", exist_ok=True)
             self._load_json()
+            log.info("MenuStore: JSON at %s", _JSON_PATH)
 
     # ---------- public ----------
     def set_menu(self, model: str, text: str) -> None:
@@ -75,7 +78,6 @@ class MenuStore:
         disp = _pretty(model)
         with self._lock:
             if self._use_mongo:
-                # store canonical key, keep pretty name for display
                 self._col.update_one(
                     {"_id": key},
                     {"$set": {"name": disp, "text": str(text)}},
@@ -90,14 +92,12 @@ class MenuStore:
         disp = _pretty(model)
         with self._lock:
             if self._use_mongo:
-                # Primary lookup by canonical key
                 doc = self._col.find_one({"_id": key}, {"text": 1})
                 if doc and "text" in doc:
                     return doc["text"]
-                # Legacy fallback: some older docs might be saved with mixed-case _id
+                # legacy: display used as _id
                 legacy = self._col.find_one({"_id": disp}, {"text": 1})
                 if legacy and "text" in legacy:
-                    # migrate in place to canonical key for future stability
                     self._col.update_one(
                         {"_id": key},
                         {"$set": {"name": disp, "text": legacy["text"]}},
@@ -109,8 +109,7 @@ class MenuStore:
             rec = self._cache.get(key)
             if rec:
                 return rec.get("text")
-            # legacy JSON fallback: raw key by display (older versions)
-            rec = self._cache.get(disp.casefold())
+            rec = self._cache.get(disp.casefold())  # legacy json
             if rec:
                 return rec.get("text")
             return None
@@ -118,13 +117,10 @@ class MenuStore:
     def all_models(self) -> List[str]:
         with self._lock:
             if self._use_mongo:
-                # prefer stored display names, fall back to _id
                 out: List[str] = []
                 for d in self._col.find({}, {"_id": 1, "name": 1}):
                     out.append(d.get("name") or d.get("_id") or "")
-                # unique + sorted
                 return sorted({ _pretty(n) for n in out if n })
-            # JSON
             return sorted({ rec.get("name") or "" for rec in self._cache.values() if rec.get("name") })
 
     # convenience
@@ -139,7 +135,6 @@ class MenuStore:
         try:
             with open(_JSON_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f) or {}
-            # support both new and legacy shapes
             norm: Dict[str, Dict[str, str]] = {}
             for k, v in data.items():
                 if isinstance(v, dict) and "text" in v:
@@ -153,14 +148,11 @@ class MenuStore:
             self._cache = {}
 
     def _save_json(self):
-        # write atomically
         tmp_fd, tmp_path = tempfile.mkstemp(prefix="menus.", suffix=".json",
                                             dir=os.path.dirname(_JSON_PATH) or ".")
         try:
-            # store as { key: {name, text} }
-            to_write = self._cache
             with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-                json.dump(to_write, f, ensure_ascii=False, indent=2)
+                json.dump(self._cache, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, _JSON_PATH)
         finally:
             try:
