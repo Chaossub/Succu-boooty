@@ -49,7 +49,7 @@ class DMReadyStore:
         mongo_url = os.getenv("MONGO_URL") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
         if mongo_url:
             try:
-                from pymongo import MongoClient, ASCENDING
+                from pymongo import MongoClient
                 db_name = os.getenv("MONGO_DB") or os.getenv("MONGO_DBNAME") or "succubot"
                 cli = MongoClient(mongo_url, serverSelectionTimeoutMS=8000)
                 db = cli[db_name]
@@ -91,7 +91,6 @@ class DMReadyStore:
     ) -> str:
         """Create on first seen, do nothing on repeats. Returns the first_seen ISO string."""
         if self.mode == "mongo":
-            from pymongo import ReturnDocument
             # upsert without changing first_seen after it exists
             existing = self._col.find_one({"user_id": user_id})
             if existing:
@@ -158,9 +157,21 @@ async def mark_dm_ready_from_message(m: Message) -> None:
 
 # ---------- owner/admin command ----------
 def register(app: Client):
-    @app.on_message(filters.private & filters.user(OWNER_ID) & filters.command("dmreadylist"))
+    # Utility to confirm the ID you're DM'ing from
+    @app.on_message(filters.private & filters.command("whoami"))
+    async def _whoami(_: Client, m: Message):
+        uid = m.from_user.id if m.from_user else 0
+        uname = ("@" + m.from_user.username) if (m.from_user and m.from_user.username) else "(no username)"
+        await m.reply_text(f"Your ID: <code>{uid}</code>\nUsername: {uname}")
+
+    # Allow all private chats to hit; enforce OWNER check inside
+    @app.on_message(filters.private & filters.command("dmreadylist"))
     async def _dmreadylist(_: Client, m: Message):
+        if m.from_user is None or m.from_user.id != OWNER_ID:
+            return  # silently ignore for non-owner
+
         users = store.all()
+
         # sort by first_marked_iso (oldest first)
         def _key(rec: Dict) -> Tuple[str, int]:
             return (rec.get("first_marked_iso") or "", rec.get("user_id") or 0)
@@ -175,10 +186,7 @@ def register(app: Client):
             uid = r.get("user_id")
             un = r.get("username") or ""
             first_seen_la = _iso_to_la_str(r.get("first_marked_iso") or "")
-            if un:
-                who = f"@{un} — {uid}"
-            else:
-                who = f"{uid}"
+            who = f"@{un} — {uid}" if un else f"{uid}"
             lines.append(f"{i}. {who} — {first_seen_la}")
 
         await m.reply_text("\n".join(lines), disable_web_page_preview=True)
