@@ -1,31 +1,32 @@
-# /createmenu <Name> <text...>  -> saves to persistent store
+# handlers/createmenu.py
 import os
+import logging
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from utils.menu_store import store
 
-OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
-SUPER_ADMINS = {int(x) for x in os.getenv("SUPER_ADMINS", "").replace(",", " ").split() if x.isdigit()}
+log = logging.getLogger(__name__)
 
-def _allowed(user_id: int) -> bool:
-    return user_id == OWNER_ID or user_id in SUPER_ADMINS
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
+
+def allowed(uid: int) -> bool:
+    return uid == OWNER_ID
 
 def register(app: Client):
+    log.info("createmenu loaded")
+
     @app.on_message(filters.command("createmenu"))
-    async def createmenu(_, m: Message):
-        if not (m.from_user and _allowed(m.from_user.id)):
-            return await m.reply_text("❌ You’re not allowed to use this command.")
+    async def _cm(_, m: Message):
+        if not allowed(m.from_user.id):
+            return await m.reply("❌ Not allowed.")
 
-        parts = (m.text or "").split(maxsplit=2)
+        parts = m.text.split(maxsplit=2)
         if len(parts) < 3:
-            return await m.reply_text(
-                "Usage:\n<code>/createmenu &lt;Name&gt; &lt;text...&gt;</code>",
-                disable_web_page_preview=True,
-            )
+            return await m.reply("Usage: /createmenu Name text...")
 
-        name, text = parts[1].strip(), parts[2].strip()
+        name = parts[1]
+        text = parts[2]
+
         store.set_menu(name, text)
-        await m.reply_text(
-            f"✅ Saved menu for <b>{name}</b>.\nOpen <b>/showmenu {name}</b> or tap it in <b>/menus</b>.",
-            disable_web_page_preview=True,
-        )
+        await m.reply(f"✅ Saved menu for {name}.")
+
