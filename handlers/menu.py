@@ -1,8 +1,6 @@
-# handlers/menu.py
 # Inline menu browser: /menus -> buttons of model names -> tap to view saved menu
-import logging
-import os, re
-from pyrogram import Client, filters
+import logging, re, os
+from pyrogram import filters, Client
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
@@ -16,42 +14,16 @@ log = logging.getLogger(__name__)
 LIST_CB   = "menus:list"
 OPEN_CB   = "menus:open"
 SHOW_CB_P = "menus:show:"   # prefix: menus:show:<Name>
+TIP_CB_P  = "menus:tip:"    # prefix: menus:tip:<Name>
 
-# ---------- contacts parsing (for 📖 Book) ----------
-# MODELS_CONTACTS="Rin=@rin, Ruby=ruby123"
-_CONTACTS: dict[str, str] = {}
-_raw = os.getenv("MODELS_CONTACTS", "")
-for part in _raw.split(","):
-    s = part.strip()
-    if not s:
-        continue
-    m = re.split(r"[:=]", s, maxsplit=1)
-    if len(m) == 2:
-        k, v = m[0].strip(), m[1].strip().lstrip("@")
-        if k and v:
-            _CONTACTS[k] = v
-
-def _slug_env_key(name: str) -> str:
-    # MODEL_USERNAME_<SLUG>
-    slug = re.sub(r"[^A-Za-z0-9]+", "_", name or "").upper().strip("_")
-    return f"MODEL_USERNAME_{slug}"
-
-def _username_for(name: str) -> str | None:
-    # exact
-    if name in _CONTACTS:
-        return _CONTACTS[name]
-    # case-insensitive
-    t = (name or "").casefold()
-    for k, v in _CONTACTS.items():
-        if k.casefold() == t:
-            return v
-    # per-model env
-    v = os.getenv(_slug_env_key(name), "").strip().lstrip("@")
-    return v or None
-
-# ---------- helpers ----------
 def _clean(name: str) -> str:
     return (name or "").strip().strip("»«‘’“”\"'`").strip()
+
+def _slug_env_key(name: str) -> str:
+    # Make something safe to read env like BOOK_URL_RIN
+    s = re.sub(r"\s+", "_", name.strip())
+    s = re.sub(r"[^A-Za-z0-9_]+", "", s)
+    return s.upper()
 
 def _find_name_ci(target: str) -> str | None:
     """Return the actual stored name that matches target, case-insensitive."""
@@ -95,36 +67,53 @@ def _names_keyboard() -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     for n in names:
         rows.append([InlineKeyboardButton(n, callback_data=f"{SHOW_CB_P}{n}")])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=LIST_CB)])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="portal:home")])
     return InlineKeyboardMarkup(rows)
 
-def _menu_keyboard(display_name: str) -> InlineKeyboardMarkup:
+def _book_url_for(model_display_name: str) -> str | None:
     """
-    Keyboard shown on a model's menu:
-    📖 Book (if username known), 💸 Tip (placeholder), ⬅️ Back, 🏠 Main
+    Resolve a '📖 Book' URL for a model.
+    Priority:
+      1) BOOK_URL_<MODEL_NAME_SLUG>
+      2) DEFAULT_BOOK_URL
+    Examples:
+      BOOK_URL_RIN=https://t.me/UsernameHere
+      DEFAULT_BOOK_URL=https://t.me/YourAdminOrPortal
     """
+    slug = _slug_env_key(model_display_name)
+    per_model = os.getenv(f"BOOK_URL_{slug}")
+    if per_model:
+        return per_model.strip()
+    default = os.getenv("DEFAULT_BOOK_URL")
+    return default.strip() if default else None
+
+def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
+    book_url = _book_url_for(model_display_name)
     rows: list[list[InlineKeyboardButton]] = []
-    uname = _username_for(display_name)
-    first_row: list[InlineKeyboardButton] = []
-    if uname:
-        first_row.append(InlineKeyboardButton("📖 Book", url=f"https://t.me/{uname}"))
-    first_row.append(InlineKeyboardButton("💸 Tip", callback_data=f"tip:{display_name}"))
-    rows.append(first_row)
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=LIST_CB)])
-    rows.append([InlineKeyboardButton("🏠 Main", callback_data="portal:home")])
+
+    if book_url:
+        rows.append([InlineKeyboardButton("📖 Book", url=book_url)])
+    else:
+        # Fallback to Contact Admins page if no URL configured
+        rows.append([InlineKeyboardButton("📖 Book", callback_data="contact_admins:open")])
+
+    rows.append([InlineKeyboardButton("💸 Tip", callback_data=f"{TIP_CB_P}{model_display_name}")])
+    rows.append([
+        InlineKeyboardButton("⬅️ Back", callback_data=LIST_CB),
+        InlineKeyboardButton("🏠 Main", callback_data="portal:home"),
+    ])
     return InlineKeyboardMarkup(rows)
 
-# ---------- registration ----------
 def register(app: Client):
     log.info("✅ handlers.menu registered (storage=%s)", "Mongo" if store.uses_mongo() else "JSON")
 
-    # Open / refresh the list UI
+    # List all menus as buttons
     @app.on_message(filters.command("menus"))
     async def menus_cmd(_, m: Message):
         kb = _names_keyboard()
         await m.reply_text("📖 <b>Menus</b>\nTap a name to view.", reply_markup=kb)
 
-    # Show a specific menu by command
+    # Show a specific menu by name via command
     @app.on_message(filters.command("showmenu"))
     async def show_menu_cmd(_, m: Message):
         tokens = (m.text or "").split(maxsplit=1)
@@ -135,14 +124,12 @@ def register(app: Client):
         log.info("showmenu: raw=%r -> key=%r found=%s", raw, name, text is not None)
         if text is None:
             return await m.reply(f"Menu '<b>{_clean(raw)}</b>' not found.")
-        await m.reply(
-            f"<b>{name} — Menu</b>\n\n{text}",
-            reply_markup=_menu_keyboard(name),
-            disable_web_page_preview=True,
-        )
+        await m.reply(f"<b>{name} — Menu</b>\n\n{text}",
+                      reply_markup=_menu_view_kb(name),
+                      disable_web_page_preview=True)
 
-    # Open list via callback
-    @app.on_callback_query(filters.regex(f"^{OPEN_CB}$|^{LIST_CB}$"))
+    # Open / refresh the list UI (from Panels "💞 Menus" button)
+    @app.on_callback_query(filters.regex(f"^{OPEN_CB}$|^{LIST_CB}$|^panels:root$"))
     async def list_cb(_, cq: CallbackQuery):
         kb = _names_keyboard()
         try:
@@ -161,21 +148,16 @@ def register(app: Client):
         if text is None:
             return await cq.answer(f"No menu saved for {_clean(raw)}.", show_alert=True)
 
+        content = f"<b>{name} — Menu</b>\n\n{text}"
+        kb = _menu_view_kb(name)
         try:
-            await cq.message.edit_text(
-                f"<b>{name} — Menu</b>\n\n{text}",
-                reply_markup=_menu_keyboard(name),
-                disable_web_page_preview=True,
-            )
+            await cq.message.edit_text(content, reply_markup=kb, disable_web_page_preview=True)
         except Exception:
             await cq.answer()
-            await cq.message.reply_text(
-                f"<b>{name} — Menu</b>\n\n{text}",
-                reply_markup=_menu_keyboard(name),
-                disable_web_page_preview=True,
-            )
+            await cq.message.reply_text(content, reply_markup=kb, disable_web_page_preview=True)
 
-    # 💸 Tip placeholder (you'll wire Stripe later)
-    @app.on_callback_query(filters.regex(r"^tip:.+"))
+    # Tip placeholder (so the button does something now; you’ll wire Stripe later)
+    @app.on_callback_query(filters.regex(r"^menus:tip:.+"))
     async def tip_cb(_, cq: CallbackQuery):
-        await cq.answer("Tips are coming soon. Thanks for the love! 💖", show_alert=True)
+        model = cq.data[len(TIP_CB_P):]
+        await cq.answer("Tips coming soon 💸 — the button is wired, just hook up the processor next.", show_alert=True)
