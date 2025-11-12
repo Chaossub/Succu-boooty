@@ -1,4 +1,3 @@
-# handlers/dm_ready.py
 from __future__ import annotations
 import os, json
 from pathlib import Path
@@ -26,22 +25,13 @@ def _iso_to_la_str(iso: str) -> str:
             dt = dt.replace(tzinfo=timezone.utc)
         if LA_TZ:
             dt = dt.astimezone(LA_TZ)
-        else:
-            # naive fallback: show UTC with suffix
-            return dt.strftime("%Y-%m-%d %I:%M %p") + " UTC"
-        return dt.strftime("%Y-%m-%d %I:%M %p PT")
+            return dt.strftime("%Y-%m-%d %I:%M %p PT")
+        return dt.strftime("%Y-%m-%d %I:%M %p") + " UTC"
     except Exception:
         return iso
 
 # -------- persistence layer ----------
 class DMReadyStore:
-    """
-    Mongo if MONGO_URL* is present; otherwise JSON file at data/dmready.json.
-    API:
-      - ensure_dm_ready_first_seen(user_id, username, first_name, last_name, when_iso_now_utc) -> str(created_at_iso)
-      - get_first_mark_iso(user_id) -> Optional[str]
-      - all() -> List[Dict]
-    """
     def __init__(self):
         self.mode = "json"
         self._col = None
@@ -54,21 +44,18 @@ class DMReadyStore:
                 cli = MongoClient(mongo_url, serverSelectionTimeoutMS=8000)
                 db = cli[db_name]
                 self._col = db.get_collection("dm_ready_users")
-                # ensure useful index (unique by user_id ensures idempotency)
                 self._col.create_index("user_id", unique=True)
                 self.mode = "mongo"
             except Exception:
                 self.mode = "json"
                 self._col = None
 
-        # JSON fallback
         self._path = Path("data/dmready.json")
         if self.mode == "json":
             self._path.parent.mkdir(parents=True, exist_ok=True)
             if not self._path.exists():
                 self._path.write_text("{}", encoding="utf-8")
 
-    # ------ JSON helpers ------
     def _jload(self) -> Dict[str, Dict]:
         try:
             return json.loads(self._path.read_text(encoding="utf-8"))
@@ -80,18 +67,8 @@ class DMReadyStore:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self._path)
 
-    # ------ Public API ------
-    def ensure_dm_ready_first_seen(
-        self,
-        user_id: int,
-        username: str,
-        first_name: str,
-        last_name: str,
-        when_iso_now_utc: str,
-    ) -> str:
-        """Create on first seen, do nothing on repeats. Returns the first_seen ISO string."""
+    def ensure_dm_ready_first_seen(self, user_id: int, username: str, first_name: str, last_name: str, when_iso_now_utc: str) -> str:
         if self.mode == "mongo":
-            # upsert without changing first_seen after it exists
             existing = self._col.find_one({"user_id": user_id})
             if existing:
                 return existing.get("first_marked_iso", "")
@@ -108,7 +85,6 @@ class DMReadyStore:
                 pass
             return when_iso_now_utc
 
-        # JSON mode
         data = self._jload()
         key = str(user_id)
         if key in data:
@@ -137,13 +113,11 @@ class DMReadyStore:
         data = self._jload()
         return list(data.values())
 
-# single shared store
 store = DMReadyStore()
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 
-# ---------- helper you call from other handlers ----------
+# helper to call from other handlers
 async def mark_dm_ready_from_message(m: Message) -> None:
-    """Idempotent: records first time we ever saw this user in DM."""
     if not m or not m.from_user:
         return
     u = m.from_user
@@ -155,27 +129,17 @@ async def mark_dm_ready_from_message(m: Message) -> None:
         when_iso_now_utc=_iso_now_utc(),
     )
 
-# ---------- owner/admin command ----------
 def register(app: Client):
-    # Utility to confirm the ID you're DM'ing from
-    @app.on_message(filters.private & filters.command("whoami"))
-    async def _whoami(_: Client, m: Message):
-        uid = m.from_user.id if m.from_user else 0
-        uname = ("@" + m.from_user.username) if (m.from_user and m.from_user.username) else "(no username)"
-        await m.reply_text(f"Your ID: <code>{uid}</code>\nUsername: {uname}")
-
-    # Allow all private chats to hit; enforce OWNER check inside
+    # Make sure the command always triggers in DMs,
+    # then enforce the owner check inside.
     @app.on_message(filters.private & filters.command("dmreadylist"))
     async def _dmreadylist(_: Client, m: Message):
-        if m.from_user is None or m.from_user.id != OWNER_ID:
-            return  # silently ignore for non-owner
+        if m.from_user and m.from_user.id != OWNER_ID:
+            await m.reply_text("Only the owner can run this.")
+            return
 
         users = store.all()
-
-        # sort by first_marked_iso (oldest first)
-        def _key(rec: Dict) -> Tuple[str, int]:
-            return (rec.get("first_marked_iso") or "", rec.get("user_id") or 0)
-        users.sort(key=_key)
+        users.sort(key=lambda r: (r.get("first_marked_iso") or "", r.get("user_id") or 0))
 
         if not users:
             await m.reply_text("✅ DM-ready users: none yet.")
@@ -186,7 +150,11 @@ def register(app: Client):
             uid = r.get("user_id")
             un = r.get("username") or ""
             first_seen_la = _iso_to_la_str(r.get("first_marked_iso") or "")
-            who = f"@{un} — {uid}" if un else f"{uid}"
-            lines.append(f"{i}. {who} — {first_seen_la}")
+            label = f"@{un}" if un else str(uid)
+            # show first name if available
+            fn = (r.get("first_name") or "").strip()
+            if fn:
+                label = f"{label} ({fn})"
+            lines.append(f"{i}. {label} — {first_seen_la}")
 
         await m.reply_text("\n".join(lines), disable_web_page_preview=True)
