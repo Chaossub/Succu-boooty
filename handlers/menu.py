@@ -1,3 +1,4 @@
+# handlers/menu.py
 # Inline menu browser: /menus -> buttons of model names -> tap to view saved menu
 import logging
 from pyrogram import filters
@@ -15,13 +16,11 @@ LIST_CB   = "menus:list"
 OPEN_CB   = "menus:open"
 SHOW_CB_P = "menus:show:"   # prefix: menus:show:<Name>
 
-REGISTERED = False  # guard against double import
-
 def _clean(name: str) -> str:
     return (name or "").strip().strip("»«‘’“”\"'`").strip()
 
 def _find_name_ci(target: str) -> str | None:
-    """Return the display name that matches target, case-insensitive."""
+    """Return the actual stored name that matches target, case-insensitive."""
     if not target:
         return None
     t = target.casefold()
@@ -30,19 +29,21 @@ def _find_name_ci(target: str) -> str | None:
             return n
     return None
 
-def _get_menu_ci(name: str):
+def _get_menu_ci(name: str) -> tuple[str | None, str | None]:
     """
-    Try exact, then case-insensitive.
-    Returns (display_name or None, text or None).
+    Try exact, then case-insensitive. Returns (actual_name, text).
+    actual_name is the canonical stored key (for buttons/back labels).
     """
     key = _clean(name)
     if not key:
         return None, None
 
+    # exact first
     txt = store.get_menu(key)
     if txt is not None:
         return key, txt
 
+    # case-insensitive fallback
     match = _find_name_ci(key)
     if match:
         txt = store.get_menu(match)
@@ -52,64 +53,50 @@ def _get_menu_ci(name: str):
     return None, None
 
 def _names_keyboard() -> InlineKeyboardMarkup:
-    names = sorted(set(store.list_names()))  # belt-and-suspenders de-dupe
+    names = store.list_names()
     if not names:
         return InlineKeyboardMarkup(
-            [[InlineKeyboardButton("➕ create a menu with /createmenu", callback_data=LIST_CB)]]
+            [[InlineKeyboardButton("➕ Create a menu with /createmenu", callback_data=LIST_CB)]]
         )
-    rows = [[InlineKeyboardButton(n, callback_data=f"{SHOW_CB_P}{n}")]
-            for n in names]
-    rows.append([InlineKeyboardButton("⬅ back", callback_data=LIST_CB)])
+    rows: list[list[InlineKeyboardButton]] = []
+    for n in names:
+        rows.append([InlineKeyboardButton(n, callback_data=f"{SHOW_CB_P}{n}")])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=LIST_CB)])
     return InlineKeyboardMarkup(rows)
 
 def register(app):
-    global REGISTERED
-    if REGISTERED:
-        return
-    REGISTERED = True
-
     log.info("✅ handlers.menu registered (storage=%s)", "Mongo" if store.uses_mongo() else "JSON")
 
-    # /menus  -> list;  /menu -> alias
-    @app.on_message(filters.command(["menus", "menu"]))
+    # List all menus as buttons
+    @app.on_message(filters.command("menus"))
     async def menus_cmd(_, m: Message):
-        tokens = (m.text or "").split(maxsplit=1)
-        # support "/menu Name" to jump straight to a specific menu
-        if len(tokens) == 2 and tokens[0].lstrip("/").lower() == "menu":
-            raw = tokens[1]
-            name, text = _get_menu_ci(raw)
-            log.info("/menu: raw=%r -> key=%r found=%s", raw, name, text is not None)
-            if text is None:
-                return await m.reply_text(f"no menu saved for { _clean(raw) }.")
-            return await m.reply_text(f"{name} — menu\n\n{text}", disable_web_page_preview=True)
-
         kb = _names_keyboard()
-        await m.reply_text("📖 menus — tap a name to view", reply_markup=kb)
+        await m.reply_text("📖 <b>Menus</b>\nTap a name to view.", reply_markup=kb)
 
-    # /showmenu Name
+    # Show a specific menu by name
     @app.on_message(filters.command("showmenu"))
     async def show_menu_cmd(_, m: Message):
         tokens = (m.text or "").split(maxsplit=1)
         if len(tokens) < 2:
-            return await m.reply_text("usage: /showmenu Name")
+            return await m.reply("Usage: /showmenu <Name>")
         raw = tokens[1]
         name, text = _get_menu_ci(raw)
-        log.info("/showmenu: raw=%r -> key=%r found=%s", raw, name, text is not None)
+        log.info("showmenu: raw=%r -> key=%r found=%s", raw, name, text is not None)
         if text is None:
-            return await m.reply_text(f"menu '{_clean(raw)}' not found.")
-        await m.reply_text(f"{name} — menu\n\n{text}", disable_web_page_preview=True)
+            return await m.reply(f"Menu '<b>{_clean(raw)}</b>' not found.")
+        await m.reply(text, disable_web_page_preview=True)
 
-    # open / refresh the list UI
+    # Open / refresh the list UI
     @app.on_callback_query(filters.regex(f"^{OPEN_CB}$|^{LIST_CB}$"))
     async def list_cb(_, cq: CallbackQuery):
         kb = _names_keyboard()
         try:
-            await cq.message.edit_text("📖 menus — tap a name to view", reply_markup=kb)
+            await cq.message.edit_text("📖 <b>Menus</b>\nTap a name to view.", reply_markup=kb)
         except Exception:
             await cq.answer()
-            await cq.message.reply_text("📖 menus — tap a name to view", reply_markup=kb)
+            await cq.message.reply_text("📖 <b>Menus</b>\nTap a name to view.", reply_markup=kb)
 
-    # show from list button
+    # Show a specific menu from a list button
     @app.on_callback_query(filters.regex(r"^menus:show:.+"))
     async def show_cb(_, cq: CallbackQuery):
         raw = cq.data[len(SHOW_CB_P):]
@@ -117,10 +104,10 @@ def register(app):
         log.info("menus:show: raw=%r -> key=%r found=%s", raw, name, text is not None)
 
         if text is None:
-            return await cq.answer(f"no menu saved for {_clean(raw)}.", show_alert=True)
+            return await cq.answer(f"No menu saved for {_clean(raw)}.", show_alert=True)
 
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ back", callback_data=LIST_CB)]])
-        content = f"{name} — menu\n\n{text}"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data=LIST_CB)]])
+        content = f"<b>{name} — Menu</b>\n\n{text}"
         try:
             await cq.message.edit_text(content, reply_markup=kb, disable_web_page_preview=True)
         except Exception:
