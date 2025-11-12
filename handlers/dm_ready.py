@@ -1,10 +1,13 @@
+# handlers/dm_ready.py
 from __future__ import annotations
-import os, json
+import os, json, logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timezone
 from pyrogram import Client, filters
 from pyrogram.types import Message
+
+log = logging.getLogger("dm_ready")
 
 # -------- time utils (LA) ----------
 try:
@@ -46,7 +49,9 @@ class DMReadyStore:
                 self._col = db.get_collection("dm_ready_users")
                 self._col.create_index("user_id", unique=True)
                 self.mode = "mongo"
-            except Exception:
+                log.info("DMReadyStore: using MongoDB (%s)", db_name)
+            except Exception as e:
+                log.warning("DMReadyStore: Mongo unavailable, falling back to JSON: %s", e)
                 self.mode = "json"
                 self._col = None
 
@@ -55,11 +60,13 @@ class DMReadyStore:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             if not self._path.exists():
                 self._path.write_text("{}", encoding="utf-8")
+            log.info("DMReadyStore: using JSON at %s", self._path)
 
     def _jload(self) -> Dict[str, Dict]:
         try:
             return json.loads(self._path.read_text(encoding="utf-8"))
-        except Exception:
+        except Exception as e:
+            log.error("DMReadyStore: failed to load JSON: %s", e)
             return {}
 
     def _jdump(self, data: Dict[str, Dict]) -> None:
@@ -81,8 +88,8 @@ class DMReadyStore:
             }
             try:
                 self._col.insert_one(doc)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("DMReadyStore: insert failed (mongo): %s", e)
             return when_iso_now_utc
 
         data = self._jload()
@@ -116,45 +123,57 @@ class DMReadyStore:
 store = DMReadyStore()
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 
-# helper to call from other handlers
+# helper for other handlers
 async def mark_dm_ready_from_message(m: Message) -> None:
     if not m or not m.from_user:
         return
     u = m.from_user
-    store.ensure_dm_ready_first_seen(
-        user_id=u.id,
-        username=u.username or "",
-        first_name=u.first_name or "",
-        last_name=u.last_name or "",
-        when_iso_now_utc=_iso_now_utc(),
-    )
+    try:
+        store.ensure_dm_ready_first_seen(
+            user_id=u.id,
+            username=u.username or "",
+            first_name=u.first_name or "",
+            last_name=u.last_name or "",
+            when_iso_now_utc=_iso_now_utc(),
+        )
+    except Exception as e:
+        log.error("mark_dm_ready_from_message failed: %s", e)
 
 def register(app: Client):
-    # Make sure the command always triggers in DMs,
-    # then enforce the owner check inside.
+    log.info("✅ handlers.dm_ready wired")
+
+    # Do NOT filter by user here; always trigger, then check inside.
     @app.on_message(filters.private & filters.command("dmreadylist"))
     async def _dmreadylist(_: Client, m: Message):
-        if m.from_user and m.from_user.id != OWNER_ID:
-            await m.reply_text("Only the owner can run this.")
-            return
+        try:
+            uid = m.from_user.id if m.from_user else 0
+            log.info("/dmreadylist from %s", uid)
 
-        users = store.all()
-        users.sort(key=lambda r: (r.get("first_marked_iso") or "", r.get("user_id") or 0))
+            if uid != OWNER_ID:
+                await m.reply_text("Only the owner can run this.")
+                return
 
-        if not users:
-            await m.reply_text("✅ DM-ready users: none yet.")
-            return
+            users = store.all()
+            users.sort(key=lambda r: (r.get("first_marked_iso") or "", r.get("user_id") or 0))
 
-        lines: List[str] = ["✅ *DM-ready users* —"]
-        for i, r in enumerate(users, start=1):
-            uid = r.get("user_id")
-            un = r.get("username") or ""
-            first_seen_la = _iso_to_la_str(r.get("first_marked_iso") or "")
-            label = f"@{un}" if un else str(uid)
-            # show first name if available
-            fn = (r.get("first_name") or "").strip()
-            if fn:
-                label = f"{label} ({fn})"
-            lines.append(f"{i}. {label} — {first_seen_la}")
+            if not users:
+                await m.reply_text("✅ DM-ready users: none yet.")
+                return
 
-        await m.reply_text("\n".join(lines), disable_web_page_preview=True)
+            lines: List[str] = ["✅ *DM-ready users* —"]
+            for i, r in enumerate(users, start=1):
+                rid = r.get("user_id")
+                un = r.get("username") or ""
+                fn = (r.get("first_name") or "").strip()
+                first_seen_la = _iso_to_la_str(r.get("first_marked_iso") or "")
+                who = f"@{un}" if un else str(rid)
+                if fn:
+                    who = f"{who} ({fn})"
+                lines.append(f"{i}. {who} — {first_seen_la}")
+
+            await m.reply_text("\n".join(lines), disable_web_page_preview=True)
+
+        except Exception as e:
+            log.exception("/dmreadylist crashed: %s", e)
+            # Still tell you something so it never feels dead.
+            await m.reply_text(f"❌ dmreadylist failed: {e}")
