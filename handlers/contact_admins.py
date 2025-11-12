@@ -1,57 +1,146 @@
 # handlers/contact_admins.py
+# Contact Roni / Ruby + Anonymous message to OWNER_ID, with a working Back to Main.
+
 import os
-from pyrogram import filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
+import logging
+from pyrogram import Client, filters
+from pyrogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton,
+)
 
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-RONI_USERNAME = os.getenv("RONI_USERNAME", "@Chaossub283")
-RUBY_USERNAME = os.getenv("RUBY_USERNAME", "@RubyRansom")
+log = logging.getLogger("contact_admins")
 
-def register(app):
+# ────────────── ENV / CONFIG ──────────────
+OWNER_ID        = int(os.getenv("OWNER_ID", "0") or "0")
 
-    # ─── Contact Admins button from main menu ───
-    @app.on_callback_query(filters.regex("^contact_admins:open$"))
-    async def open_contact_admins(_, cq: CallbackQuery):
-        text = (
-            "💌 Need a little help, cutie?\n\n"
-            "You can message one of my lovely admins directly — or send a secret anonymous note that only the owner will see. 💋\n\n"
-            "✨ Choose one below and I’ll take care of the rest!"
-        )
+# Prefer usernames from env; fall back to provided handles
+RONI_USERNAME   = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
+RUBY_USERNAME   = (os.getenv("RUBY_USERNAME") or "RubyRansom").lstrip("@")
+RONI_NAME       = os.getenv("RONI_NAME", "Roni")
+RUBY_NAME       = os.getenv("RUBY_NAME", "Ruby")
 
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔥 Message Roni", url=f"https://t.me/{RONI_USERNAME.lstrip('@')}")],
-            [InlineKeyboardButton("💎 Message Ruby", url=f"https://t.me/{RUBY_USERNAME.lstrip('@')}")],
-            [InlineKeyboardButton("💌 Send an Anonymous Message", callback_data="contact_admins:anon")],
-            [InlineKeyboardButton("🏠 Back to Main Menu", callback_data="portal:home")]
-        ])
+BTN_BACK_MAIN   = "⬅️ Back to Main Menu"
 
-        await cq.message.edit_text(text, reply_markup=keyboard)
-        await cq.answer()
+# In-memory state for anonymous messages
+_PENDING_ANON: set[int] = set()
 
-    # ─── Anonymous message option ───
-    @app.on_callback_query(filters.regex("^contact_admins:anon$"))
-    async def ask_anonymous(_, cq: CallbackQuery):
-        text = (
-            "💋 Go ahead, sweetheart — send your secret message now (text only).\n\n"
-            "I’ll whisper it directly to the owner, no names attached. 😉"
-        )
+# ────────────── COPY ──────────────
+CONTACT_COPY = (
+    "💌 Need a little help, cutie?\n"
+    "You can message an admin directly, or send a secret anonymous note that only the owner will see. 💌\n\n"
+    "✨ Choose below and I’ll take care of the rest!"
+)
 
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🏠 Back to Main Menu", callback_data="portal:home")]
-        ])
+ANON_PROMPT = (
+    "💋 Anonymous Message\n"
+    "Go ahead, sweetheart — send your secret message now (text only).\n"
+    "I’ll whisper it directly to the owner, no names attached. 😉"
+)
 
-        await cq.message.edit_text(text, reply_markup=keyboard)
-        await cq.answer()
+# ────────────── KEYBOARDS ──────────────
+def _kb_contact() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(f"🔥 Message {RONI_NAME}", url=f"https://t.me/{RONI_USERNAME}")],
+        [InlineKeyboardButton(f"💎 Message {RUBY_NAME}", url=f"https://t.me/{RUBY_USERNAME}")],
+        [InlineKeyboardButton("🕵️ Send an Anonymous Message", callback_data="contact:anon")],
+        [InlineKeyboardButton(BTN_BACK_MAIN, callback_data="portal:home")],
+    ]
+    return InlineKeyboardMarkup(rows)
 
-        # Next message from this user = anonymous message
-        app.set_parse_mode("Markdown")
+def _kb_back_main() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(BTN_BACK_MAIN, callback_data="portal:home")]])
 
-        @app.on_message(filters.private & filters.text & filters.user(cq.from_user.id))
-        async def anonymous_message(client, msg: Message):
-            # Forward to owner without revealing sender
-            await client.send_message(
-                OWNER_ID,
-                f"📨 **Anonymous Message:**\n\n{msg.text}"
+def _kb_home() -> InlineKeyboardMarkup:
+    # Main 4-button home used by /start and portal:home
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💞 Menus", callback_data="panels:root")],
+        [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
+        [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
+        [InlineKeyboardButton("❓ Help", callback_data="help:open")],
+    ])
+
+# ────────────── RENDER HELPERS ──────────────
+async def _render_contact_panel(target_message: Message, edit: bool = True):
+    if edit:
+        try:
+            await target_message.edit_text(CONTACT_COPY, reply_markup=_kb_contact(), disable_web_page_preview=True)
+            return
+        except Exception:
+            pass
+    await target_message._client.send_message(
+        target_message.chat.id, CONTACT_COPY, reply_markup=_kb_contact(), disable_web_page_preview=True
+    )
+
+# ────────────── REGISTER ──────────────
+def register(app: Client):
+
+    # Open via main menu button
+    @app.on_callback_query(filters.regex(r"^contact_admins:open$"))
+    async def open_contact_cb(_, q: CallbackQuery):
+        await _render_contact_panel(q.message, edit=True)
+        await q.answer()
+
+    # Optional command: /contactadmins, /contact, /admins
+    @app.on_message(filters.private & filters.command(["contactadmins", "contact", "admins"]))
+    async def cmd_contact(_, m: Message):
+        await _render_contact_panel(m, edit=False)
+
+    # Begin anonymous message flow
+    @app.on_callback_query(filters.regex(r"^contact:anon$"))
+    async def anon_begin(_, q: CallbackQuery):
+        _PENDING_ANON.add(q.from_user.id)
+        try:
+            await q.message.edit_text(ANON_PROMPT, reply_markup=_kb_back_main(), disable_web_page_preview=True)
+        except Exception:
+            await q.message.reply_text(ANON_PROMPT, reply_markup=_kb_back_main(), disable_web_page_preview=True)
+        await q.answer()
+
+    # Collect the user's next private message as the anonymous note
+    @app.on_message(filters.private & filters.text)
+    async def anon_collect(client: Client, m: Message):
+        if m.from_user is None or m.from_user.id not in _PENDING_ANON:
+            return
+
+        if OWNER_ID <= 0:
+            _PENDING_ANON.discard(m.from_user.id)
+            await m.reply_text("Owner is not configured.", reply_markup=_kb_back_main())
+            return
+
+        text = m.text.strip()
+        if not text:
+            await m.reply_text("Please send text only for your anonymous note.", reply_markup=_kb_back_main())
+            return
+
+        try:
+            await client.send_message(OWNER_ID, f"🕵️ Anonymous message:\n\n{text}")
+            await m.reply_text("✅ Sent anonymously.", reply_markup=_kb_back_main())
+        except Exception as e:
+            log.warning("Anonymous forward failed: %s", e)
+            await m.reply_text("❌ I couldn’t send that right now. Try again in a moment.", reply_markup=_kb_back_main())
+        finally:
+            _PENDING_ANON.discard(m.from_user.id)
+
+    # Universal Back to Main handler (works from any panel using callback_data='portal:home')
+    @app.on_callback_query(filters.regex(r"^portal:home$"))
+    async def back_to_main(_, q: CallbackQuery):
+        try:
+            await q.message.edit_text(
+                "🔥 Welcome back to SuccuBot\n"
+                "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
+                "✨ Use the menu below to navigate!",
+                reply_markup=_kb_home(),
+                disable_web_page_preview=True,
             )
-            await msg.reply_text("✨ Message sent anonymously! I’ve delivered it safely to the owner.")
-            app.remove_handler(anonymous_message)
+        except Exception:
+            await q.message.reply_text(
+                "🔥 Welcome back to SuccuBot\n"
+                "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
+                "✨ Use the menu below to navigate!",
+                reply_markup=_kb_home(),
+                disable_web_page_preview=True,
+            )
+        finally:
+            await q.answer()
+
+    log.info("contact_admins wired")
