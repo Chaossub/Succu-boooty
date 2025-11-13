@@ -1,16 +1,13 @@
 # handlers/createmenu.py
-
 import os
 import logging
-from pyrogram import Client
+from pyrogram import Client, filters
 from pyrogram.types import Message
+
 from utils.menu_store import store
 
 log = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
-# PERMISSIONS
-# ─────────────────────────────────────────────
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 SUPER_ADMINS = {
     int(x)
@@ -18,153 +15,81 @@ SUPER_ADMINS = {
     if x.isdigit()
 }
 
-
-def _allowed(user_id: int) -> bool:
-    """Only owner + SUPER_ADMINS can create/update menus."""
-    if OWNER_ID and user_id == OWNER_ID:
-        return True
-    if user_id in SUPER_ADMINS:
-        return True
-    return False
-
-
 USAGE = (
-    "<b>Create or update a model menu</b>\n\n"
-    "You can use either format:\n\n"
-    "1️⃣ Reply mode:\n"
-    "   • Send the full menu text.\n"
-    "   • Reply to that message with:\n"
-    "     <code>/createmenu ModelName</code>\n\n"
-    "2️⃣ Inline mode (one message):\n"
-    "   <code>/createmenu ModelName | menu text…</code>\n\n"
-    "Example:\n"
-    "<code>/createmenu Roni | Roni's Menu\n"
-    "• GFE: $25/day\n"
-    "• Sexting: $30/day\n"
-    "• Customs: $15+</code>\n\n"
-    "The menu will appear in /menus and in tip buttons."
+    "✨ <b>Create a menu</b>\n\n"
+    "<code>/createmenu Roni | Roni's Main Menu\n"
+    "• GFE Chat: $25 / day\n"
+    "• Sexting: $30 / day\n"
+    "• Customs: $15+\n"
+    "…</code>\n\n"
+    "First part = model name\n"
+    "Text after <code>|</code> = full menu text."
 )
 
 
-# ─────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────
-def _strip_command_prefix(text: str) -> str:
-    """
-    Remove '/createmenu' or '/createmenu@BotName' from the start of the text
-    and return the rest.
-    """
-    # Split into first word + the rest
-    parts = text.split(maxsplit=1)
-    cmd = parts[0]
-    rest = parts[1] if len(parts) > 1 else ""
-
-    # Handle '/createmenu' and '/createmenu@Something'
-    if cmd.startswith("/createmenu"):
-        return rest.strip()
-
-    return text.strip()
+def _allowed(user_id: int) -> bool:
+    """Only owner + SUPER_ADMINS can use /createmenu."""
+    return user_id == OWNER_ID or user_id in SUPER_ADMINS
 
 
-def _parse_inline(text: str):
-    """
-    After stripping the command, parse: 'Name | body...'
-    Returns (name, body) or (None, None).
-    """
-    if not text:
-        return None, None
+def register(app: Client) -> None:
+    log.info("✅ handlers.createmenu registered (Mongo=%s)", store.uses_mongo())
 
-    if "|" not in text:
-        # Name only
-        return text.strip(), ""
-
-    name, body = text.split("|", 1)
-    name = name.strip()
-    body = body.strip()
-
-    if not name:
-        return None, None
-
-    return name, body
-
-
-# ─────────────────────────────────────────────
-# REGISTER HANDLER
-# ─────────────────────────────────────────────
-def register(app: Client):
-    log.info("✅ handlers.createmenu registered")
-
-    # CATCH **ALL** MESSAGES
-    @app.on_message()
+    # DM-only, command-only handler
+    @app.on_message(filters.private & filters.command("createmenu"))
     async def createmenu_cmd(_, m: Message):
-        text = (m.text or m.caption or "").strip()
-
-        # DEBUG LOG FOR EVERY MESSAGE
-        log.info("[createmenu] got message: %r from %s", text, m.from_user.id if m.from_user else None)
-
-        # Only react if the word 'createmenu' appears anywhere
-        if "createmenu" not in text.lower():
-            return
-
-        log.info("[createmenu] matched text, starting handler logic")
-
-        # Permissions
-        user_id = m.from_user.id if m.from_user else 0
-        if not _allowed(user_id):
-            await m.reply_text("❌ You are not allowed to create or edit menus.")
-            return
-
-        name = None
-        body = None
-
-        # ────────────── MODE 1: Reply mode ──────────────
-        if m.reply_to_message:
-            rest = _strip_command_prefix(text)
-            if not rest:
-                await m.reply_text(USAGE)
-                return
-
-            name = rest
-            body = (
-                m.reply_to_message.text
-                or m.reply_to_message.caption
-                or ""
-            ).strip()
-
-            if not body:
-                await m.reply_text(
-                    "❌ The replied message has no text to save as a menu.\n\n" + USAGE
-                )
-                return
-
-        # ────────────── MODE 2: Inline / single message ──────────────
-        else:
-            rest = _strip_command_prefix(text)
-            name, body = _parse_inline(rest)
-
-            if not name:
-                await m.reply_text(USAGE)
-                return
-
-            if not body:
-                await m.reply_text(
-                    "❌ No menu text detected after the model name.\n\n" + USAGE
-                )
-                return
-
-        # ────────────── VALIDATION ──────────────
-        if len(name) > 64:
-            await m.reply_text("❌ Model name is too long (max 64 characters).")
-            return
-
-        # ────────────── SAVE TO MONGO ──────────────
         try:
+            if not m.from_user:
+                return
+
+            uid = m.from_user.id
+
+            # Permission check
+            if not _allowed(uid):
+                await m.reply_text(
+                    "❌ This command is reserved for Roni and approved admins only."
+                )
+                return
+
+            text = (m.text or "").strip()
+
+            # Strip the /createmenu part
+            parts = text.split(" ", 1)
+            if len(parts) < 2:
+                await m.reply_text(USAGE)
+                return
+
+            rest = parts[1].strip()
+
+            # Expect: ModelName | Menu body...
+            if "|" not in rest:
+                await m.reply_text(
+                    "❌ I couldn't see the <code>|</code> separator.\n\n" + USAGE
+                )
+                return
+
+            name_part, body = rest.split("|", 1)
+            name = name_part.strip()
+            body = body.strip()
+
+            if not name or not body:
+                await m.reply_text(
+                    "❌ I need both a model name and menu text.\n\n" + USAGE
+                )
+                return
+
+            # Save to Mongo
             store.set_menu(name, body)
-            log.info("[createmenu] stored menu for %s", name)
+
             await m.reply_text(
-                f"✅ Saved menu for <b>{name}</b>.",
+                f"✅ Saved menu for <b>{name}</b>.\n\n"
+                "You can now attach it to buttons using the Menus panel.",
                 disable_web_page_preview=True,
             )
+
         except Exception as e:
-            log.exception("❌ Error saving menu: %s", e)
-            await m.reply_text(f"❌ Failed to save menu:\n<code>{e}</code>")
+            log.exception("createmenu failed: %s", e)
+            await m.reply_text(
+                "❌ Something went wrong while saving that menu:\n"
+                f"<code>{e}</code>"
+            )
