@@ -37,7 +37,7 @@ def register(app: Client):
             text = m.text or ""
             parts = text.split(maxsplit=2)
 
-            # We expect: /createmenu <Name> <menu text...>
+            # Expect: /createmenu <Name> <menu text...>
             if len(parts) < 3:
                 await m.reply_text(
                     "Usage:\n"
