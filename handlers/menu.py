@@ -16,14 +16,17 @@ OPEN_CB   = "menus:open"
 SHOW_CB_P = "menus:show:"   # prefix: menus:show:<Name>
 TIP_CB_P  = "menus:tip:"    # prefix: menus:tip:<Name>
 
+
 def _clean(name: str) -> str:
     return (name or "").strip().strip("»«‘’“”\"'`").strip()
+
 
 def _slug_env_key(name: str) -> str:
     # Make something safe to read env like BOOK_URL_RIN
     s = re.sub(r"\s+", "_", name.strip())
     s = re.sub(r"[^A-Za-z0-9_]+", "", s)
     return s.upper()
+
 
 def _find_name_ci(target: str) -> str | None:
     """Return the actual stored name that matches target, case-insensitive."""
@@ -34,6 +37,7 @@ def _find_name_ci(target: str) -> str | None:
         if (n or "").casefold() == t:
             return n
     return None
+
 
 def _get_menu_ci(name: str) -> tuple[str | None, str | None]:
     """
@@ -58,6 +62,7 @@ def _get_menu_ci(name: str) -> tuple[str | None, str | None]:
 
     return None, None
 
+
 def _names_keyboard() -> InlineKeyboardMarkup:
     names = store.list_names()
     if not names:
@@ -70,22 +75,78 @@ def _names_keyboard() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="portal:home")])
     return InlineKeyboardMarkup(rows)
 
+
+def _normalize_book_target(raw: str | None) -> str | None:
+    """
+    Turn whatever you put in the env into a real, working Telegram URL.
+
+    Accepted formats for env values:
+      - Full URL:
+          https://t.me/SomeUser
+          tg://user?id=123456789
+      - Username:
+          SomeUser
+          @SomeUser
+      - Numeric ID:
+          123456789   (will become tg://user?id=123456789)
+    """
+    if not raw:
+        return None
+
+    raw = raw.strip()
+    if not raw:
+        return None
+
+    # Already a proper URL? Use as-is.
+    if raw.startswith(("http://", "https://", "tg://")):
+        return raw
+
+    # Numeric ID → deep link
+    if raw.isdigit():
+        return f"tg://user?id={raw}"
+
+    # @username → https://t.me/username
+    if raw.startswith("@"):
+        uname = raw[1:].strip()
+        if not uname:
+            return None
+        return f"https://t.me/{uname}"
+
+    # Bare username → https://t.me/username
+    return f"https://t.me/{raw}"
+
+
 def _book_url_for(model_display_name: str) -> str | None:
     """
     Resolve a '📖 Book' URL for a model.
     Priority:
       1) BOOK_URL_<MODEL_NAME_SLUG>
       2) DEFAULT_BOOK_URL
-    Examples:
-      BOOK_URL_RIN=https://t.me/UsernameHere
-      DEFAULT_BOOK_URL=https://t.me/YourAdminOrPortal
+
+    Examples (all of these are accepted values):
+      BOOK_URL_RIN=SomeUsername
+      BOOK_URL_RIN=@SomeUsername
+      BOOK_URL_RIN=https://t.me/SomeUsername
+      BOOK_URL_RIN=123456789        # numeric ID -> tg://user?id=123456789
+
+      DEFAULT_BOOK_URL=@YourMainAccount
     """
     slug = _slug_env_key(model_display_name)
-    per_model = os.getenv(f"BOOK_URL_{slug}")
-    if per_model:
-        return per_model.strip()
-    default = os.getenv("DEFAULT_BOOK_URL")
-    return default.strip() if default else None
+
+    per_model_raw = os.getenv(f"BOOK_URL_{slug}")
+    if per_model_raw:
+        url = _normalize_book_target(per_model_raw)
+        if url:
+            return url
+
+    default_raw = os.getenv("DEFAULT_BOOK_URL")
+    if default_raw:
+        url = _normalize_book_target(default_raw)
+        if url:
+            return url
+
+    return None
+
 
 def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
     book_url = _book_url_for(model_display_name)
@@ -103,6 +164,7 @@ def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton("🏠 Main", callback_data="portal:home"),
     ])
     return InlineKeyboardMarkup(rows)
+
 
 def register(app: Client):
     log.info("✅ handlers.menu registered (storage=%s)", "Mongo" if store.uses_mongo() else "JSON")
@@ -124,9 +186,11 @@ def register(app: Client):
         log.info("showmenu: raw=%r -> key=%r found=%s", raw, name, text is not None)
         if text is None:
             return await m.reply(f"Menu '<b>{_clean(raw)}</b>' not found.")
-        await m.reply(f"<b>{name} — Menu</b>\n\n{text}",
-                      reply_markup=_menu_view_kb(name),
-                      disable_web_page_preview=True)
+        await m.reply(
+            f"<b>{name} — Menu</b>\n\n{text}",
+            reply_markup=_menu_view_kb(name),
+            disable_web_page_preview=True,
+        )
 
     # Open / refresh the list UI (from Panels "💞 Menus" button)
     @app.on_callback_query(filters.regex(f"^{OPEN_CB}$|^{LIST_CB}$|^panels:root$"))
@@ -160,4 +224,7 @@ def register(app: Client):
     @app.on_callback_query(filters.regex(r"^menus:tip:.+"))
     async def tip_cb(_, cq: CallbackQuery):
         model = cq.data[len(TIP_CB_P):]
-        await cq.answer("Tips coming soon 💸 — the button is wired, just hook up the processor next.", show_alert=True)
+        await cq.answer(
+            "Tips coming soon 💸 — the button is wired, just hook up the processor next.",
+            show_alert=True,
+        )
