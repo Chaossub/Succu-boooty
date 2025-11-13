@@ -57,16 +57,18 @@ def _parse_inline(text: str):
     if not text:
         return None, None
 
-    parts = text.split(maxsplit=1)  # ['/createmenu', 'Name | body...']
-    if len(parts) < 2:
+    # Strip off the command itself
+    if text.startswith("/createmenu"):
+        text = text[len("/createmenu") :].lstrip()
+
+    if not text:
         return None, None
 
-    rest = parts[1].strip()
-    if "|" not in rest:
-        # User gave only a name
-        return rest.strip(), ""
+    # Now text should look like: "Name | body..."
+    if "|" not in text:
+        return text.strip(), ""
 
-    name, body = rest.split("|", 1)
+    name, body = text.split("|", 1)
     name = name.strip()
     body = body.strip()
 
@@ -82,8 +84,15 @@ def _parse_inline(text: str):
 def register(app: Client):
     log.info("✅ handlers.createmenu registered")
 
-    @app.on_message(filters.command("createmenu"))
+    # We listen to ALL text messages and manually check for /createmenu
+    @app.on_message(filters.text)
     async def createmenu_cmd(_, m: Message):
+        text = m.text or ""
+
+        # Only react to /createmenu (with or without @BotName)
+        if not text.startswith("/createmenu"):
+            return
+
         user_id = m.from_user.id if m.from_user else 0
 
         # Permissions
@@ -96,17 +105,13 @@ def register(app: Client):
 
         # ────────────── MODE 1: Reply mode ──────────────
         if m.reply_to_message:
-            tokens = (m.text or "").split(maxsplit=1)
-            if len(tokens) < 2:
+            # Strip off the command & get "ModelName"
+            after_cmd = text[len("/createmenu") :].strip()
+            if not after_cmd:
                 await m.reply_text(USAGE)
                 return
 
-            name = tokens[1].strip()
-
-            if not name:
-                await m.reply_text(USAGE)
-                return
-
+            name = after_cmd
             body = (
                 m.reply_to_message.text
                 or m.reply_to_message.caption
@@ -121,7 +126,7 @@ def register(app: Client):
 
         # ────────────── MODE 2: Inline / single message ──────────────
         else:
-            name, body = _parse_inline(m.text or "")
+            name, body = _parse_inline(text)
 
             if not name:
                 await m.reply_text(USAGE)
@@ -141,14 +146,11 @@ def register(app: Client):
         # ────────────── SAVE TO MONGO ──────────────
         try:
             store.set_menu(name, body)
-
             await m.reply_text(
                 f"✅ Saved menu for <b>{name}</b>.",
                 disable_web_page_preview=True,
             )
-
         except Exception as e:
             log.exception("❌ Error saving menu: %s", e)
-            await m.reply_text(
-                f"❌ Failed to save menu:\n<code>{e}</code>"
-            )
+            await m.reply_text(f"❌ Failed to save menu:\n<code>{e}</code>")
+
