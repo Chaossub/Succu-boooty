@@ -35,14 +35,21 @@ def _allowed(user_id: int) -> bool:
 def register(app: Client) -> None:
     log.info("✅ handlers.createmenu registered (Mongo=%s)", store.uses_mongo())
 
-    # DM-only, command-only handler
-    @app.on_message(filters.private & filters.command("createmenu"))
+    # DM-only, text-only; we manually look for /createmenu
+    @app.on_message(filters.private & filters.text)
     async def createmenu_cmd(_, m: Message):
         try:
-            if not m.from_user:
+            if not m.from_user or not m.text:
+                return
+
+            text = m.text.strip()
+
+            # Only handle messages that start with /createmenu
+            if not text.lower().startswith("/createmenu"):
                 return
 
             uid = m.from_user.id
+            log.info("📥 /createmenu from %s (%s): %r", uid, m.from_user.first_name, text)
 
             # Permission check
             if not _allowed(uid):
@@ -51,9 +58,7 @@ def register(app: Client) -> None:
                 )
                 return
 
-            text = (m.text or "").strip()
-
-            # Strip the /createmenu part
+            # Strip `/createmenu` off the front
             parts = text.split(" ", 1)
             if len(parts) < 2:
                 await m.reply_text(USAGE)
@@ -79,6 +84,7 @@ def register(app: Client) -> None:
                 return
 
             # Save to Mongo
+            log.info("💾 Saving menu for model=%r", name)
             store.set_menu(name, body)
 
             await m.reply_text(
