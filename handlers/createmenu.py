@@ -16,17 +16,33 @@ SUPER_ADMINS = {
 }
 
 USAGE = (
-    "✨ <b>Create a model menu</b>\n\n"
-    "<code>/createmenu Model Name\n"
-    "Full menu text here\n"
-    "More lines…</code>\n\n"
-    "First line after the command = model name\n"
-    "Everything after = menu text"
+    "✨ <b>Create a menu</b>\n\n"
+    "<code>/createmenu Roni\n"
+    "GFE Chat: $25 / day\n"
+    "Sexting: $30 / day\n"
+    "Customs: $15+\n"
+    "</code>\n\n"
+    "Line 1 = model name\n"
+    "Everything after = menu text."
 )
 
 
 def _allowed(user_id: int) -> bool:
     return user_id == OWNER_ID or user_id in SUPER_ADMINS
+
+
+def clean_name(name: str) -> str:
+    """Remove bars, trailing spaces, emojis, and normalize spacing."""
+    if not name:
+        return ""
+    cleaned = (
+        name.replace("|", "")
+            .replace(":", "")
+            .strip()
+    )
+    # collapse duplicate spaces
+    cleaned = " ".join(cleaned.split())
+    return cleaned
 
 
 def register(app: Client) -> None:
@@ -38,58 +54,49 @@ def register(app: Client) -> None:
             if not m.from_user or not m.text:
                 return
 
-            text = m.text.strip()
+            txt = m.text.strip()
 
-            # Only process if message begins with /createmenu
-            if not text.lower().startswith("/createmenu"):
+            if not txt.lower().startswith("/createmenu"):
                 return
 
             uid = m.from_user.id
-            log.info(
-                "📥 /createmenu from %s (%s): %r",
-                uid,
-                m.from_user.first_name,
-                text,
-            )
+            log.info("📥 /createmenu from %s: %r", uid, txt)
 
             if not _allowed(uid):
-                await m.reply_text("❌ This command is for Roni and approved admins only.")
+                await m.reply_text("❌ Only Roni or approved admins can create menus.")
                 return
 
-            # Split lines
-            lines = text.splitlines()
-
-            # Must have at least command + name + menu lines
-            if len(lines) < 2:
+            # Remove command
+            after = txt.split("\n")
+            if len(after) < 2:
                 await m.reply_text(USAGE)
                 return
 
-            # First line after command = model name
-            first_line = lines[0].split(" ", 1)
-            if len(first_line) < 2:
-                await m.reply_text(USAGE)
+            # Line 1 after command = name
+            first_line = after[0].replace("/createmenu", "").strip()
+
+            name = clean_name(first_line)
+
+            if not name:
+                await m.reply_text("❌ I couldn't detect a valid model name.\n\n" + USAGE)
                 return
 
-            model_name = first_line[1].strip()
-            menu_body = "\n".join(lines[1:]).strip()
+            # Everything after line 1 is body
+            body_lines = after[1:]
+            body = "\n".join(body_lines).strip()
 
-            if not model_name or not menu_body:
-                await m.reply_text(USAGE)
+            if not body:
+                await m.reply_text("❌ Menu text cannot be empty.\n\n" + USAGE)
                 return
 
-            # Save in Mongo/JSON
-            store.set_menu(model_name, menu_body)
-            log.info("💾 Saved menu for model=%r", model_name)
+            # Save it
+            store.set_menu(name, body)
 
             await m.reply_text(
-                f"✅ Saved menu for <b>{model_name}</b>.\n\n"
-                "You can now attach it to any button in the Menus panel.",
-                disable_web_page_preview=True,
+                f"✅ Saved menu for <b>{name}</b>.\n"
+                "You can now attach it to buttons in the Menus panel."
             )
 
         except Exception as e:
             log.exception("createmenu failed: %s", e)
-            await m.reply_text(
-                "❌ Something went wrong while saving the menu:\n"
-                f"<code>{e}</code>"
-            )
+            await m.reply_text(f"❌ Error:\n<code>{e}</code>")
