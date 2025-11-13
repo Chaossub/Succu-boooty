@@ -27,7 +27,6 @@ def register(app: Client):
                 return
 
             uid = m.from_user.id
-            log.info("/createmenu from %s", uid)
 
             # Permission check
             if not _allowed(uid):
@@ -41,9 +40,7 @@ def register(app: Client):
             if len(parts) < 3:
                 await m.reply_text(
                     "Usage:\n"
-                    "<code>/createmenu &lt;Name&gt; &lt;text...&gt;</code>\n\n"
-                    "Example:\n"
-                    "<code>/createmenu Rin My cute menu text…</code>",
+                    "<code>/createmenu &lt;Name&gt; &lt;text...&gt;</code>",
                     disable_web_page_preview=True,
                 )
                 return
@@ -51,25 +48,13 @@ def register(app: Client):
             name = parts[1].strip()
             body = parts[2].strip()
 
-            if not name:
-                await m.reply_text("❌ Menu name cannot be empty.")
-                return
-            if not body:
-                await m.reply_text("❌ Menu text cannot be empty.")
-                return
-
-            # Save to store (Mongo or JSON behind the scenes)
             store.set_menu(name, body)
-            log.info("Saved menu for %r (len=%d)", name, len(body))
 
             await m.reply_text(
-                f"✅ Saved menu for <b>{name}</b>.\n"
-                f"(Length: {len(body)} characters)\n\n"
-                f"Use <code>/showmenu {name}</code> or tap their name in the Menus panel.",
+                f"✅ Saved menu for <b>{name}</b>.",
                 disable_web_page_preview=True,
             )
 
         except Exception as e:
             log.exception("/createmenu crashed: %s", e)
             await m.reply_text(f"❌ Failed to save menu: <code>{e}</code>")
-
