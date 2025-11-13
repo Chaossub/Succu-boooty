@@ -1,16 +1,9 @@
 # handlers/menu.py
-#
-# Inline menu browser:
-#   /menus -> list of model names -> tap to view saved menu
-#
-# "📖 Book" button:
-#   Resolves to https://t.me/<USERNAME> using the same style as contact_admins.py:
-#     RONI_USERNAME, RUBY_USERNAME, RIN_USERNAME, SAVY_USERNAME
-#   (Usernames may be set in env; defaults are provided and @ is stripped.)
+# Inline menu browser: /menus -> buttons of model names -> tap to view saved menu
 
 import logging
-import os
 import re
+import os
 from pyrogram import filters, Client
 from pyrogram.types import (
     InlineKeyboardMarkup,
@@ -27,34 +20,23 @@ OPEN_CB   = "menus:open"
 SHOW_CB_P = "menus:show:"   # prefix: menus:show:<Name>
 TIP_CB_P  = "menus:tip:"    # prefix: menus:tip:<Name>
 
-# ────────────── USERNAME ENV (same pattern as contact_admins) ──────────────
-RONI_USERNAME = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
-RUBY_USERNAME = (os.getenv("RUBY_USERNAME") or "RubyRansom").lstrip("@")
-RIN_USERNAME  = (os.getenv("RIN_USERNAME")  or "peachyrinn").lstrip("@")
-SAVY_USERNAME = (os.getenv("SAVY_USERNAME") or "savage_savy").lstrip("@")
-
-# Map canonical menu names -> which username to use
-# (Keys are lowercased + single-spaced versions of the display name)
-MODEL_USER_MAP = {
-    "roni": RONI_USERNAME,
-    "ruby": RUBY_USERNAME,
-    "rin": RIN_USERNAME,
-    "savy": SAVY_USERNAME,
-    "savy savannah savage": SAVY_USERNAME,  # long version, same Savy
-}
-
-# ────────────── HELPERS ──────────────
-
-_WS_RE = re.compile(r"\s+", re.UNICODE)
-
 def _clean(name: str) -> str:
     return (name or "").strip().strip("»«‘’“”\"'`").strip()
 
-def _canon(name: str) -> str:
-    """Lowercase, collapse whitespace, used for lookups."""
-    s = _clean(name)
-    s = _WS_RE.sub(" ", s)
-    return s.casefold()
+def _slug_env_key(name: str) -> str:
+    # still here if we ever want per-model envs again; not used for Book now
+    s = re.sub(r"\s+", "_", (name or "").strip())
+    s = re.sub(r"[^A-Za-z0-9_]+", "", s)
+    return s.upper()
+
+# ────────────── USERNAME MAP (like contact_admins) ──────────────
+# We key by lowercase model name so "Rin", "rin", "RIN" all work.
+_USERNAME_MAP = {
+    "roni": os.getenv("RONI_USERNAME", "Chaossub283").lstrip("@"),
+    "ruby": os.getenv("RUBY_USERNAME", "RubyRansom").lstrip("@"),
+    "rin":  os.getenv("RIN_USERNAME",  "peachyrinn").lstrip("@"),
+    "savy": os.getenv("SAVY_USERNAME", "savage_savy").lstrip("@"),
+}
 
 def _find_name_ci(target: str) -> str | None:
     """Return the actual stored name that matches target, case-insensitive."""
@@ -103,43 +85,44 @@ def _names_keyboard() -> InlineKeyboardMarkup:
 
 def _book_url_for(model_display_name: str) -> str | None:
     """
-    Resolve a '📖 Book' URL for a model using the same approach as contact_admins:
-      https://t.me/<USERNAME> where USERNAME comes from *_USERNAME envs.
+    Resolve a '📖 Book' URL for a model, wired like contact_admins:
+      - Uses Telegram username, not the placeholder garbage.
+      - Model names are whatever you used in /createmenu (Roni, Ruby, Rin, Savy).
     """
-    canon_name = _canon(model_display_name)
-    username = MODEL_USER_MAP.get(canon_name)
-
-    log.info("Book lookup: disp=%r canon=%r username=%r", model_display_name, canon_name, username)
+    key = (model_display_name or "").strip().casefold()
+    username = _USERNAME_MAP.get(key)
 
     if username:
-        return f"https://t.me/{username}"
+        return f"https://t.me/{username.lstrip('@')}"
 
-    return None  # Will fall back to Contact Admins
+    # If we somehow don't have a mapping, optionally fall back to DEFAULT_BOOK_URL
+    default = os.getenv("DEFAULT_BOOK_URL")
+    if default:
+        return default.strip()
+
+    # Otherwise no URL; menu will fall back to Contact Admins callback
+    return None
 
 def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
     book_url = _book_url_for(model_display_name)
     rows: list[list[InlineKeyboardButton]] = []
 
     if book_url:
+        # Direct DM like contact_admins buttons
         rows.append([InlineKeyboardButton("📖 Book", url=book_url)])
     else:
-        # Fallback to Contact Admins page if no username configured
+        # Fallback to Contact Admins page if no URL configured
         rows.append([InlineKeyboardButton("📖 Book", callback_data="contact_admins:open")])
 
-    rows.append([InlineKeyboardButton("💸 Tip", callback_data=f"{TIP_CB_P}{model_display_name}")])
+    rows.append([InlineKeyboardButton("💸 Tip (coming soon)", callback_data=f"{TIP_CB_P}{model_display_name}")])
     rows.append([
         InlineKeyboardButton("⬅️ Back", callback_data=LIST_CB),
         InlineKeyboardButton("🏠 Main", callback_data="portal:home"),
     ])
     return InlineKeyboardMarkup(rows)
 
-# ────────────── REGISTER ──────────────
-
 def register(app: Client):
-    log.info(
-        "✅ handlers.menu registered (storage=%s)",
-        "Mongo" if store.uses_mongo() else "JSON",
-    )
+    log.info("✅ handlers.menu registered (storage=%s)", "Mongo" if store.uses_mongo() else "JSON")
 
     # List all menus as buttons
     @app.on_message(filters.command("menus"))
@@ -190,11 +173,9 @@ def register(app: Client):
             await cq.message.edit_text(content, reply_markup=kb, disable_web_page_preview=True)
         except Exception:
             await cq.answer()
-            await cq.message.reply_text(
-                content, reply_markup=kb, disable_web_page_preview=True
-            )
+            await cq.message.reply_text(content, reply_markup=kb, disable_web_page_preview=True)
 
-    # Tip placeholder (Stripe will hook in here later)
+    # Tip placeholder (so the button does something now; you’ll wire Stripe later)
     @app.on_callback_query(filters.regex(r"^menus:tip:.+"))
     async def tip_cb(_, cq: CallbackQuery):
         model = cq.data[len(TIP_CB_P):]
