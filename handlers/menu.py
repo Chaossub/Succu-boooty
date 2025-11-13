@@ -1,5 +1,35 @@
-# Inline menu browser: /menus -> buttons of model names -> tap to view saved menu
-import logging, re, os
+# Inline menu browser:
+#   /menus -> buttons of model names -> tap to view saved menu
+#
+# Booking links:
+#   For each model, we look up an env var based on the *display name* saved in
+#   /createmenu.
+#
+#   Slug rule:
+#     - Collapse spaces to "_"
+#     - Remove non A–Z / 0–9 / "_"
+#     - Uppercase
+#
+#   Examples with your current names:
+#     "Roni"                  -> BOOK_URL_RONI
+#     "Ruby"                  -> BOOK_URL_RUBY
+#     "Rin"                   -> BOOK_URL_RIN
+#     "Savy Savannah Savage"  -> BOOK_URL_SAVY_SAVANNAH_SAVAGE
+#
+#   Env values can be:
+#     - chaossub283
+#     - @chaossub283
+#     - https://t.me/chaossub283
+#     - tg://resolve?domain=chaossub283
+#
+#   They are normalized to a proper https://t.me/<username> link.
+#
+#   Optional global fallback:
+#     DEFAULT_BOOK_URL  (same formats allowed)
+
+import logging
+import re
+import os
 from pyrogram import filters, Client
 from pyrogram.types import (
     InlineKeyboardMarkup,
@@ -76,76 +106,49 @@ def _names_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _normalize_book_target(raw: str | None) -> str | None:
+def _normalize_book_value(raw: str | None) -> str | None:
     """
-    Turn whatever you put in the env into a real, working Telegram URL.
+    Normalize BOOK_URL_* and DEFAULT_BOOK_URL values.
 
-    Accepted formats for env values:
-      - Full URL:
-          https://t.me/SomeUser
-          tg://user?id=123456789
-      - Username:
-          SomeUser
-          @SomeUser
-      - Numeric ID:
-          123456789   (will become tg://user?id=123456789)
+    Allowed inputs:
+      - username            -> "chaossub283"
+      - @username           -> "@chaossub283"
+      - https://t.me/user   -> left as-is
+      - tg://...            -> left as-is
     """
     if not raw:
         return None
-
-    raw = raw.strip()
-    if not raw:
+    v = raw.strip()
+    if not v:
         return None
 
-    # Already a proper URL? Use as-is.
-    if raw.startswith(("http://", "https://", "tg://")):
-        return raw
+    # If it already looks like a URL, keep it.
+    if re.match(r"^(?:https?://|tg://)", v, flags=re.IGNORECASE):
+        return v
 
-    # Numeric ID → deep link
-    if raw.isdigit():
-        return f"tg://user?id={raw}"
-
-    # @username → https://t.me/username
-    if raw.startswith("@"):
-        uname = raw[1:].strip()
-        if not uname:
-            return None
-        return f"https://t.me/{uname}"
-
-    # Bare username → https://t.me/username
-    return f"https://t.me/{raw}"
+    # Otherwise treat it as a username and build a t.me link.
+    v = v.lstrip("@")
+    if not v:
+        return None
+    return f"https://t.me/{v}"
 
 
 def _book_url_for(model_display_name: str) -> str | None:
     """
     Resolve a '📖 Book' URL for a model.
+
     Priority:
-      1) BOOK_URL_<MODEL_NAME_SLUG>
+      1) BOOK_URL_<SLUG_OF_MODEL_NAME>
       2) DEFAULT_BOOK_URL
-
-    Examples (all of these are accepted values):
-      BOOK_URL_RIN=SomeUsername
-      BOOK_URL_RIN=@SomeUsername
-      BOOK_URL_RIN=https://t.me/SomeUsername
-      BOOK_URL_RIN=123456789        # numeric ID -> tg://user?id=123456789
-
-      DEFAULT_BOOK_URL=@YourMainAccount
     """
     slug = _slug_env_key(model_display_name)
 
-    per_model_raw = os.getenv(f"BOOK_URL_{slug}")
-    if per_model_raw:
-        url = _normalize_book_target(per_model_raw)
-        if url:
-            return url
+    per_model = _normalize_book_value(os.getenv(f"BOOK_URL_{slug}"))
+    if per_model:
+        return per_model
 
-    default_raw = os.getenv("DEFAULT_BOOK_URL")
-    if default_raw:
-        url = _normalize_book_target(default_raw)
-        if url:
-            return url
-
-    return None
+    default = _normalize_book_value(os.getenv("DEFAULT_BOOK_URL"))
+    return default
 
 
 def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
