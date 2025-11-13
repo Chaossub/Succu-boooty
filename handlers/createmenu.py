@@ -2,7 +2,7 @@
 
 import os
 import logging
-from pyrogram import Client, filters
+from pyrogram import Client
 from pyrogram.types import Message
 from utils.menu_store import store
 
@@ -47,20 +47,35 @@ USAGE = (
 
 
 # ─────────────────────────────────────────────
-# INLINE PARSER
+# HELPERS
 # ─────────────────────────────────────────────
+def _strip_command_prefix(text: str) -> str:
+    """
+    Remove '/createmenu' or '/createmenu@BotName' from the start of the text.
+    Returns the rest of the string (may be empty).
+    """
+    if not text.startswith("/createmenu"):
+        return text
+
+    # Split off the command part first token: "/createmenu" or "/createmenu@Succubot"
+    parts = text.split(maxsplit=1)
+    cmd = parts[0]  # "/createmenu" or "/createmenu@Something"
+    rest = parts[1] if len(parts) > 1 else ""
+
+    # In case someone writes "/createmenu@Succubot"
+    if cmd.startswith("/createmenu@"):
+        # `rest` already has everything after the command
+        return rest.strip()
+
+    # Just "/createmenu"
+    return rest.strip()
+
+
 def _parse_inline(text: str):
     """
-    Parse: /createmenu Name | body...
+    After stripping the command, parse: 'Name | body...'
     Returns (name, body) or (None, None).
     """
-    if not text:
-        return None, None
-
-    # Strip off the command itself
-    if text.startswith("/createmenu"):
-        text = text[len("/createmenu") :].lstrip()
-
     if not text:
         return None, None
 
@@ -84,12 +99,12 @@ def _parse_inline(text: str):
 def register(app: Client):
     log.info("✅ handlers.createmenu registered")
 
-    # We listen to ALL text messages and manually check for /createmenu
-    @app.on_message(filters.text)
+    # Catch ALL messages, we’ll filter inside
+    @app.on_message()
     async def createmenu_cmd(_, m: Message):
-        text = m.text or ""
+        text = m.text or m.caption or ""
 
-        # Only react to /createmenu (with or without @BotName)
+        # Only react to /createmenu commands
         if not text.startswith("/createmenu"):
             return
 
@@ -105,13 +120,12 @@ def register(app: Client):
 
         # ────────────── MODE 1: Reply mode ──────────────
         if m.reply_to_message:
-            # Strip off the command & get "ModelName"
-            after_cmd = text[len("/createmenu") :].strip()
-            if not after_cmd:
+            rest = _strip_command_prefix(text)
+            if not rest:
                 await m.reply_text(USAGE)
                 return
 
-            name = after_cmd
+            name = rest
             body = (
                 m.reply_to_message.text
                 or m.reply_to_message.caption
@@ -126,7 +140,8 @@ def register(app: Client):
 
         # ────────────── MODE 2: Inline / single message ──────────────
         else:
-            name, body = _parse_inline(text)
+            rest = _strip_command_prefix(text)
+            name, body = _parse_inline(rest)
 
             if not name:
                 await m.reply_text(USAGE)
