@@ -1,7 +1,9 @@
+# handlers/menu.py
 # Inline menu browser: /menus -> buttons of model names -> tap to view saved menu
+
 import logging
-import os
 import re
+import os
 from pyrogram import filters, Client
 from pyrogram.types import (
     InlineKeyboardMarkup,
@@ -9,6 +11,7 @@ from pyrogram.types import (
     CallbackQuery,
     Message,
 )
+
 from utils.menu_store import store
 
 log = logging.getLogger(__name__)
@@ -18,29 +21,30 @@ OPEN_CB   = "menus:open"
 SHOW_CB_P = "menus:show:"   # prefix: menus:show:<Name>
 TIP_CB_P  = "menus:tip:"    # prefix: menus:tip:<Name>
 
-# ---------- username wiring (match Contact Admins) ----------
-
+# ────────────── USERNAMES (MATCH contact_admins.py) ──────────────
+# Same envs you already use there:
 RONI_USERNAME = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
 RUBY_USERNAME = (os.getenv("RUBY_USERNAME") or "RubyRansom").lstrip("@")
 RIN_USERNAME  = (os.getenv("RIN_USERNAME")  or "peachyrinn").lstrip("@")
 SAVY_USERNAME = (os.getenv("SAVY_USERNAME") or "savage_savy").lstrip("@")
 
-# We key by *first name*, lowercase. Menu titles can be "Rin", "Rin Menu", etc.
-_USERNAME_MAP = {
-    "roni": RONI_USERNAME,
-    "ruby": RUBY_USERNAME,
-    "rin":  RIN_USERNAME,
-    "savy": SAVY_USERNAME,
-}
-
+_USERNAME_MAP = {}
+if RONI_USERNAME:
+    _USERNAME_MAP["roni"] = RONI_USERNAME
+if RUBY_USERNAME:
+    _USERNAME_MAP["ruby"] = RUBY_USERNAME
+if RIN_USERNAME:
+    _USERNAME_MAP["rin"] = RIN_USERNAME
+if SAVY_USERNAME:
+    _USERNAME_MAP["savy"] = SAVY_USERNAME
 
 def _clean(name: str) -> str:
     return (name or "").strip().strip("»«‘’“”\"'`").strip()
 
 
 def _slug_env_key(name: str) -> str:
-    # (kept just in case we ever want per-model env keys again)
-    s = re.sub(r"\s+", "_", name.strip())
+    # kept for possible future use
+    s = re.sub(r"\s+", "_", (name or "").strip())
     s = re.sub(r"[^A-Za-z0-9_]+", "", s)
     return s.upper()
 
@@ -95,31 +99,25 @@ def _names_keyboard() -> InlineKeyboardMarkup:
 
 def _book_url_for(model_display_name: str) -> str | None:
     """
-    Resolve the '📖 Book' URL for a model.
+    Resolve a '📖 Book' URL for a model, wired JUST LIKE contact_admins:
 
-    We match by FIRST NAME to keep it simple:
-      "Rin" or "Rin Menu"  -> RIN_USERNAME
-      "Savy" or "Savy XXX" -> SAVY_USERNAME
-      "Roni" ...           -> RONI_USERNAME
-      "Ruby" ...           -> RUBY_USERNAME
+    Menus named:
+      Roni, Ruby, Rin, Savy
+    (any capitalization) → go to the username from the env above.
 
-    If we don't recognize the name, we return None and fall back
-    to the Contact Admins panel instead of a broken t.me link.
+    If a name doesn’t match, we optionally fall back to DEFAULT_BOOK_URL,
+    otherwise we punt to Contact Admins.
     """
-    raw = (model_display_name or "").strip()
-    if not raw:
-        return None
+    key = (model_display_name or "").strip().casefold()
+    username = _USERNAME_MAP.get(key)
+    if username:
+        return f"https://t.me/{username}"
 
-    key_full = raw.casefold()
-    key_first = raw.split()[0].casefold()
+    # Optional global fallback
+    default = os.getenv("DEFAULT_BOOK_URL")
+    if default:
+        return default.strip()
 
-    # Try full title, then first word
-    for k in (key_full, key_first):
-        username = _USERNAME_MAP.get(k)
-        if username:
-            return f"https://t.me/{username}"
-
-    # No match -> handled by caller (we'll send them to Contact Admins)
     return None
 
 
@@ -128,13 +126,14 @@ def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
     if book_url:
-        # Direct DM to the model
-        rows.append([InlineKeyboardButton("📖 Book", url=book_url)])
+        handle = book_url.rsplit("/", 1)[-1]
+        # Show who you're DM’ing so you can *see* it’s correct
+        rows.append([InlineKeyboardButton(f"📖 Book @{handle}", url=book_url)])
     else:
-        # Fallback: open the Contact Admins panel
-        rows.append([InlineKeyboardButton("📖 Book", callback_data="contact_admins:open")])
+        # Fallback to Contact Admins page if no URL configured
+        rows.append([InlineKeyboardButton("📖 Book (via Admins)", callback_data="contact_admins:open")])
 
-    rows.append([InlineKeyboardButton("💸 Tip", callback_data=f"{TIP_CB_P}{model_display_name}")])
+    rows.append([InlineKeyboardButton("💸 Tip (coming soon)", callback_data=f"{TIP_CB_P}{model_display_name}")])
     rows.append([
         InlineKeyboardButton("⬅️ Back", callback_data=LIST_CB),
         InlineKeyboardButton("🏠 Main", callback_data="portal:home"),
@@ -200,11 +199,11 @@ def register(app: Client):
             await cq.answer()
             await cq.message.reply_text(content, reply_markup=kb, disable_web_page_preview=True)
 
-    # Tip placeholder (wire Stripe later)
+    # Tip placeholder (so the button does something now; you’ll wire Stripe later)
     @app.on_callback_query(filters.regex(r"^menus:tip:.+"))
     async def tip_cb(_, cq: CallbackQuery):
         model = cq.data[len(TIP_CB_P):]
         await cq.answer(
-            "Tips coming soon 💸 — the button is wired, we just need to plug in the processor.",
+            "Tips coming soon 💸 — the button is wired, just hook up the processor next.",
             show_alert=True,
         )
