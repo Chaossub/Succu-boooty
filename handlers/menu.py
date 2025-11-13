@@ -1,14 +1,15 @@
 # handlers/menu.py
 #
 # Inline menu browser:
-#   /menus -> buttons of model names -> tap to view saved menu
+#   /menus -> list of model names -> tap to view saved menu
 #
-# Booking links:
-#   We hard-map the menu name to a t.me link so env bugs can’t break it.
-#
-#   Map is case-insensitive and supports a couple aliases.
+# "📖 Book" button:
+#   Resolves to https://t.me/<USERNAME> using the same style as contact_admins.py:
+#     RONI_USERNAME, RUBY_USERNAME, RIN_USERNAME, SAVY_USERNAME
+#   (Usernames may be set in env; defaults are provided and @ is stripped.)
 
 import logging
+import os
 import re
 from pyrogram import filters, Client
 from pyrogram.types import (
@@ -26,29 +27,34 @@ OPEN_CB   = "menus:open"
 SHOW_CB_P = "menus:show:"   # prefix: menus:show:<Name>
 TIP_CB_P  = "menus:tip:"    # prefix: menus:tip:<Name>
 
-# -------- BOOK LINKS (EDIT THESE IF USERNAMES CHANGE) --------
-# These should be the REAL Telegram usernames, no @ needed.
-BOOK_LINKS = {
-    # Roni
-    "roni": "https://t.me/chaossub283",
+# ────────────── USERNAME ENV (same pattern as contact_admins) ──────────────
+RONI_USERNAME = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
+RUBY_USERNAME = (os.getenv("RUBY_USERNAME") or "RubyRansom").lstrip("@")
+RIN_USERNAME  = (os.getenv("RIN_USERNAME")  or "peachyrinn").lstrip("@")
+SAVY_USERNAME = (os.getenv("SAVY_USERNAME") or "savage_savy").lstrip("@")
 
-    # Ruby
-    # If Ruby's real @ is different, just change the right-hand side:
-    "ruby": "https://t.me/RubyRansoms",
-
-    # Rin
-    "rin": "https://t.me/peachyrinn",
-
-    # Savy (both short name and long name)
-    "savy": "https://t.me/savage_savy",
-    "savy savannah savage": "https://t.me/savage_savy",
+# Map canonical menu names -> which username to use
+# (Keys are lowercased + single-spaced versions of the display name)
+MODEL_USER_MAP = {
+    "roni": RONI_USERNAME,
+    "ruby": RUBY_USERNAME,
+    "rin": RIN_USERNAME,
+    "savy": SAVY_USERNAME,
+    "savy savannah savage": SAVY_USERNAME,  # long version, same Savy
 }
-# -------------------------------------------------------------
 
+# ────────────── HELPERS ──────────────
+
+_WS_RE = re.compile(r"\s+", re.UNICODE)
 
 def _clean(name: str) -> str:
     return (name or "").strip().strip("»«‘’“”\"'`").strip()
 
+def _canon(name: str) -> str:
+    """Lowercase, collapse whitespace, used for lookups."""
+    s = _clean(name)
+    s = _WS_RE.sub(" ", s)
+    return s.casefold()
 
 def _find_name_ci(target: str) -> str | None:
     """Return the actual stored name that matches target, case-insensitive."""
@@ -59,7 +65,6 @@ def _find_name_ci(target: str) -> str | None:
         if (n or "").casefold() == t:
             return n
     return None
-
 
 def _get_menu_ci(name: str) -> tuple[str | None, str | None]:
     """
@@ -84,7 +89,6 @@ def _get_menu_ci(name: str) -> tuple[str | None, str | None]:
 
     return None, None
 
-
 def _names_keyboard() -> InlineKeyboardMarkup:
     names = store.list_names()
     if not names:
@@ -97,17 +101,20 @@ def _names_keyboard() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="portal:home")])
     return InlineKeyboardMarkup(rows)
 
-
 def _book_url_for(model_display_name: str) -> str | None:
     """
-    Resolve a '📖 Book' URL for a model based only on BOOK_LINKS.
+    Resolve a '📖 Book' URL for a model using the same approach as contact_admins:
+      https://t.me/<USERNAME> where USERNAME comes from *_USERNAME envs.
     """
-    disp = _clean(model_display_name)
-    key_ci = disp.casefold()
-    url = BOOK_LINKS.get(key_ci)
-    log.info("Book URL lookup: name=%r key=%r url=%r", disp, key_ci, url)
-    return url
+    canon_name = _canon(model_display_name)
+    username = MODEL_USER_MAP.get(canon_name)
 
+    log.info("Book lookup: disp=%r canon=%r username=%r", model_display_name, canon_name, username)
+
+    if username:
+        return f"https://t.me/{username}"
+
+    return None  # Will fall back to Contact Admins
 
 def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
     book_url = _book_url_for(model_display_name)
@@ -116,7 +123,7 @@ def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
     if book_url:
         rows.append([InlineKeyboardButton("📖 Book", url=book_url)])
     else:
-        # Fallback to Contact Admins page if we don't know this model
+        # Fallback to Contact Admins page if no username configured
         rows.append([InlineKeyboardButton("📖 Book", callback_data="contact_admins:open")])
 
     rows.append([InlineKeyboardButton("💸 Tip", callback_data=f"{TIP_CB_P}{model_display_name}")])
@@ -126,6 +133,7 @@ def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
     ])
     return InlineKeyboardMarkup(rows)
 
+# ────────────── REGISTER ──────────────
 
 def register(app: Client):
     log.info(
