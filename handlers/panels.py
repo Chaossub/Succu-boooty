@@ -1,46 +1,32 @@
 # handlers/panels.py
-import os
 import logging
+from typing import Dict
 
 from pyrogram import Client, filters
 from pyrogram.types import (
+    Message,
+    CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    CallbackQuery,
-    Message,
 )
 
 from utils.menu_store import store
 
 log = logging.getLogger(__name__)
 
-FIND_MODELS_TEXT = os.getenv("FIND_MODELS_TEXT", "Nothing here yet 💕")
-
-# Fixed model list used for the Menus panel
-MODELS = [
-    {"slug": "roni", "label": "Roni", "env": "RONI_USERNAME"},
-    {"slug": "ruby", "label": "Ruby", "env": "RUBY_USERNAME"},
-    {"slug": "rin",  "label": "Rin",  "env": "RIN_USERNAME"},
-    {"slug": "savy", "label": "Savy", "env": "SAVY_USERNAME"},
-]
+# Static model config: slug -> {name, username}
+MODEL_CONFIG: Dict[str, Dict[str, str]] = {
+    "roni": {"name": "Roni", "username": "your_roni_username_here"},
+    "ruby": {"name": "Ruby", "username": "your_ruby_username_here"},
+    "rin":  {"name": "Rin",  "username": "your_rin_username_here"},
+    "savy": {"name": "Savy", "username": "your_savy_username_here"},
+}
 
 
-def _username_for(slug: str) -> str | None:
-    """Get @username for a model from env, cleaned."""
-    rec = next((m for m in MODELS if m["slug"] == slug), None)
-    if not rec:
-        return None
-    username = (os.getenv(rec["env"], "") or "").strip()
-    if username.startswith("@"):
-        username = username[1:]
-    return username or None
-
-
-def _main_kb() -> InlineKeyboardMarkup:
-    """Main /start keyboard."""
+def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("💕 Menus", callback_data="panels:menus")],
+            [InlineKeyboardButton("💞 Menus", callback_data="panels:menus")],
             [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
             [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
             [InlineKeyboardButton("❓ Help", callback_data="help:open")],
@@ -48,150 +34,134 @@ def _main_kb() -> InlineKeyboardMarkup:
     )
 
 
-def _menus_kb() -> InlineKeyboardMarkup:
-    """
-    2x2 grid of model names:
-    [Roni Ruby]
-    [Rin  Savy]
-    [Back]
-    """
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-
-    for rec in MODELS:
-        row.append(
-            InlineKeyboardButton(
-                rec["label"], callback_data=f"menus:model:{rec['slug']}"
-            )
-        )
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-
-    if row:
-        rows.append(row)
-
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="panels:root")])
+def _models_keyboard() -> InlineKeyboardMarkup:
+    # 2x2 grid of names
+    rows = [
+        [
+            InlineKeyboardButton("Roni", callback_data="panels:model:roni"),
+            InlineKeyboardButton("Ruby", callback_data="panels:model:ruby"),
+        ],
+        [
+            InlineKeyboardButton("Rin", callback_data="panels:model:rin"),
+            InlineKeyboardButton("Savy", callback_data="panels:model:savy"),
+        ],
+        [InlineKeyboardButton("⬅️ Back", callback_data="panels:root")],
+    ]
     return InlineKeyboardMarkup(rows)
 
 
-def _menu_text(name: str) -> str:
-    """
-    Get saved menu text from menu_store.
-    Falls back to 'no menu saved yet' if nothing is stored.
-    """
-    txt = store.get_menu(name)
-    if txt:
-        return txt
-    return (
-        "no menu saved yet.\n\n"
-        f"use /createmenu {name} <text...> to set one."
-    )
+def _model_keyboard(slug: str) -> InlineKeyboardMarkup:
+    cfg = MODEL_CONFIG.get(slug, {})
+    username = cfg.get("username") or ""
+    if username.startswith("@"):
+        username = username[1:]
+
+    # If we have a username, book = URL button; otherwise callback that just alerts.
+    if username:
+        book_button = InlineKeyboardButton(
+            "📩 Book", url=f"https://t.me/{username}"
+        )
+    else:
+        book_button = InlineKeyboardButton(
+            "📩 Book", callback_data="panels:nodm"
+        )
+
+    rows = [
+        [book_button],
+        [InlineKeyboardButton("💸 Tip (coming soon)", callback_data="panels:tip_coming")],
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="panels:menus"),
+            InlineKeyboardButton("🏠 Main Menu", callback_data="panels:root"),
+        ],
+    ]
+    return InlineKeyboardMarkup(rows)
 
 
 def register(app: Client):
-    log.info("✅ handlers.panels registered (static Menus + Book/Tip)")
+    log.info("✅ handlers.panels registered (static 4-model panel, MenuStore=%s)", store.uses_mongo())
 
-    # ───────── /start -> Main panel ─────────
-    @app.on_message(filters.command("start") & filters.private)
+    # -------- /start --------
+    @app.on_message(filters.command("start"))
     async def start_cmd(_, m: Message):
+        kb = _main_keyboard()
         await m.reply_text(
             "🔥 Welcome to SuccuBot\n"
-            "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
-            "😈 If you ever need to know exactly what I can do, just press the Help button "
-            "and I’ll spill all my secrets… 💋",
-            reply_markup=_main_kb(),
+            "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+            "✨ Use the menu below to navigate!",
+            reply_markup=kb,
             disable_web_page_preview=True,
         )
 
-    # ───────── Back to main (panels:root) ─────────
-    @app.on_callback_query(filters.regex(r"^panels:root$"))
-    async def root_cb(_, cq: CallbackQuery):
-        try:
-            await cq.message.edit_text(
-                "🔥 Welcome back to SuccuBot\n"
-                "Use the menu below to navigate!",
-                reply_markup=_main_kb(),
-                disable_web_page_preview=True,
-            )
-        finally:
-            await cq.answer()
-
-    # ───────── Menus button from main ─────────
+    # -------- Menus list --------
     @app.on_callback_query(filters.regex(r"^panels:menus$"))
-    async def open_menus(_, cq: CallbackQuery):
+    async def menus_list_cb(_, cq: CallbackQuery):
+        kb = _models_keyboard()
         try:
             await cq.message.edit_text(
-                "📖 <b>Menus</b>\nTap a name to view.",
-                reply_markup=_menus_kb(),
-                disable_web_page_preview=True,
-            )
-        finally:
-            await cq.answer()
-
-    # Optional: /menus command (same as tapping Menus button)
-    @app.on_message(filters.command("menus") & filters.private)
-    async def menus_cmd(_, m: Message):
-        await m.reply_text(
-            "📖 <b>Menus</b>\nTap a name to view.",
-            reply_markup=_menus_kb(),
-            disable_web_page_preview=True,
-        )
-
-    # ───────── Individual model menus ─────────
-    @app.on_callback_query(filters.regex(r"^menus:model:(\w+)$"))
-    async def model_menu(_, cq: CallbackQuery):
-        slug = cq.data.split(":", 2)[-1]
-        rec = next((m for m in MODELS if m["slug"] == slug), None)
-        if not rec:
-            await cq.answer("Unknown model.", show_alert=True)
-            return
-
-        name = rec["label"]
-        text = _menu_text(name)
-        username = _username_for(slug)
-
-        buttons: list[list[InlineKeyboardButton]] = []
-
-        # 📖 Book – open DM if username is set, otherwise alert
-        if username:
-            buttons.append(
-                [InlineKeyboardButton("📖 Book", url=f"https://t.me/{username}")]
-            )
-        else:
-            buttons.append(
-                [InlineKeyboardButton("📖 Book", callback_data="menus:nobook")]
-            )
-
-        # 💸 Tip (coming soon)
-        buttons.append(
-            [InlineKeyboardButton("💸 Tip (coming soon)", callback_data="menus:tip_soon")]
-        )
-
-        # Back + Main
-        buttons.append(
-            [InlineKeyboardButton("⬅️ Back", callback_data="panels:menus")]
-        )
-        buttons.append(
-            [InlineKeyboardButton("🏠 Main Menu", callback_data="panels:root")]
-        )
-
-        kb = InlineKeyboardMarkup(buttons)
-
-        try:
-            await cq.message.edit_text(
-                f"{name} — menu\n\n{text}",
+                "💕 <b>Choose a model:</b>",
                 reply_markup=kb,
                 disable_web_page_preview=True,
             )
-        finally:
-            await cq.answer()
+        except Exception:
+            # If Telegram complains "MESSAGE_NOT_MODIFIED", just ignore.
+            pass
+        await cq.answer()
 
-    # Small alerts for disabled actions
-    @app.on_callback_query(filters.regex(r"^menus:nobook$"))
-    async def no_book(_, cq: CallbackQuery):
-        await cq.answer("Booking link isn’t set yet for this model. 💕", show_alert=True)
+    # -------- Main/root from callbacks --------
+    @app.on_callback_query(filters.regex(r"^panels:root$"))
+    async def panels_root_cb(_, cq: CallbackQuery):
+        kb = _main_keyboard()
+        try:
+            await cq.message.edit_text(
+                "🔥 Welcome back to SuccuBot\n"
+                "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+                "✨ Use the menu below to navigate!",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+        await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^menus:tip_soon$"))
-    async def tip_soon(_, cq: CallbackQuery):
-        await cq.answer("Tips are coming soon. 💋", show_alert=True)
+    # -------- Model page --------
+    @app.on_callback_query(filters.regex(r"^panels:model:(.+)$"))
+    async def model_page_cb(_, cq: CallbackQuery):
+        slug = cq.data.split(":", 2)[-1]
+        cfg = MODEL_CONFIG.get(slug)
+        if not cfg:
+            await cq.answer("Unknown model.", show_alert=True)
+            return
+
+        name = cfg["name"]
+        menu_text = store.get_menu(name)
+
+        if menu_text:
+            body = f"<b>{name} — Menu</b>\n\n{menu_text}"
+        else:
+            body = (
+                f"<b>{name} — Menu</b>\n\n"
+                f"No saved menu yet.\n"
+                f"Ask an admin to run:\n"
+                f"<code>/createmenu {name} &lt;text...&gt;</code>"
+            )
+
+        kb = _model_keyboard(slug)
+        try:
+            await cq.message.edit_text(
+                body,
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+        await cq.answer()
+
+    # -------- "Tip coming soon" alert --------
+    @app.on_callback_query(filters.regex(r"^panels:tip_coming$"))
+    async def tip_coming_cb(_, cq: CallbackQuery):
+        await cq.answer("💸 Tip support coming soon!", show_alert=True)
+
+    # -------- No DM username set --------
+    @app.on_callback_query(filters.regex(r"^panels:nodm$"))
+    async def nodm_cb(_, cq: CallbackQuery):
+        await cq.answer("No DM link set for this model yet. Please contact an admin.", show_alert=True)
