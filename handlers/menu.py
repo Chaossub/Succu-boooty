@@ -24,18 +24,19 @@ def _clean(name: str) -> str:
     return (name or "").strip().strip("»«‘’“”\"'`").strip()
 
 def _slug_env_key(name: str) -> str:
-    # still here if we ever want per-model envs again; not used for Book now
+    # kept for future use (not used for Book now)
     s = re.sub(r"\s+", "_", (name or "").strip())
     s = re.sub(r"[^A-Za-z0-9_]+", "", s)
     return s.upper()
 
-# ────────────── USERNAME MAP (like contact_admins) ──────────────
-# We key by lowercase model name so "Rin", "rin", "RIN" all work.
+# ────────────── HARD-CODED USERNAME MAP ──────────────
+# These are the actual Telegram @handles that should receive DMs.
+# Keys are the model names you use in /createmenu.
 _USERNAME_MAP = {
-    "roni": os.getenv("RONI_USERNAME", "Chaossub283").lstrip("@"),
-    "ruby": os.getenv("RUBY_USERNAME", "RubyRansom").lstrip("@"),
-    "rin":  os.getenv("RIN_USERNAME",  "peachyrinn").lstrip("@"),
-    "savy": os.getenv("SAVY_USERNAME", "savage_savy").lstrip("@"),
+    "roni": "Chaossub283",     # @Chaossub283
+    "ruby": "RubyRansom",      # @RubyRansom
+    "rin":  "peachyrinn",      # @peachyrinn
+    "savy": "savage_savy",     # @savage_savy
 }
 
 def _find_name_ci(target: str) -> str | None:
@@ -86,21 +87,20 @@ def _names_keyboard() -> InlineKeyboardMarkup:
 def _book_url_for(model_display_name: str) -> str | None:
     """
     Resolve a '📖 Book' URL for a model, wired like contact_admins:
-      - Uses Telegram username, not the placeholder garbage.
-      - Model names are whatever you used in /createmenu (Roni, Ruby, Rin, Savy).
+      Menus named 'Roni', 'Ruby', 'Rin', 'Savy' → hard-coded @usernames above.
     """
     key = (model_display_name or "").strip().casefold()
     username = _USERNAME_MAP.get(key)
 
     if username:
-        return f"https://t.me/{username.lstrip('@')}"
+        return f"https://t.me/{username}"
 
-    # If we somehow don't have a mapping, optionally fall back to DEFAULT_BOOK_URL
+    # If you ever add a model without a mapping, we can optionally
+    # fall back to DEFAULT_BOOK_URL; otherwise just route to Contact Admins.
     default = os.getenv("DEFAULT_BOOK_URL")
     if default:
         return default.strip()
 
-    # Otherwise no URL; menu will fall back to Contact Admins callback
     return None
 
 def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
@@ -108,11 +108,10 @@ def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
     if book_url:
-        # Direct DM like contact_admins buttons
-        rows.append([InlineKeyboardButton("📖 Book", url=book_url)])
+        # Show username in the button text so you can SEE who it will DM
+        rows.append([InlineKeyboardButton(f"📖 Book @{book_url.rsplit('/', 1)[-1]}", url=book_url)])
     else:
-        # Fallback to Contact Admins page if no URL configured
-        rows.append([InlineKeyboardButton("📖 Book", callback_data="contact_admins:open")])
+        rows.append([InlineKeyboardButton("📖 Book (via Admins)", callback_data="contact_admins:open")])
 
     rows.append([InlineKeyboardButton("💸 Tip (coming soon)", callback_data=f"{TIP_CB_P}{model_display_name}")])
     rows.append([
