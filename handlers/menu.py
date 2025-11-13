@@ -1,9 +1,7 @@
-# handlers/menu.py
 # Inline menu browser: /menus -> buttons of model names -> tap to view saved menu
-
 import logging
-import re
 import os
+import re
 from pyrogram import filters, Client
 from pyrogram.types import (
     InlineKeyboardMarkup,
@@ -20,24 +18,32 @@ OPEN_CB   = "menus:open"
 SHOW_CB_P = "menus:show:"   # prefix: menus:show:<Name>
 TIP_CB_P  = "menus:tip:"    # prefix: menus:tip:<Name>
 
+# ---------- username wiring (match Contact Admins) ----------
+
+RONI_USERNAME = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
+RUBY_USERNAME = (os.getenv("RUBY_USERNAME") or "RubyRansom").lstrip("@")
+RIN_USERNAME  = (os.getenv("RIN_USERNAME")  or "peachyrinn").lstrip("@")
+SAVY_USERNAME = (os.getenv("SAVY_USERNAME") or "savage_savy").lstrip("@")
+
+# We key by *first name*, lowercase. Menu titles can be "Rin", "Rin Menu", etc.
+_USERNAME_MAP = {
+    "roni": RONI_USERNAME,
+    "ruby": RUBY_USERNAME,
+    "rin":  RIN_USERNAME,
+    "savy": SAVY_USERNAME,
+}
+
+
 def _clean(name: str) -> str:
     return (name or "").strip().strip("»«‘’“”\"'`").strip()
 
+
 def _slug_env_key(name: str) -> str:
-    # kept for future use (not used for Book now)
-    s = re.sub(r"\s+", "_", (name or "").strip())
+    # (kept just in case we ever want per-model env keys again)
+    s = re.sub(r"\s+", "_", name.strip())
     s = re.sub(r"[^A-Za-z0-9_]+", "", s)
     return s.upper()
 
-# ────────────── HARD-CODED USERNAME MAP ──────────────
-# These are the actual Telegram @handles that should receive DMs.
-# Keys are the model names you use in /createmenu.
-_USERNAME_MAP = {
-    "roni": "Chaossub283",     # @Chaossub283
-    "ruby": "RubyRansom",      # @RubyRansom
-    "rin":  "peachyrinn",      # @peachyrinn
-    "savy": "savage_savy",     # @savage_savy
-}
 
 def _find_name_ci(target: str) -> str | None:
     """Return the actual stored name that matches target, case-insensitive."""
@@ -48,6 +54,7 @@ def _find_name_ci(target: str) -> str | None:
         if (n or "").casefold() == t:
             return n
     return None
+
 
 def _get_menu_ci(name: str) -> tuple[str | None, str | None]:
     """
@@ -72,6 +79,7 @@ def _get_menu_ci(name: str) -> tuple[str | None, str | None]:
 
     return None, None
 
+
 def _names_keyboard() -> InlineKeyboardMarkup:
     names = store.list_names()
     if not names:
@@ -84,44 +92,62 @@ def _names_keyboard() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="portal:home")])
     return InlineKeyboardMarkup(rows)
 
+
 def _book_url_for(model_display_name: str) -> str | None:
     """
-    Resolve a '📖 Book' URL for a model, wired like contact_admins:
-      Menus named 'Roni', 'Ruby', 'Rin', 'Savy' → hard-coded @usernames above.
+    Resolve the '📖 Book' URL for a model.
+
+    We match by FIRST NAME to keep it simple:
+      "Rin" or "Rin Menu"  -> RIN_USERNAME
+      "Savy" or "Savy XXX" -> SAVY_USERNAME
+      "Roni" ...           -> RONI_USERNAME
+      "Ruby" ...           -> RUBY_USERNAME
+
+    If we don't recognize the name, we return None and fall back
+    to the Contact Admins panel instead of a broken t.me link.
     """
-    key = (model_display_name or "").strip().casefold()
-    username = _USERNAME_MAP.get(key)
+    raw = (model_display_name or "").strip()
+    if not raw:
+        return None
 
-    if username:
-        return f"https://t.me/{username}"
+    key_full = raw.casefold()
+    key_first = raw.split()[0].casefold()
 
-    # If you ever add a model without a mapping, we can optionally
-    # fall back to DEFAULT_BOOK_URL; otherwise just route to Contact Admins.
-    default = os.getenv("DEFAULT_BOOK_URL")
-    if default:
-        return default.strip()
+    # Try full title, then first word
+    for k in (key_full, key_first):
+        username = _USERNAME_MAP.get(k)
+        if username:
+            return f"https://t.me/{username}"
 
+    # No match -> handled by caller (we'll send them to Contact Admins)
     return None
+
 
 def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
     book_url = _book_url_for(model_display_name)
     rows: list[list[InlineKeyboardButton]] = []
 
     if book_url:
-        # Show username in the button text so you can SEE who it will DM
-        rows.append([InlineKeyboardButton(f"📖 Book @{book_url.rsplit('/', 1)[-1]}", url=book_url)])
+        # Direct DM to the model
+        rows.append([InlineKeyboardButton("📖 Book", url=book_url)])
     else:
-        rows.append([InlineKeyboardButton("📖 Book (via Admins)", callback_data="contact_admins:open")])
+        # Fallback: open the Contact Admins panel
+        rows.append([InlineKeyboardButton("📖 Book", callback_data="contact_admins:open")])
 
-    rows.append([InlineKeyboardButton("💸 Tip (coming soon)", callback_data=f"{TIP_CB_P}{model_display_name}")])
+    rows.append([InlineKeyboardButton("💸 Tip", callback_data=f"{TIP_CB_P}{model_display_name}")])
     rows.append([
         InlineKeyboardButton("⬅️ Back", callback_data=LIST_CB),
         InlineKeyboardButton("🏠 Main", callback_data="portal:home"),
     ])
     return InlineKeyboardMarkup(rows)
 
+
 def register(app: Client):
-    log.info("✅ handlers.menu registered (storage=%s)", "Mongo" if store.uses_mongo() else "JSON")
+    log.info(
+        "✅ handlers.menu registered (storage=%s, usernames=%s)",
+        "Mongo" if store.uses_mongo() else "JSON",
+        _USERNAME_MAP,
+    )
 
     # List all menus as buttons
     @app.on_message(filters.command("menus"))
@@ -174,11 +200,11 @@ def register(app: Client):
             await cq.answer()
             await cq.message.reply_text(content, reply_markup=kb, disable_web_page_preview=True)
 
-    # Tip placeholder (so the button does something now; you’ll wire Stripe later)
+    # Tip placeholder (wire Stripe later)
     @app.on_callback_query(filters.regex(r"^menus:tip:.+"))
     async def tip_cb(_, cq: CallbackQuery):
         model = cq.data[len(TIP_CB_P):]
         await cq.answer(
-            "Tips coming soon 💸 — the button is wired, just hook up the processor next.",
+            "Tips coming soon 💸 — the button is wired, we just need to plug in the processor.",
             show_alert=True,
         )
