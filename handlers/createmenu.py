@@ -17,86 +17,80 @@ SUPER_ADMINS = {
 
 USAGE = (
     "✨ <b>Create a menu</b>\n\n"
-    "<code>/createmenu Roni\n"
-    "GFE Chat: $25 / day\n"
-    "Sexting: $30 / day\n"
-    "Customs: $15+\n"
-    "</code>\n\n"
-    "Line 1 = model name\n"
-    "Everything after = menu text."
+    "<code>/createmenu Savy PREMADE MENU\\n"
+    "Videos\\n"
+    "Solo $4/min\\n"
+    "...</code>\n\n"
+    "The first word after /createmenu is the model's key name "
+    "(must match the button, e.g. Roni, Rin, Savy, Ruby).\n"
+    "Everything after that becomes the full menu text."
 )
 
 
 def _allowed(user_id: int) -> bool:
+    # Only Roni + SUPER_ADMINS
     return user_id == OWNER_ID or user_id in SUPER_ADMINS
-
-
-def clean_name(name: str) -> str:
-    """Remove bars, trailing spaces, emojis, and normalize spacing."""
-    if not name:
-        return ""
-    cleaned = (
-        name.replace("|", "")
-            .replace(":", "")
-            .strip()
-    )
-    # collapse duplicate spaces
-    cleaned = " ".join(cleaned.split())
-    return cleaned
 
 
 def register(app: Client) -> None:
     log.info("✅ handlers.createmenu registered (Mongo=%s)", store.uses_mongo())
 
+    # HIGH PRIORITY: group = -1 so this runs before generic DM handlers
     @app.on_message(filters.private & filters.text, group=-1)
     async def createmenu_cmd(_, m: Message):
         try:
             if not m.from_user or not m.text:
                 return
 
-            txt = m.text.strip()
+            text = m.text.strip()
 
-            if not txt.lower().startswith("/createmenu"):
+            # Only handle /createmenu messages
+            if not text.lower().startswith("/createmenu"):
                 return
 
             uid = m.from_user.id
-            log.info("📥 /createmenu from %s: %r", uid, txt)
+            log.info(
+                "📥 /createmenu from %s (%s): %r",
+                uid,
+                m.from_user.first_name,
+                text,
+            )
 
             if not _allowed(uid):
-                await m.reply_text("❌ Only Roni or approved admins can create menus.")
+                await m.reply_text(
+                    "❌ This command is reserved for Roni and approved admins only."
+                )
                 return
 
-            # Remove command
-            after = txt.split("\n")
-            if len(after) < 2:
+            # Split into: ['/createmenu', <name>, <full body…>]
+            parts = text.split(None, 2)  # split on any whitespace, max 2 splits
+            if len(parts) < 3:
                 await m.reply_text(USAGE)
                 return
 
-            # Line 1 after command = name
-            first_line = after[0].replace("/createmenu", "").strip()
+            _, name, body = parts
+            name = name.strip()
+            body = body.strip()
 
-            name = clean_name(first_line)
-
-            if not name:
-                await m.reply_text("❌ I couldn't detect a valid model name.\n\n" + USAGE)
+            if not name or not body:
+                await m.reply_text(
+                    "❌ I need a model name and menu text.\n\n" + USAGE
+                )
                 return
 
-            # Everything after line 1 is body
-            body_lines = after[1:]
-            body = "\n".join(body_lines).strip()
-
-            if not body:
-                await m.reply_text("❌ Menu text cannot be empty.\n\n" + USAGE)
-                return
-
-            # Save it
+            # Save menu in Mongo/JSON
+            log.info("💾 Saving menu for model=%r", name)
             store.set_menu(name, body)
 
             await m.reply_text(
-                f"✅ Saved menu for <b>{name}</b>.\n"
-                "You can now attach it to buttons in the Menus panel."
+                f"✅ Saved menu for <b>{name}</b>.\n\n"
+                "You can now attach it to buttons using the Menus panel.",
+                disable_web_page_preview=True,
             )
 
         except Exception as e:
             log.exception("createmenu failed: %s", e)
-            await m.reply_text(f"❌ Error:\n<code>{e}</code>")
+            await m.reply_text(
+                "❌ Something went wrong while saving that menu:\n"
+                f"<code>{e}</code>"
+            )
