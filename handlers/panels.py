@@ -12,18 +12,18 @@ from utils.menu_store import store
 
 log = logging.getLogger(__name__)
 
-# ---------- model usernames (no @) ----------
+# --------- model usernames (no @) ----------
 RONI = os.getenv("RONI_USERNAME", "")
 RUBY = os.getenv("RUBY_USERNAME", "")
 RIN  = os.getenv("RIN_USERNAME", "")
 SAVY = os.getenv("SAVY_USERNAME", "")
 
-MODELS = [
-    ("Roni", RONI),
-    ("Ruby", RUBY),
-    ("Rin",  RIN),
-    ("Savy", SAVY),
-]
+MODELS = {
+    "Roni": RONI,
+    "Ruby": RUBY,
+    "Rin":  RIN,
+    "Savy": SAVY,
+}
 
 
 def _main_menu_kb() -> InlineKeyboardMarkup:
@@ -36,39 +36,40 @@ def _main_menu_kb() -> InlineKeyboardMarkup:
 
 
 def register(app: Client):
-    log.info("✅ handlers.panels registered (2x2 model grid)")
+    log.info("✅ handlers.panels registered (fixed 2x2 model grid)")
 
     # ---------- /start ----------
     @app.on_message(filters.command("start"))
     async def start_cmd(_, m: Message):
         text = (
             "🔥 Welcome to SuccuBot 🔥\n"
-            "I’m your naughty little helper inside the Sanctuary — here to keep things fun, flirty, and flowing.\n\n"
-            "😈 If you ever need to know exactly what I can do, just press the Help button and I’ll spill all my secrets… 💋"
+            "I’m your naughty little helper inside the Sanctuary — here to keep "
+            "things fun, flirty, and flowing.\n\n"
+            "😈 If you ever need to know exactly what I can do, just press the "
+            "Help button and I’ll spill all my secrets… 💋"
         )
         await m.reply_text(text, reply_markup=_main_menu_kb())
 
-    # ---------- Menus: list models (2x2 grid) ----------
+    # ---------- Menus: fixed 2x2 model grid ----------
     @app.on_callback_query(filters.regex(r"^menus:list$"))
     async def menus_list_cb(_, cq: CallbackQuery):
-        rows: list[list[InlineKeyboardButton]] = []
-        current_row: list[InlineKeyboardButton] = []
-
-        for name, _username in MODELS:
-            current_row.append(
-                InlineKeyboardButton(name, callback_data=f"menus:model:{name}")
-            )
-            if len(current_row) == 2:
-                rows.append(current_row)
-                current_row = []
-
-        if current_row:
-            rows.append(current_row)
-
-        rows.append([InlineKeyboardButton("⬅ Back", callback_data="panels:root")])
-
+        # Force exact layout:
+        rows = [
+            [
+                InlineKeyboardButton("Roni", callback_data="menus:model:Roni"),
+                InlineKeyboardButton("Ruby", callback_data="menus:model:Ruby"),
+            ],
+            [
+                InlineKeyboardButton("Rin",  callback_data="menus:model:Rin"),
+                InlineKeyboardButton("Savy", callback_data="menus:model:Savy"),
+            ],
+            [InlineKeyboardButton("⬅ Back", callback_data="panels:root")],
+        ]
         kb = InlineKeyboardMarkup(rows)
-        await cq.message.edit_text("📖 <b>Menus</b>\nTap a name to view.", reply_markup=kb)
+        await cq.message.edit_text(
+            "📖 <b>Menus</b>\nTap a name to view.",
+            reply_markup=kb,
+        )
         await cq.answer()
 
     # ---------- Individual model page ----------
@@ -76,13 +77,9 @@ def register(app: Client):
     async def model_page_cb(_, cq: CallbackQuery):
         model = cq.data.split(":", 2)[2]
 
-        username = ""
-        for n, u in MODELS:
-            if n == model:
-                username = u or ""
-                break
-
+        username = MODELS.get(model, "") or ""
         menu_text = store.get_menu(model)
+
         if menu_text:
             text = f"<b>{model} — Menu</b>\n\n{menu_text}"
         else:
@@ -91,6 +88,7 @@ def register(app: Client):
         if username:
             book_button = InlineKeyboardButton("📖 Book", url=f"https://t.me/{username}")
         else:
+            # still clickable, just shows alert if username not set
             book_button = InlineKeyboardButton("📖 Book", callback_data="book:none")
 
         kb = InlineKeyboardMarkup([
