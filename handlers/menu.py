@@ -1,31 +1,15 @@
+# handlers/menu.py
+#
 # Inline menu browser:
 #   /menus -> buttons of model names -> tap to view saved menu
 #
 # Booking links:
-#   We use per-model env vars.
+#   We hard-map the menu name to a t.me link so env bugs can’t break it.
 #
-#   Exact mapping (based on the *menu name* you saved with /createmenu):
-#
-#     "Roni" -> BOOK_URL_RONI
-#     "Ruby" -> BOOK_URL_RUBY
-#     "Rin"  -> BOOK_URL_RIN
-#     "Savy" -> BOOK_URL_SAVY
-#
-#   If a model name isn't in the map, we fall back to a generic slug:
-#     name "Some Girl" -> BOOK_URL_SOME_GIRL
-#
-#   Env values can be:
-#     - username            -> "chaossub283"
-#     - @username           -> "@chaossub283"
-#     - https://t.me/user   -> used as-is
-#     - tg://resolve?...    -> used as-is
-#
-#   Optional global fallback:
-#     DEFAULT_BOOK_URL      (same formats allowed)
+#   Map is case-insensitive and supports a couple aliases.
 
 import logging
 import re
-import os
 from pyrogram import filters, Client
 from pyrogram.types import (
     InlineKeyboardMarkup,
@@ -42,24 +26,28 @@ OPEN_CB   = "menus:open"
 SHOW_CB_P = "menus:show:"   # prefix: menus:show:<Name>
 TIP_CB_P  = "menus:tip:"    # prefix: menus:tip:<Name>
 
-# Hard mapping for your main models
-MODEL_ENV_MAP = {
-    "roni": "BOOK_URL_RONI",
-    "ruby": "BOOK_URL_RUBY",
-    "rin":  "BOOK_URL_RIN",
-    "savy": "BOOK_URL_SAVY",
+# -------- BOOK LINKS (EDIT THESE IF USERNAMES CHANGE) --------
+# These should be the REAL Telegram usernames, no @ needed.
+BOOK_LINKS = {
+    # Roni
+    "roni": "https://t.me/chaossub283",
+
+    # Ruby
+    # If Ruby's real @ is different, just change the right-hand side:
+    "ruby": "https://t.me/RubyRansoms",
+
+    # Rin
+    "rin": "https://t.me/peachyrinn",
+
+    # Savy (both short name and long name)
+    "savy": "https://t.me/savage_savy",
+    "savy savannah savage": "https://t.me/savage_savy",
 }
+# -------------------------------------------------------------
 
 
 def _clean(name: str) -> str:
     return (name or "").strip().strip("»«‘’“”\"'`").strip()
-
-
-def _slug_env_key(name: str) -> str:
-    # Generic slug if not in MODEL_ENV_MAP: BOOK_URL_<SLUG>
-    s = re.sub(r"\s+", "_", name.strip())
-    s = re.sub(r"[^A-Za-z0-9_]+", "", s)
-    return s.upper()
 
 
 def _find_name_ci(target: str) -> str | None:
@@ -110,67 +98,15 @@ def _names_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _normalize_book_value(raw: str | None) -> str | None:
-    """
-    Normalize BOOK_URL_* and DEFAULT_BOOK_URL values.
-
-    Allowed inputs:
-      - username            -> "chaossub283"
-      - @username           -> "@chaossub283"
-      - https://t.me/user   -> left as-is
-      - tg://...            -> left as-is
-    """
-    if not raw:
-        return None
-    v = raw.strip()
-    if not v:
-        return None
-
-    # Already a URL? keep as-is.
-    if re.match(r"^(?:https?://|tg://)", v, flags=re.IGNORECASE):
-        return v
-
-    # Otherwise treat as username
-    v = v.lstrip("@")
-    if not v:
-        return None
-    return f"https://t.me/{v}"
-
-
 def _book_url_for(model_display_name: str) -> str | None:
     """
-    Resolve a '📖 Book' URL for a model.
-
-    Priority:
-      1) MODEL_ENV_MAP[name.lower()]  -> BOOK_URL_...
-      2) BOOK_URL_<SLUG_OF_MODEL_NAME>
-      3) DEFAULT_BOOK_URL
+    Resolve a '📖 Book' URL for a model based only on BOOK_LINKS.
     """
     disp = _clean(model_display_name)
     key_ci = disp.casefold()
-
-    # 1) Hard map (Roni, Ruby, Rin, Savy)
-    env_name = MODEL_ENV_MAP.get(key_ci)
-    if env_name:
-        raw = os.getenv(env_name)
-        url = _normalize_book_value(raw)
-        log.info("Book URL for %r via %s -> %r", disp, env_name, url)
-        if url:
-            return url
-
-    # 2) Slug fallback (for any other models)
-    slug = _slug_env_key(disp)
-    env_name = f"BOOK_URL_{slug}"
-    raw = os.getenv(env_name)
-    url = _normalize_book_value(raw)
-    log.info("Book URL for %r via %s -> %r", disp, env_name, url)
-    if url:
-        return url
-
-    # 3) Global fallback
-    default = _normalize_book_value(os.getenv("DEFAULT_BOOK_URL"))
-    log.info("Book URL for %r via DEFAULT_BOOK_URL -> %r", disp, default)
-    return default
+    url = BOOK_LINKS.get(key_ci)
+    log.info("Book URL lookup: name=%r key=%r url=%r", disp, key_ci, url)
+    return url
 
 
 def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
@@ -180,7 +116,7 @@ def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
     if book_url:
         rows.append([InlineKeyboardButton("📖 Book", url=book_url)])
     else:
-        # Fallback to Contact Admins page if no URL configured at all
+        # Fallback to Contact Admins page if we don't know this model
         rows.append([InlineKeyboardButton("📖 Book", callback_data="contact_admins:open")])
 
     rows.append([InlineKeyboardButton("💸 Tip", callback_data=f"{TIP_CB_P}{model_display_name}")])
@@ -192,7 +128,10 @@ def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
 
 
 def register(app: Client):
-    log.info("✅ handlers.menu registered (storage=%s)", "Mongo" if store.uses_mongo() else "JSON")
+    log.info(
+        "✅ handlers.menu registered (storage=%s)",
+        "Mongo" if store.uses_mongo() else "JSON",
+    )
 
     # List all menus as buttons
     @app.on_message(filters.command("menus"))
@@ -243,7 +182,9 @@ def register(app: Client):
             await cq.message.edit_text(content, reply_markup=kb, disable_web_page_preview=True)
         except Exception:
             await cq.answer()
-            await cq.message.reply_text(content, reply_markup=kb, disable_web_page_preview=True)
+            await cq.message.reply_text(
+                content, reply_markup=kb, disable_web_page_preview=True
+            )
 
     # Tip placeholder (Stripe will hook in here later)
     @app.on_callback_query(filters.regex(r"^menus:tip:.+"))
