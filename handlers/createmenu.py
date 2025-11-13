@@ -51,24 +51,19 @@ USAGE = (
 # ─────────────────────────────────────────────
 def _strip_command_prefix(text: str) -> str:
     """
-    Remove '/createmenu' or '/createmenu@BotName' from the start of the text.
-    Returns the rest of the string (may be empty).
+    Remove '/createmenu' or '/createmenu@BotName' from the start of the text
+    and return the rest.
     """
-    if not text.startswith("/createmenu"):
-        return text
-
-    # Split off the command part first token: "/createmenu" or "/createmenu@Succubot"
+    # Split into first word + the rest
     parts = text.split(maxsplit=1)
-    cmd = parts[0]  # "/createmenu" or "/createmenu@Something"
+    cmd = parts[0]
     rest = parts[1] if len(parts) > 1 else ""
 
-    # In case someone writes "/createmenu@Succubot"
-    if cmd.startswith("/createmenu@"):
-        # `rest` already has everything after the command
+    # Handle '/createmenu' and '/createmenu@Something'
+    if cmd.startswith("/createmenu"):
         return rest.strip()
 
-    # Just "/createmenu"
-    return rest.strip()
+    return text.strip()
 
 
 def _parse_inline(text: str):
@@ -79,8 +74,8 @@ def _parse_inline(text: str):
     if not text:
         return None, None
 
-    # Now text should look like: "Name | body..."
     if "|" not in text:
+        # Name only
         return text.strip(), ""
 
     name, body = text.split("|", 1)
@@ -99,18 +94,22 @@ def _parse_inline(text: str):
 def register(app: Client):
     log.info("✅ handlers.createmenu registered")
 
-    # Catch ALL messages, we’ll filter inside
+    # CATCH **ALL** MESSAGES
     @app.on_message()
     async def createmenu_cmd(_, m: Message):
-        text = m.text or m.caption or ""
+        text = (m.text or m.caption or "").strip()
 
-        # Only react to /createmenu commands
-        if not text.startswith("/createmenu"):
+        # DEBUG LOG FOR EVERY MESSAGE
+        log.info("[createmenu] got message: %r from %s", text, m.from_user.id if m.from_user else None)
+
+        # Only react if the word 'createmenu' appears anywhere
+        if "createmenu" not in text.lower():
             return
 
-        user_id = m.from_user.id if m.from_user else 0
+        log.info("[createmenu] matched text, starting handler logic")
 
         # Permissions
+        user_id = m.from_user.id if m.from_user else 0
         if not _allowed(user_id):
             await m.reply_text("❌ You are not allowed to create or edit menus.")
             return
@@ -161,6 +160,7 @@ def register(app: Client):
         # ────────────── SAVE TO MONGO ──────────────
         try:
             store.set_menu(name, body)
+            log.info("[createmenu] stored menu for %s", name)
             await m.reply_text(
                 f"✅ Saved menu for <b>{name}</b>.",
                 disable_web_page_preview=True,
