@@ -16,26 +16,22 @@ SUPER_ADMINS = {
 }
 
 USAGE = (
-    "✨ <b>Create a menu</b>\n\n"
-    "<code>/createmenu Roni | Roni's Main Menu\n"
-    "• GFE Chat: $25 / day\n"
-    "• Sexting: $30 / day\n"
-    "• Customs: $15+\n"
-    "…</code>\n\n"
-    "First part = model name\n"
-    "Text after <code>|</code> = full menu text."
+    "✨ <b>Create a model menu</b>\n\n"
+    "<code>/createmenu Model Name\n"
+    "Full menu text here\n"
+    "More lines…</code>\n\n"
+    "First line after the command = model name\n"
+    "Everything after = menu text"
 )
 
 
 def _allowed(user_id: int) -> bool:
-    # Only Roni + SUPER_ADMINS
     return user_id == OWNER_ID or user_id in SUPER_ADMINS
 
 
 def register(app: Client) -> None:
     log.info("✅ handlers.createmenu registered (Mongo=%s)", store.uses_mongo())
 
-    # HIGH PRIORITY: group = -1 so this runs before any generic DM handlers
     @app.on_message(filters.private & filters.text, group=-1)
     async def createmenu_cmd(_, m: Message):
         try:
@@ -44,7 +40,7 @@ def register(app: Client) -> None:
 
             text = m.text.strip()
 
-            # Only handle /createmenu messages
+            # Only process if message begins with /createmenu
             if not text.lower().startswith("/createmenu"):
                 return
 
@@ -57,48 +53,43 @@ def register(app: Client) -> None:
             )
 
             if not _allowed(uid):
-                await m.reply_text(
-                    "❌ This command is reserved for Roni and approved admins only."
-                )
+                await m.reply_text("❌ This command is for Roni and approved admins only.")
                 return
 
-            # Remove the command part
-            parts = text.split(" ", 1)
-            if len(parts) < 2:
+            # Split lines
+            lines = text.splitlines()
+
+            # Must have at least command + name + menu lines
+            if len(lines) < 2:
                 await m.reply_text(USAGE)
                 return
 
-            rest = parts[1].strip()
-
-            if "|" not in rest:
-                await m.reply_text(
-                    "❌ I couldn't see the <code>|</code> separator.\n\n" + USAGE
-                )
+            # First line after command = model name
+            first_line = lines[0].split(" ", 1)
+            if len(first_line) < 2:
+                await m.reply_text(USAGE)
                 return
 
-            name_part, body = rest.split("|", 1)
-            name = name_part.strip()
-            body = body.strip()
+            model_name = first_line[1].strip()
+            menu_body = "\n".join(lines[1:]).strip()
 
-            if not name or not body:
-                await m.reply_text(
-                    "❌ I need both a model name and menu text.\n\n" + USAGE
-                )
+            if not model_name or not menu_body:
+                await m.reply_text(USAGE)
                 return
 
-            # Save menu in Mongo
-            log.info("💾 Saving menu for model=%r", name)
-            store.set_menu(name, body)
+            # Save in Mongo/JSON
+            store.set_menu(model_name, menu_body)
+            log.info("💾 Saved menu for model=%r", model_name)
 
             await m.reply_text(
-                f"✅ Saved menu for <b>{name}</b>.\n\n"
-                "You can now attach it to buttons using the Menus panel.",
+                f"✅ Saved menu for <b>{model_name}</b>.\n\n"
+                "You can now attach it to any button in the Menus panel.",
                 disable_web_page_preview=True,
             )
 
         except Exception as e:
             log.exception("createmenu failed: %s", e)
             await m.reply_text(
-                "❌ Something went wrong while saving that menu:\n"
+                "❌ Something went wrong while saving the menu:\n"
                 f"<code>{e}</code>"
             )
