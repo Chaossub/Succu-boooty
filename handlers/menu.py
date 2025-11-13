@@ -2,15 +2,16 @@
 # Inline menu browser: /menus -> buttons of model names -> tap to view saved menu
 
 import logging
-import re
 import os
-from pyrogram import filters, Client
+import re
+from pyrogram import Client, filters
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     CallbackQuery,
     Message,
 )
+
 from utils.menu_store import store
 
 log = logging.getLogger(__name__)
@@ -21,13 +22,14 @@ SHOW_CB_P = "menus:show:"   # prefix: menus:show:<Name>
 TIP_CB_P  = "menus:tip:"    # prefix: menus:tip:<Name>
 
 # ────────────── USERNAMES (MATCH contact_admins.py) ──────────────
-# These MUST be set in your env, without the @ (we strip it anyway)
-RONI_USERNAME = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
+# We use your real usernames as defaults so there are NO placeholders anymore.
+# Env vars (without @) can override them.
+RONI_USERNAME = (os.getenv("RONI_USERNAME") or "chaossub283").lstrip("@")
 RUBY_USERNAME = (os.getenv("RUBY_USERNAME") or "RubyRansom").lstrip("@")
-RIN_USERNAME  = (os.getenv("RIN_USERNAME")  or "your_rin_username_here").lstrip("@")
-SAVY_USERNAME = (os.getenv("SAVY_USERNAME") or "your_savy_username_here").lstrip("@")
+RIN_USERNAME  = (os.getenv("RIN_USERNAME")  or "peachyrinn").lstrip("@")
+SAVY_USERNAME = (os.getenv("SAVY_USERNAME") or "savage_savy").lstrip("@")
 
-DEFAULT_BOOK_URL = os.getenv("DEFAULT_BOOK_URL", "").strip() or None
+DEFAULT_BOOK_URL = (os.getenv("DEFAULT_BOOK_URL") or "").strip() or None
 
 
 def _clean(name: str) -> str:
@@ -86,42 +88,36 @@ def _names_keyboard() -> InlineKeyboardMarkup:
 
 def _book_url_for(model_display_name: str) -> str | None:
     """
-    Resolve a '📖 Book' URL for a model.
+    Resolve a '📖 Book' URL for a model, using the same idea as contact_admins.
 
-    We don't mess with fancy slugs anymore.
-    We just look at the model's name and decide whose DMs to open,
-    using the same usernames envs as contact_admins.py.
+    We don't ever use placeholder usernames.
     """
     n = (model_display_name or "").casefold()
 
     username = None
+    who = None
+
     if "roni" in n:
-        username = RONI_USERNAME
-        who = "Roni"
+        username, who = RONI_USERNAME, "Roni"
     elif "ruby" in n:
-        username = RUBY_USERNAME
-        who = "Ruby"
+        username, who = RUBY_USERNAME, "Ruby"
     elif "rin" in n:
-        username = RIN_USERNAME
-        who = "Rin"
+        username, who = RIN_USERNAME, "Rin"
     elif "savy" in n or "savvy" in n:
-        username = SAVY_USERNAME
-        who = "Savy"
-    else:
-        # fall back to a global booking URL if you ever want one
-        if DEFAULT_BOOK_URL:
-            log.info("Book: %r -> DEFAULT_BOOK_URL=%s", model_display_name, DEFAULT_BOOK_URL)
-            return DEFAULT_BOOK_URL
-        log.info("Book: %r -> no matching username / default URL", model_display_name)
-        return None
+        username, who = SAVY_USERNAME, "Savy"
 
-    if not username:
-        log.warning("Book: %s matched %s but username env is empty!", model_display_name, who)
-        return None
+    if username:
+        url = f"https://t.me/{username}"
+        log.info("Book: %r -> %s (%s)", model_display_name, url, who)
+        return url
 
-    url = f"https://t.me/{username}"
-    log.info("Book: %r -> %s (%s)", model_display_name, url, who)
-    return url
+    # fallback: global booking URL if configured
+    if DEFAULT_BOOK_URL:
+        log.info("Book: %r -> DEFAULT_BOOK_URL=%s", model_display_name, DEFAULT_BOOK_URL)
+        return DEFAULT_BOOK_URL
+
+    log.info("Book: %r -> no matching username and no default", model_display_name)
+    return None
 
 
 def _menu_view_kb(model_display_name: str) -> InlineKeyboardMarkup:
