@@ -153,4 +153,3 @@ def register(app: Client):
         except Exception as e:
             log.exception("❌ Error saving menu: %s", e)
             await m.reply_text(f"❌ Failed to save menu:\n<code>{e}</code>")
-
