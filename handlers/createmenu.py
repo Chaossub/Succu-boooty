@@ -28,15 +28,15 @@ USAGE = (
 
 
 def _allowed(user_id: int) -> bool:
-    """Only owner + SUPER_ADMINS can use /createmenu."""
+    # Only Roni + SUPER_ADMINS
     return user_id == OWNER_ID or user_id in SUPER_ADMINS
 
 
 def register(app: Client) -> None:
     log.info("✅ handlers.createmenu registered (Mongo=%s)", store.uses_mongo())
 
-    # DM-only, text-only; we manually look for /createmenu
-    @app.on_message(filters.private & filters.text)
+    # HIGH PRIORITY: group = -1 so this runs before any generic DM handlers
+    @app.on_message(filters.private & filters.text, group=-1)
     async def createmenu_cmd(_, m: Message):
         try:
             if not m.from_user or not m.text:
@@ -44,21 +44,25 @@ def register(app: Client) -> None:
 
             text = m.text.strip()
 
-            # Only handle messages that start with /createmenu
+            # Only handle /createmenu messages
             if not text.lower().startswith("/createmenu"):
                 return
 
             uid = m.from_user.id
-            log.info("📥 /createmenu from %s (%s): %r", uid, m.from_user.first_name, text)
+            log.info(
+                "📥 /createmenu from %s (%s): %r",
+                uid,
+                m.from_user.first_name,
+                text,
+            )
 
-            # Permission check
             if not _allowed(uid):
                 await m.reply_text(
                     "❌ This command is reserved for Roni and approved admins only."
                 )
                 return
 
-            # Strip `/createmenu` off the front
+            # Remove the command part
             parts = text.split(" ", 1)
             if len(parts) < 2:
                 await m.reply_text(USAGE)
@@ -66,7 +70,6 @@ def register(app: Client) -> None:
 
             rest = parts[1].strip()
 
-            # Expect: ModelName | Menu body...
             if "|" not in rest:
                 await m.reply_text(
                     "❌ I couldn't see the <code>|</code> separator.\n\n" + USAGE
@@ -83,7 +86,7 @@ def register(app: Client) -> None:
                 )
                 return
 
-            # Save to Mongo
+            # Save menu in Mongo
             log.info("💾 Saving menu for model=%r", name)
             store.set_menu(name, body)
 
