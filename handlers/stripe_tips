@@ -1,0 +1,159 @@
+# handlers/stripe_tips.py
+import os
+import logging
+from typing import Dict
+
+import stripe
+from pyrogram import Client, filters
+from pyrogram.types import CallbackQuery, Message
+
+from .panels import MODEL_CONFIG  # reuse model names/slugs
+
+log = logging.getLogger("stripe_tips")
+
+STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "").strip()
+
+# Where Stripe sends the user after paying / cancelling
+TIP_SUCCESS_URL = os.getenv("TIP_SUCCESS_URL", "https://t.me/Succubot_bot")
+TIP_CANCEL_URL  = os.getenv("TIP_CANCEL_URL", "https://t.me/Succubot_bot")
+
+if STRIPE_SECRET_KEY:
+    stripe.api_key = STRIPE_SECRET_KEY
+else:
+    log.warning("STRIPE_SECRET_KEY is not set; tip checkout will not work.")
+
+# user_id -> model_slug we're waiting for a tip amount for
+_PENDING_TIP: Dict[int, str] = {}
+
+
+def _parse_amount(text: str) -> int | None:
+    """
+    Parse something like '25', '$25', '25.50' into cents (int).
+    Returns None if invalid.
+    """
+    t = text.strip().replace("$", "").replace(",", "")
+    if not t:
+        return None
+    try:
+        # support plain integers or 2-decimal floats
+        if "." in t:
+            dollars = float(t)
+            if dollars <= 0:
+                return None
+            cents = int(round(dollars * 100))
+        else:
+            dollars = int(t)
+            if dollars <= 0:
+                return None
+            cents = dollars * 100
+        return cents
+    except Exception:
+        return None
+
+
+def register(app: Client):
+    log.info("✅ handlers.stripe_tips registered")
+
+    # 1) Tip button pressed: panels:tip:<slug>
+    @app.on_callback_query(filters.regex(r"^panels:tip:(.+)$"))
+    async def tip_button_cb(_, cq: CallbackQuery):
+        if not STRIPE_SECRET_KEY:
+            await cq.answer("Stripe is not configured yet. Ask Roni to finish setup 💔", show_alert=True)
+            return
+
+        slug = cq.data.split(":", 2)[-1]
+        cfg = MODEL_CONFIG.get(slug)
+        if not cfg:
+            await cq.answer("Unknown model for tipping.", show_alert=True)
+            return
+
+        user_id = cq.from_user.id if cq.from_user else None
+        if user_id is None:
+            await cq.answer()
+            return
+
+        _PENDING_TIP[user_id] = slug
+
+        name = cfg["name"]
+        msg = (
+            f"💸 <b>Tip {name}</b>\n\n"
+            f"Send me the amount you’d like to tip in USD.\n"
+            f"Example: <code>25</code> or <code>25.50</code>\n\n"
+            f\"Once you send the amount, I’ll give you a secure Stripe link. 💕\"
+        )
+        try:
+            await cq.message.reply_text(msg, disable_web_page_preview=True)
+        except Exception:
+            pass
+        await cq.answer()
+
+    # 2) Collect amount and create Checkout Session
+    @app.on_message(filters.private & filters.text)
+    async def tip_amount_collect(_, m: Message):
+        user = m.from_user
+        if user is None:
+            return
+
+        user_id = user.id
+        if user_id not in _PENDING_TIP:
+            # not in a "tip" flow; ignore
+            return
+
+        slug = _PENDING_TIP[user_id]
+        cfg = MODEL_CONFIG.get(slug)
+        if not cfg:
+            _PENDING_TIP.pop(user_id, None)
+            await m.reply_text("I lost track of who you were tipping, sorry. Please tap the Tip button again.")
+            return
+
+        cents = _parse_amount(m.text or "")
+        if cents is None:
+            await m.reply_text(
+                "I couldn’t read that amount, sweetheart.\n"
+                "Please send just a number like <code>20</code> or <code>15.50</code>.",
+                disable_web_page_preview=True,
+            )
+            return
+
+        name = cfg["name"]
+
+        if not STRIPE_SECRET_KEY:
+            _PENDING_TIP.pop(user_id, None)
+            await m.reply_text("Stripe isn’t configured yet. Ask Roni to finish setup 💔")
+            return
+
+        try:
+            session = stripe.checkout.Session.create(
+                mode="payment",
+                line_items=[
+                    {
+                        "price_data": {
+                            "currency": "usd",
+                            "product_data": {
+                                "name": f"Tip for {name}",
+                            },
+                            "unit_amount": cents,
+                        },
+                        "quantity": 1,
+                    }
+                ],
+                success_url=TIP_SUCCESS_URL,
+                cancel_url=TIP_CANCEL_URL,
+            )
+        except Exception as e:
+            log.exception("Error creating Stripe Checkout session: %s", e)
+            _PENDING_TIP.pop(user_id, None)
+            await m.reply_text(
+                "❌ I couldn’t create the payment link right now.\n"
+                "Please try again in a moment or let Roni know.",
+            )
+            return
+
+        _PENDING_TIP.pop(user_id, None)
+
+        text = (
+            f"✨ Here’s your secure tip link for <b>{name}</b>:\n"
+            f"{session.url}\n\n"
+            f"Thank you for supporting our models, you’re amazing 💖"
+        )
+        await m.reply_text(text, disable_web_page_preview=True)
