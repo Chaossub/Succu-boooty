@@ -61,6 +61,9 @@ def main():
     _try_register("menu")                    # (mongo or json)
     _try_register("createmenu")
 
+    # 💸 Tip handler (Stripe links etc.)
+    _try_register("tips")
+
     # Moderation / warnings
     _try_register("moderation")
     _try_register("warnings")
@@ -116,3 +119,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
