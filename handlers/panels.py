@@ -1,5 +1,6 @@
 # handlers/panels.py
 import logging
+import os
 from typing import Dict
 
 from pyrogram import Client, filters
@@ -14,12 +15,19 @@ from utils.menu_store import store
 
 log = logging.getLogger(__name__)
 
+# ────────────── USERNAMES FROM ENV (NO PLACEHOLDERS) ──────────────
+# These mirror contact_admins.py. Env values should NOT contain '@'.
+RONI_USERNAME = (os.getenv("RONI_USERNAME") or "chaossub283").lstrip("@")
+RUBY_USERNAME = (os.getenv("RUBY_USERNAME") or "RubyRansom").lstrip("@")
+RIN_USERNAME  = (os.getenv("RIN_USERNAME")  or "peachyrinn").lstrip("@")
+SAVY_USERNAME = (os.getenv("SAVY_USERNAME") or "savage_savy").lstrip("@")
+
 # Static model config: slug -> {name, username}
 MODEL_CONFIG: Dict[str, Dict[str, str]] = {
-    "roni": {"name": "Roni", "username": "your_roni_username_here"},
-    "ruby": {"name": "Ruby", "username": "your_ruby_username_here"},
-    "rin":  {"name": "Rin",  "username": "your_rin_username_here"},
-    "savy": {"name": "Savy", "username": "your_savy_username_here"},
+    "roni": {"name": "Roni", "username": RONI_USERNAME},
+    "ruby": {"name": "Ruby", "username": RUBY_USERNAME},
+    "rin":  {"name": "Rin",  "username": RIN_USERNAME},
+    "savy": {"name": "Savy", "username": SAVY_USERNAME},
 }
 
 
@@ -68,8 +76,7 @@ def _model_keyboard(slug: str) -> InlineKeyboardMarkup:
 
     rows = [
         [book_button],
-        # 🔥 Tip button now routes to stripe_tips handler
-        [InlineKeyboardButton("💸 Tip", callback_data=f"panels:tip:{slug}")],
+        [InlineKeyboardButton("💸 Tip (coming soon)", callback_data="panels:tip_coming")],
         [
             InlineKeyboardButton("⬅️ Back", callback_data="panels:menus"),
             InlineKeyboardButton("🏠 Main Menu", callback_data="panels:root"),
@@ -79,7 +86,14 @@ def _model_keyboard(slug: str) -> InlineKeyboardMarkup:
 
 
 def register(app: Client):
-    log.info("✅ handlers.panels registered (static 4-model panel, MenuStore=%s)", store.uses_mongo())
+    log.info(
+        "✅ handlers.panels registered (static 4-model panel, MenuStore=%s, RONI=%s RUBY=%s RIN=%s SAVY=%s)",
+        store.uses_mongo(),
+        RONI_USERNAME,
+        RUBY_USERNAME,
+        RIN_USERNAME,
+        SAVY_USERNAME,
+    )
 
     # -------- /start --------
     @app.on_message(filters.command("start"))
@@ -156,6 +170,11 @@ def register(app: Client):
         except Exception:
             pass
         await cq.answer()
+
+    # -------- "Tip coming soon" alert --------
+    @app.on_callback_query(filters.regex(r"^panels:tip_coming$"))
+    async def tip_coming_cb(_, cq: CallbackQuery):
+        await cq.answer("💸 Tip support coming soon!", show_alert=True)
 
     # -------- No DM username set --------
     @app.on_callback_query(filters.regex(r"^panels:nodm$"))
