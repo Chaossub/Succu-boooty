@@ -65,7 +65,7 @@ def main():
     _try_register("moderation")
     _try_register("warnings")
 
-    # Message scheduler
+    # Message scheduler (you already had this)
     _try_register("schedulemsg")
 
     # Flyers (ad-hoc send + CRUD)
@@ -80,9 +80,6 @@ def main():
         log.info("✅ Set main loop for flyer_scheduler")
     except Exception as e:
         log.warning("Could not set main loop for flyer_scheduler: %s", e)
-
-    # 🔥 Stripe tip handler (one checkout per model)
-    _try_register("stripe_tips")
 
     # -------- Central “Back to Main” handler (portal:home) --------
     @app.on_callback_query(filters.regex("^portal:home$"))
@@ -114,6 +111,7 @@ def main():
         finally:
             await cq.answer()
 
+    # IMPORTANT: no /start fallback here (to avoid duplicates).
     app.run()
 
 if __name__ == "__main__":
