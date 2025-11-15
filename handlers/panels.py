@@ -138,7 +138,7 @@ def register(app: Client):
                 disable_web_page_preview=True,
             )
         except Exception:
-            # If Telegram complains "MESSAGE_NOT_MODIFIED", just ignore.
+        # If Telegram complains "MESSAGE_NOT_MODIFIED", just ignore.
             pass
         await cq.answer()
 
@@ -175,9 +175,9 @@ def register(app: Client):
         else:
             body = (
                 f"<b>{name} — Menu</b>\n\n"
-                f"No saved menu yet.\n"
-                f"Ask an admin to run:\n"
-                f"<code>/createmenu {name} &lt{text...}&gt;</code>"
+                "No saved menu yet.\n"
+                "Ask an admin to run:\n"
+                f"<code>/createmenu {name} &lt;text...&gt;</code>"
             )
 
         kb = _model_keyboard(slug)
