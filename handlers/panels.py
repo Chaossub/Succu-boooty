@@ -31,13 +31,13 @@ MODEL_CONFIG: Dict[str, Dict[str, str]] = {
 }
 
 # ────────────── STRIPE TIP LINKS FROM ENV ──────────────
-# Set these in your env (Railway/etc). If a link is empty, the Tip button
-# will show “coming soon” and pop an alert instead of opening a URL.
+# Env variable names are TIP_RONI_LINK, TIP_RUBY_LINK, TIP_RIN_LINK, TIP_SAVY_LINK
+# If a link is empty, the Tip button will show “coming soon” and pop an alert.
 MODEL_TIP_LINKS: Dict[str, str] = {
-    "roni": (os.getenv("RONI_TIP_LINK") or "").strip(),
-    "ruby": (os.getenv("RUBY_TIP_LINK") or "").strip(),
-    "rin":  (os.getenv("RIN_TIP_LINK") or "").strip(),
-    "savy": (os.getenv("SAVY_TIP_LINK") or "").strip(),
+    "roni": (os.getenv("TIP_RONI_LINK") or "").strip(),
+    "ruby": (os.getenv("TIP_RUBY_LINK") or "").strip(),
+    "rin":  (os.getenv("TIP_RIN_LINK") or "").strip(),
+    "savy": (os.getenv("TIP_SAVY_LINK") or "").strip(),
 }
 
 
@@ -177,7 +177,7 @@ def register(app: Client):
                 f"<b>{name} — Menu</b>\n\n"
                 f"No saved menu yet.\n"
                 f"Ask an admin to run:\n"
-                f"<code>/createmenu {name} &lt;text...&gt;</code>"
+                f"<code>/createmenu {name} &lt{text...}&gt;</code>"
             )
 
         kb = _model_keyboard(slug)
