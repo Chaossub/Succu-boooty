@@ -177,7 +177,7 @@ def register(app: Client):
                 f"<b>{name} — Menu</b>\n\n"
                 f"No saved menu yet.\n"
                 f"Ask an admin to run:\n"
-                f"<code>/createmenu {name} &lt{text...&gt;</code>"
+                f"<code>/createmenu {name} &lt;text...&gt;</code>"
             )
 
         kb = _model_keyboard(slug)
