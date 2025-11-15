@@ -65,7 +65,7 @@ def main():
     _try_register("moderation")
     _try_register("warnings")
 
-    # Message scheduler (you already had this)
+    # Message scheduler
     _try_register("schedulemsg")
 
     # Flyers (ad-hoc send + CRUD)
@@ -73,13 +73,21 @@ def main():
 
     # Flyer scheduler (date/time -> post)
     _try_register("flyer_scheduler")
+
+    # 🔻 Give both schedulers the running loop so they can post from their threads
     try:
-        # give scheduler the running loop so it can post from its thread
         from handlers import flyer_scheduler as _fs
         _fs.set_main_loop(app.loop)
         log.info("✅ Set main loop for flyer_scheduler")
     except Exception as e:
         log.warning("Could not set main loop for flyer_scheduler: %s", e)
+
+    try:
+        from handlers import schedulemsg as _sm
+        _sm.set_main_loop(app.loop)
+        log.info("✅ Set main loop for schedulemsg")
+    except Exception as e:
+        log.warning("Could not set main loop for schedulemsg: %s", e)
 
     # -------- Central “Back to Main” handler (portal:home) --------
     @app.on_callback_query(filters.regex("^portal:home$"))
@@ -116,4 +124,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
