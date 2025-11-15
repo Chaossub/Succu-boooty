@@ -30,6 +30,16 @@ MODEL_CONFIG: Dict[str, Dict[str, str]] = {
     "savy": {"name": "Savy", "username": SAVY_USERNAME},
 }
 
+# ────────────── STRIPE TIP LINKS FROM ENV ──────────────
+# Set these in your env (Railway/etc). If a link is empty, the Tip button
+# will show “coming soon” and pop an alert instead of opening a URL.
+MODEL_TIP_LINKS: Dict[str, str] = {
+    "roni": (os.getenv("RONI_TIP_LINK") or "").strip(),
+    "ruby": (os.getenv("RUBY_TIP_LINK") or "").strip(),
+    "rin":  (os.getenv("RIN_TIP_LINK") or "").strip(),
+    "savy": (os.getenv("SAVY_TIP_LINK") or "").strip(),
+}
+
 
 def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -74,9 +84,19 @@ def _model_keyboard(slug: str) -> InlineKeyboardMarkup:
             "📩 Book", callback_data="panels:nodm"
         )
 
+    # Tip button: if we have a Stripe link for this model, open it directly;
+    # otherwise fall back to the old “coming soon” behavior.
+    tip_link = MODEL_TIP_LINKS.get(slug) or ""
+    if tip_link:
+        tip_button = InlineKeyboardButton("💸 Tip", url=tip_link)
+    else:
+        tip_button = InlineKeyboardButton(
+            "💸 Tip (coming soon)", callback_data="panels:tip_coming"
+        )
+
     rows = [
         [book_button],
-        [InlineKeyboardButton("💸 Tip (coming soon)", callback_data="panels:tip_coming")],
+        [tip_button],
         [
             InlineKeyboardButton("⬅️ Back", callback_data="panels:menus"),
             InlineKeyboardButton("🏠 Main Menu", callback_data="panels:root"),
@@ -157,7 +177,7 @@ def register(app: Client):
                 f"<b>{name} — Menu</b>\n\n"
                 f"No saved menu yet.\n"
                 f"Ask an admin to run:\n"
-                f"<code>/createmenu {name} &lt;text...&gt;</code>"
+                f"<code>/createmenu {name} &lt{text...&gt;</code>"
             )
 
         kb = _model_keyboard(slug)
