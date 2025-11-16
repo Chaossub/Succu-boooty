@@ -53,6 +53,8 @@ def main():
     _try_register("dm_admin")
     _try_register("dm_ready")
     _try_register("dm_ready_admin")
+    _try_register("dm_portal")               # legacy shim (+ optional /dmnow)
+    _try_register("portal_cmd")              # /portal → DM button
 
     # Help panel (buttons -> env text)
     _try_register("help_panel")              # help:open + pages
