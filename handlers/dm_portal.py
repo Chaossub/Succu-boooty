@@ -1,8 +1,16 @@
-# handlers/dm_portal.py — legacy shim (NO /start here)
+# handlers/dm_portal.py — legacy shim (+ /dmnow button, NO /start here)
 from __future__ import annotations
 from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery
+from pyrogram.types import (
+    CallbackQuery,
+    Message,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 from pyrogram.errors import MessageNotModified
+
+BOT_USERNAME = "Succubot_bot"  # your bot’s @username
+
 
 async def _safe_edit(msg, text, **kwargs):
     try:
@@ -15,12 +23,35 @@ async def _safe_edit(msg, text, **kwargs):
                 pass
     return None
 
+
 def register(app: Client):
     """
-    Legacy callback aliases ONLY.
-    This module intentionally does NOT register /start or send any new messages.
-    It forwards old callback_data values to the new handlers/UI.
+    Legacy callback aliases + DM button.
+
+    This module:
+      • Keeps old callback_data values working by forwarding them
+      • Adds /dmnow to show a “DM now” button that opens @Succubot_bot in DMs
+      • Intentionally does NOT register /start or change the DM welcome flow
     """
+
+    # ───────────── /dmnow command → DM link button ─────────────
+    @app.on_message(filters.command(["dmnow", "dm_now"]) & filters.group)
+    async def _cmd_dmnow(client: Client, message: Message):
+        url = f"https://t.me/{BOT_USERNAME}?start=group_dm"
+
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("💌 DM now", url=url)]
+            ]
+        )
+
+        await message.reply_text(
+            "Tap below to slide into my DMs, cutie 😈",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+
+    # ───────────── Legacy callback shims ─────────────
 
     # Old -> Menus
     @app.on_callback_query(filters.regex(r"^(open_menu|portal:menus)$"))
