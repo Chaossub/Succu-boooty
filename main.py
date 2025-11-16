@@ -56,10 +56,6 @@ def main():
     _try_register("dm_portal")               # legacy shim (+ optional /dmnow)
     _try_register("portal_cmd")              # /portal → DM button
 
-    # Requirements / Stripe-based reminder scans
-    # (uses existing DM-ready list; does NOT change buttons)
-    _try_register("dm_requirements")
-
     # Help panel (buttons -> env text)
     _try_register("help_panel")              # help:open + pages
 
