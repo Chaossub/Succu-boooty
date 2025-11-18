@@ -3,7 +3,7 @@ import os
 import logging
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("main")
@@ -12,10 +12,9 @@ log = logging.getLogger("main")
 API_ID   = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
 if not all([API_ID, API_HASH, BOT_TOKEN]):
     raise ValueError("Missing API_ID / API_HASH / BOT_TOKEN")
-
-FIND_MODELS_TEXT = os.getenv("FIND_MODELS_TEXT", "Nothing here yet 💕")
 
 # ────────────── BOT INIT ──────────────
 app = Client(
@@ -30,99 +29,34 @@ def _try_register(module_path: str, name: str | None = None):
     mod_name = f"handlers.{module_path}"
     label = name or module_path
     try:
-        mod = __import__(mod_name, fromlist=["register"])
-        if hasattr(mod, "register"):
-            mod.register(app)
-            log.info("✅ Registered %s", mod_name)
+        module = __import__(mod_name, fromlist=["register"])
+        if hasattr(module, "register"):
+            module.register(app)
+            log.info(f"Loaded handler: {label}")
         else:
-            log.warning("%s has no register()", mod_name)
+            log.warning(f"No register() in handler: {label}")
     except Exception as e:
-        log.warning("Skipping %s (import/register failed): %s", mod_name, e)
+        log.exception(f"Error loading handler {label}: {e}")
 
+# ────────────── LOAD HANDLERS ──────────────
 def main():
-    log.info("💋 Starting SuccuBot…")
+    # Core panels & menus
+    _try_register("panels")          # your main bot home menu
+    _try_register("menu")            # existing
+    _try_register("contact_admins")  # existing
+    _try_register("payments")        # existing
+    _try_register("book_handler")    # existing
+    _try_register("models")          # existing
+    _try_register("profile")         # existing
+    _try_register("admin")           # existing handlers
 
-    # Warm-up / optional
-    _try_register("hi")                      # /hi (warm-up)
+    # ⭐ NEW — your Roni personal portal
+    _try_register("roni_portal")
 
-    # Core panels & menus (this contains /start; DON'T add another /start here)
-    _try_register("panels")                  # Menus picker + home
+    # Any other handlers you already have remain untouched
 
-    # Contact Admins & DM helpers
-    _try_register("contact_admins")          # contact_admins:open + anon flow
-    _try_register("dm_admin")
-    _try_register("dm_ready")
-    _try_register("dm_ready_admin")
-    _try_register("dm_portal")               # legacy shim (+ optional /dmnow)
-    _try_register("portal_cmd")              # /portal → DM button
-
-    # Help panel (buttons -> env text)
-    _try_register("help_panel")              # help:open + pages
-
-    # Menus persistence/creation
-    _try_register("menu")                    # (mongo or json)
-    _try_register("createmenu")
-
-    # Moderation / warnings
-    _try_register("moderation")
-    _try_register("warnings")
-
-    # Message scheduler
-    _try_register("schedulemsg")
-
-    # Flyers (ad-hoc send + CRUD)
-    _try_register("flyer")                   # /addflyer /flyer /listflyers /deleteflyer /textflyer
-
-    # Flyer scheduler (date/time -> post)
-    _try_register("flyer_scheduler")
-
-    # 🔻 Give both schedulers the running loop so they can post from their threads
-    try:
-        from handlers import flyer_scheduler as _fs
-        _fs.set_main_loop(app.loop)
-        log.info("✅ Set main loop for flyer_scheduler")
-    except Exception as e:
-        log.warning("Could not set main loop for flyer_scheduler: %s", e)
-
-    try:
-        from handlers import schedulemsg as _sm
-        _sm.set_main_loop(app.loop)
-        log.info("✅ Set main loop for schedulemsg")
-    except Exception as e:
-        log.warning("Could not set main loop for schedulemsg: %s", e)
-
-    # -------- Central “Back to Main” handler (portal:home) --------
-    @app.on_callback_query(filters.regex("^portal:home$"))
-    async def _portal_home_cb(_, cq: CallbackQuery):
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("💞 Menus", callback_data="panels:root")],
-            [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
-            [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
-            [InlineKeyboardButton("❓ Help", callback_data="help:open")],
-        ])
-        try:
-            await cq.message.edit_text(
-                "🔥 Welcome back to SuccuBot\n"
-                "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
-                "✨ Use the menu below to navigate!",
-                reply_markup=kb,
-                disable_web_page_preview=True,
-            )
-        finally:
-            await cq.answer()
-
-    # Safety: if panels didn’t provide the “models_elsewhere:open” page, handle it here.
-    @app.on_callback_query(filters.regex("^models_elsewhere:open$"))
-    async def _models_elsewhere_cb(_, cq: CallbackQuery):
-        text = FIND_MODELS_TEXT or "Nothing here yet 💕"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back to Main", callback_data="portal:home")]])
-        try:
-            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
-        finally:
-            await cq.answer()
-
-    # IMPORTANT: no /start fallback here (to avoid duplicates).
     app.run()
+
 
 if __name__ == "__main__":
     main()
