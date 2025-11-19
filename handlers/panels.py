@@ -118,6 +118,12 @@ def register(app: Client):
     # -------- /start --------
     @app.on_message(filters.command("start"))
     async def start_cmd(_, m: Message):
+        # If this /start is for Roni's assistant mode, let roni_portal handle it
+        text = m.text or ""
+        parts = text.split(maxsplit=1)
+        if len(parts) > 1 and parts[1].lower().startswith("roni_assistant"):
+            return
+
         kb = _main_keyboard()
         await m.reply_text(
             "🔥 Welcome to SuccuBot\n"
@@ -138,7 +144,7 @@ def register(app: Client):
                 disable_web_page_preview=True,
             )
         except Exception:
-        # If Telegram complains "MESSAGE_NOT_MODIFIED", just ignore.
+            # If Telegram complains "MESSAGE_NOT_MODIFIED", just ignore.
             pass
         await cq.answer()
 
