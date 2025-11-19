@@ -144,7 +144,9 @@ def register(app: Client) -> None:
         )
 
         await m.reply_text(
-            "Tap below to open a private chat with SuccuBot in Roni’s assistant mode. 💕",
+            "Welcome to Roni’s personal access channel.\n"
+            "Click the button below to use my personal assistant SuccuBot for booking, "
+            "payments, and more. 💋",
             reply_markup=kb,
             disable_web_page_preview=True,
         )
