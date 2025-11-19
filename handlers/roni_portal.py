@@ -28,7 +28,8 @@ RONI_OWNER_ID = 6964994611
 # Stripe tip link for Roni (same env used in panels)
 TIP_RONI_LINK = (os.getenv("TIP_RONI_LINK") or "").strip()
 
-# Key used in menu_store for your personal assistant menu
+# Key used in menu_store for your *personal assistant* menu
+# (separate from the Sanctuary model menus)
 RONI_MENU_KEY = "RoniPersonalMenu"
 
 # Simple in-memory pending state for admin edits
@@ -182,7 +183,7 @@ def register(app: Client) -> None:
             disable_web_page_preview=True,
         )
 
-    # ───────── Roni’s Menu (reads from Mongo) ─────────
+    # ───────── Roni’s Menu (reads from *RoniPersonalMenu* key) ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:menu$"))
     async def roni_menu_cb(_, cq: CallbackQuery):
         menu_text = store.get_menu(RONI_MENU_KEY)
@@ -289,7 +290,8 @@ def register(app: Client) -> None:
         await cq.answer()
 
     # ───────── ADMIN: capture new menu text (no slash commands) ─────────
-    @app.on_message(filters.private & filters.text)
+    # group=-2 so it runs BEFORE other private text handlers that might stop_propagation
+    @app.on_message(filters.private & filters.text, group=-2)
     async def roni_admin_capture(_, m: Message):
         if not m.from_user or m.from_user.id != RONI_OWNER_ID:
             return
@@ -300,11 +302,23 @@ def register(app: Client) -> None:
 
         # We only have one action right now: "menu"
         if action == "menu":
+            # Stop other handlers from touching this message
+            try:
+                m.stop_propagation()
+            except Exception:
+                pass
+
+            # Save the new menu
             store.set_menu(RONI_MENU_KEY, m.text)
             _pending.pop(m.from_user.id, None)
 
+            # Build fresh preview from storage (in case of formatting changes later)
+            current = store.get_menu(RONI_MENU_KEY) or "No menu set yet."
+
             await m.reply_text(
                 "Saved your personal menu. 💕\n\n"
-                "Your assistant will now show this under “📖 Roni’s Menu”.",
+                "You’re back in the Roni Admin panel — here’s your current menu preview:\n\n"
+                f"{current}",
+                reply_markup=_admin_keyboard(),
                 disable_web_page_preview=True,
             )
