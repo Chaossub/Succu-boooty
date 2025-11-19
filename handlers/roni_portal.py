@@ -27,9 +27,10 @@ RONI_USERNAME = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
 OWNER_ID = int(os.getenv("RONI_OWNER_ID") or os.getenv("OWNER_ID", "6964994611"))
 
 # Keys used in MenuStore for Roni’s texts
-RONI_MENU_KEY = "__roni_assistant_menu__"
+RONI_MENU_KEY   = "__roni_assistant_menu__"
 OPEN_ACCESS_KEY = "__roni_open_access__"
-TEASER_KEY = "__roni_teaser_channels__"
+TEASER_KEY      = "__roni_teaser_channels__"
+ANNOUNCE_KEY    = "__roni_announcements__"   # NEW: announcements & promos
 
 # Age-verification storage config
 _MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGO_URI")
@@ -175,7 +176,7 @@ age_store = AgeVerifyStore()
 PENDING_AGE_MEDIA: Dict[int, bool] = {}
 
 # Admin edit state
-# admin_id -> {"kind": "menu"|"open_access"|"teaser"|"note", "user_id"?: int}
+# admin_id -> {"kind": "menu"|"open_access"|"teaser"|"announce"|"note", "user_id"?: int}
 ADMIN_EDIT_STATE: Dict[int, Dict[str, Any]] = {}
 
 
@@ -192,6 +193,7 @@ def _roni_main_keyboard(*, is_owner: bool, verified: bool) -> InlineKeyboardMark
         [InlineKeyboardButton("💌 Book Roni", url=f"https://t.me/{RONI_USERNAME}")],
         [InlineKeyboardButton("💸 Pay / Tip Roni", callback_data="roni_portal:todo")],
         [InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:open")],
+        [InlineKeyboardButton("📣 Announcements & Promos", callback_data="roni_portal:announce")],
     ]
 
     if not verified:
@@ -222,9 +224,7 @@ def _roni_main_keyboard(*, is_owner: bool, verified: bool) -> InlineKeyboardMark
             [InlineKeyboardButton("⚙️ Roni Admin", callback_data="roni_portal:admin")]
         )
 
-    rows.append(
-        [InlineKeyboardButton("🏠 Back to SuccuBot Menu", callback_data="panels:root")]
-    )
+    # No "Back to SuccuBot" here – this menu is just for your personal portal
     return InlineKeyboardMarkup(rows)
 
 
@@ -233,6 +233,7 @@ def _roni_admin_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("📖 Edit Roni Menu", callback_data="roni_portal:admin_edit_menu")],
             [InlineKeyboardButton("🌸 Edit Open Access Text", callback_data="roni_portal:admin_edit_open")],
+            [InlineKeyboardButton("📣 Edit Announcements & Promos", callback_data="roni_portal:admin_edit_announce")],
             [InlineKeyboardButton("🔥 Edit Teaser Text", callback_data="roni_portal:admin_edit_teaser")],
             [InlineKeyboardButton("✅ Age-Verified List", callback_data="roni_portal:admin_age_list")],
             [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home_owner")],
@@ -353,7 +354,7 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # ───────── Open Access / Teaser views ─────────
+    # ───────── Open Access / Announcements / Teaser views ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:open$"))
     async def open_access_cb(_, cq: CallbackQuery):
         text = _get_menu_text(
@@ -365,6 +366,22 @@ def register(app: Client) -> None:
         )
         await cq.message.edit_text(
             f"🌸 <b>Open Access</b>\n\n{text}",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex(r"^roni_portal:announce$"))
+    async def announce_cb(_, cq: CallbackQuery):
+        text = _get_menu_text(
+            ANNOUNCE_KEY,
+            "Roni hasn’t posted any announcements or promos yet. 💕",
+        )
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")]]
+        )
+        await cq.message.edit_text(
+            f"📣 <b>Announcements & Promos</b>\n\n{text}",
             reply_markup=kb,
             disable_web_page_preview=True,
         )
@@ -409,7 +426,7 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # ---- Admin: edit menu / open access / teaser ----
+    # ---- Admin: edit menu / open access / announcements / teaser ----
 
     async def _start_admin_edit(kind: str, text: str, cq: CallbackQuery):
         ADMIN_EDIT_STATE[OWNER_ID] = {"kind": kind}
@@ -447,6 +464,18 @@ def register(app: Client) -> None:
             cq,
         )
 
+    @app.on_callback_query(filters.regex(r"^roni_portal:admin_edit_announce$"))
+    async def admin_edit_announce_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != OWNER_ID:
+            await cq.answer("Admin only 💕", show_alert=True)
+            return
+        await _start_admin_edit(
+            "announce",
+            "📣 Send me the text you want to show under *Announcements & Promos*.\n\n"
+            "Use this for important info, current promos, limited-time offers, etc.",
+            cq,
+        )
+
     @app.on_callback_query(filters.regex(r"^roni_portal:admin_edit_teaser$"))
     async def admin_edit_teaser_cb(_, cq: CallbackQuery):
         if cq.from_user.id != OWNER_ID:
@@ -469,7 +498,7 @@ def register(app: Client) -> None:
             disable_web_page_preview=True,
         )
 
-    # Save admin text edits (menu / open / teaser / note)
+    # Save admin text edits (menu / open / announcements / teaser / note)
     @app.on_message(filters.private & filters.user(OWNER_ID) & filters.text)
     async def admin_text_handler(_, m: Message):
         state = ADMIN_EDIT_STATE.pop(OWNER_ID, None)
@@ -489,6 +518,12 @@ def register(app: Client) -> None:
             _set_menu_text(OPEN_ACCESS_KEY, text)
             await m.reply_text(
                 "🌸 Saved your Open Access text. 💕",
+                reply_markup=_roni_admin_keyboard(),
+            )
+        elif kind == "announce":
+            _set_menu_text(ANNOUNCE_KEY, text)
+            await m.reply_text(
+                "📣 Saved your Announcements & Promos text. 💕",
                 reply_markup=_roni_admin_keyboard(),
             )
         elif kind == "teaser":
@@ -689,7 +724,7 @@ def register(app: Client) -> None:
         except Exception as e:
             log.warning("Failed to notify denied user %s: %s", target_id, e)
 
-    # ───────── Admin: Age-verified list / media / notes ─────────
+    # ───────── Admin: Age-verified list / media / notes / reset ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:admin_age_list$"))
     async def admin_age_list_cb(_, cq: CallbackQuery):
         if cq.from_user.id != OWNER_ID:
@@ -740,7 +775,6 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # View a single user's verification media + note / reset buttons
     @app.on_callback_query(filters.regex(r"^roni_portal:age_view:(\d+)$"))
     async def admin_age_view_cb(_, cq: CallbackQuery):
         if cq.from_user.id != OWNER_ID:
@@ -808,7 +842,6 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # Start note-edit flow for a specific user
     @app.on_callback_query(filters.regex(r"^roni_portal:age_note:(\d+)$"))
     async def admin_age_note_cb(_, cq: CallbackQuery):
         if cq.from_user.id != OWNER_ID:
@@ -829,7 +862,6 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # NEW: Remove approval / reset verification
     @app.on_callback_query(filters.regex(r"^roni_portal:age_reset:(\d+)$"))
     async def admin_age_reset_cb(_, cq: CallbackQuery):
         if cq.from_user.id != OWNER_ID:
@@ -838,13 +870,11 @@ def register(app: Client) -> None:
 
         target_id = int(cq.data.split(":", 2)[-1])
 
-        # Keep history & media, just mark them as pending again
         age_store.upsert(target_id, status="pending", approved_at=None)
 
         await cq.answer("Approval removed. User is no longer marked verified.", show_alert=True)
 
         try:
-            # Refresh detail view to reflect new status
             await cq.message.edit_text(
                 cq.message.text + "\n\n❌ Approval removed. Status reset to pending.",
                 disable_web_page_preview=True,
@@ -852,7 +882,6 @@ def register(app: Client) -> None:
         except Exception:
             pass
 
-        # Optional: tell the user their verification was reset (handy for testing)
         try:
             await app.send_message(
                 target_id,
