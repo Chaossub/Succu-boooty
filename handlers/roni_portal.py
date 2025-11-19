@@ -15,24 +15,44 @@ log = logging.getLogger(__name__)
 # Your bot's username (without @) – used for the deep link
 BOT_USERNAME = (os.getenv("BOT_USERNAME") or "YourBotUsernameHere").lstrip("@")
 
-# Your personal @username – used for Models & Creators DM button
+# Your personal @username – used for customer + business DMs
 RONI_USERNAME = (os.getenv("RONI_USERNAME") or "chaossub283").lstrip("@")
 
 
 def _roni_main_keyboard() -> InlineKeyboardMarkup:
     rows = [
+        # Roni’s Menu (placeholder for now)
         [InlineKeyboardButton("📖 Roni’s Menu", callback_data="roni_portal:menu")],
-        [InlineKeyboardButton("💌 Book Roni", callback_data="roni_portal:todo")],
-        [InlineKeyboardButton("💸 Pay / Tip Roni", callback_data="roni_portal:todo")],
-        [InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:todo")],
-        [InlineKeyboardButton("✅ Age Verify", callback_data="roni_portal:todo")],
-        [InlineKeyboardButton("🔥 Teaser & Promo Channels", callback_data="roni_portal:todo")],
+
+        # 💌 Book Roni → open Roni’s DMs (customer side)
         [
             InlineKeyboardButton(
-                "😈 Models & Creators — Tap Here",
+                "💌 Book Roni",
                 url=f"https://t.me/{RONI_USERNAME}",
             )
         ],
+
+        # 💸 Pay / Tip Roni – placeholder for now
+        [InlineKeyboardButton("💸 Pay / Tip Roni", callback_data="roni_portal:todo")],
+
+        # 🌸 Open Access – placeholder for now
+        [InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:todo")],
+
+        # ✅ Age Verify – placeholder for now
+        [InlineKeyboardButton("✅ Age Verify", callback_data="roni_portal:todo")],
+
+        # 🔥 Teaser & Promo Channels – placeholder for now
+        [InlineKeyboardButton("🔥 Teaser & Promo Channels", callback_data="roni_portal:todo")],
+
+        # 😈 Models & Creators — DM Roni with /business pre-filled (business quick reply)
+        [
+            InlineKeyboardButton(
+                "😈 Models & Creators — Tap Here",
+                url=f"https://t.me/{RONI_USERNAME}?text=/business",
+            )
+        ],
+
+        # Back to main SuccuBot menu
         [
             InlineKeyboardButton(
                 "🏠 Back to SuccuBot Menu",
