@@ -31,8 +31,6 @@ MODEL_CONFIG: Dict[str, Dict[str, str]] = {
 }
 
 # ────────────── STRIPE TIP LINKS FROM ENV ──────────────
-# Env variable names are TIP_RONI_LINK, TIP_RUBY_LINK, TIP_RIN_LINK, TIP_SAVY_LINK
-# If a link is empty, the Tip button will show “coming soon” and pop an alert.
 MODEL_TIP_LINKS: Dict[str, str] = {
     "roni": (os.getenv("TIP_RONI_LINK") or "").strip(),
     "ruby": (os.getenv("TIP_RUBY_LINK") or "").strip(),
@@ -41,6 +39,7 @@ MODEL_TIP_LINKS: Dict[str, str] = {
 }
 
 
+# ────────────── KEYBOARDS ──────────────
 def _main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -53,7 +52,6 @@ def _main_keyboard() -> InlineKeyboardMarkup:
 
 
 def _models_keyboard() -> InlineKeyboardMarkup:
-    # 2x2 grid of names
     rows = [
         [
             InlineKeyboardButton("Roni", callback_data="panels:model:roni"),
@@ -74,37 +72,32 @@ def _model_keyboard(slug: str) -> InlineKeyboardMarkup:
     if username.startswith("@"):
         username = username[1:]
 
-    # If we have a username, book = URL button; otherwise callback that just alerts.
+    # Book button
     if username:
-        book_button = InlineKeyboardButton(
-            "📩 Book", url=f"https://t.me/{username}"
-        )
+        book_button = InlineKeyboardButton("📩 Book", url=f"https://t.me/{username}")
     else:
-        book_button = InlineKeyboardButton(
-            "📩 Book", callback_data="panels:nodm"
-        )
+        book_button = InlineKeyboardButton("📩 Book", callback_data="panels:nodm")
 
-    # Tip button: if we have a Stripe link for this model, open it directly;
-    # otherwise fall back to the old “coming soon” behavior.
+    # Tip button
     tip_link = MODEL_TIP_LINKS.get(slug) or ""
     if tip_link:
         tip_button = InlineKeyboardButton("💸 Tip", url=tip_link)
     else:
-        tip_button = InlineKeyboardButton(
-            "💸 Tip (coming soon)", callback_data="panels:tip_coming"
-        )
+        tip_button = InlineKeyboardButton("💸 Tip (coming soon)", callback_data="panels:tip_coming")
 
-    rows = [
-        [book_button],
-        [tip_button],
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("⬅️ Back", callback_data="panels:menus"),
-            InlineKeyboardButton("🏠 Main Menu", callback_data="panels:root"),
-        ],
-    ]
-    return InlineKeyboardMarkup(rows)
+            [book_button],
+            [tip_button],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="panels:menus"),
+                InlineKeyboardButton("🏠 Main Menu", callback_data="panels:root"),
+            ],
+        ]
+    )
 
 
+# ────────────── REGISTER HANDLERS ──────────────
 def register(app: Client):
     log.info(
         "✅ handlers.panels registered (static 4-model panel, MenuStore=%s, RONI=%s RUBY=%s RIN=%s SAVY=%s)",
@@ -118,10 +111,9 @@ def register(app: Client):
     # -------- /start --------
     @app.on_message(filters.command("start"))
     async def start_cmd(_, m: Message):
-        # If this /start is for Roni's assistant mode, let roni_portal handle it
-        text = m.text or ""
-        parts = text.split(maxsplit=1)
-        if len(parts) > 1 and parts[1].lower().startswith("roni_assistant"):
+        # ⛔ Skip Sanctuary welcome if launching ANY Roni assistant/portal
+        text = (m.text or "").lower()
+        if "roni_" in text:
             return
 
         kb = _main_keyboard()
@@ -144,11 +136,10 @@ def register(app: Client):
                 disable_web_page_preview=True,
             )
         except Exception:
-            # If Telegram complains "MESSAGE_NOT_MODIFIED", just ignore.
             pass
         await cq.answer()
 
-    # -------- Main/root from callbacks --------
+    # -------- Main/root --------
     @app.on_callback_query(filters.regex(r"^panels:root$"))
     async def panels_root_cb(_, cq: CallbackQuery):
         kb = _main_keyboard()
@@ -164,7 +155,7 @@ def register(app: Client):
             pass
         await cq.answer()
 
-    # -------- Model page --------
+    # -------- Single model page --------
     @app.on_callback_query(filters.regex(r"^panels:model:(.+)$"))
     async def model_page_cb(_, cq: CallbackQuery):
         slug = cq.data.split(":", 2)[-1]
@@ -197,7 +188,7 @@ def register(app: Client):
             pass
         await cq.answer()
 
-    # -------- "Tip coming soon" alert --------
+    # -------- Tip coming soon --------
     @app.on_callback_query(filters.regex(r"^panels:tip_coming$"))
     async def tip_coming_cb(_, cq: CallbackQuery):
         await cq.answer("💸 Tip support coming soon!", show_alert=True)
