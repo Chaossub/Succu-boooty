@@ -14,7 +14,7 @@ from pyrogram.types import (
     InlineKeyboardButton,
 )
 
-from utils.menu_store import store
+from utils.menu_store import store  # still used elsewhere; harmless to keep
 
 log = logging.getLogger(__name__)
 
@@ -26,11 +26,16 @@ RONI_USERNAME = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
 # Your personal Telegram user ID – only you see admin controls
 OWNER_ID = int(os.getenv("RONI_OWNER_ID") or os.getenv("OWNER_ID", "6964994611"))
 
-# Keys used in MenuStore for Roni’s texts
-RONI_MENU_KEY   = "__roni_assistant_menu__"
-OPEN_ACCESS_KEY = "__roni_open_access__"
-TEASER_KEY      = "__roni_teaser_channels__"
-ANNOUNCE_KEY    = "__roni_announcements__"   # Announcements & Promos
+# Keys for Roni portal text sections (in our own JSON store)
+RONI_MENU_KEY   = "menu"
+OPEN_ACCESS_KEY = "open_access"
+TEASER_KEY      = "teaser"
+ANNOUNCE_KEY    = "announce"
+
+# JSON file for Roni portal texts (separate from MenuStore)
+_RONI_TEXT_PATH = os.getenv("RONI_PORTAL_TEXT_PATH", "data/roni_portal_texts.json")
+_RONI_TEXT_LOCK = threading.RLock()
+_RONI_TEXT_CACHE: Dict[str, str] = {}
 
 # Age-verification storage config
 _MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGO_URI")
@@ -42,6 +47,47 @@ _MONGO_DB = (
 )
 _AGE_COLL = os.getenv("MONGO_AGE_COLLECTION") or "roni_age_verifications"
 _JSON_PATH = os.getenv("RONI_AGE_STORE_PATH", "data/roni_age_verifications.json")
+
+
+# ────────────── RoniPortal text store (JSON, survives restarts) ──────────────
+
+def _load_roni_texts() -> None:
+    global _RONI_TEXT_CACHE
+    try:
+        with open(_RONI_TEXT_PATH, "r", encoding="utf-8") as f:
+            _RONI_TEXT_CACHE = json.load(f)
+    except FileNotFoundError:
+        _RONI_TEXT_CACHE = {}
+    except Exception as e:
+        log.warning("RoniPortal: failed to load JSON texts: %s", e)
+        _RONI_TEXT_CACHE = {}
+
+
+def _save_roni_texts() -> None:
+    os.makedirs(os.path.dirname(_RONI_TEXT_PATH) or ".", exist_ok=True)
+    tmp_path = _RONI_TEXT_PATH + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(_RONI_TEXT_CACHE, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, _RONI_TEXT_PATH)
+    except Exception as e:
+        log.warning("RoniPortal: failed to save JSON texts: %s", e)
+
+
+def _get_portal_text(key: str, fallback: str) -> str:
+    with _RONI_TEXT_LOCK:
+        val = _RONI_TEXT_CACHE.get(key)
+        return val if val else fallback
+
+
+def _set_portal_text(key: str, text: str) -> None:
+    with _RONI_TEXT_LOCK:
+        _RONI_TEXT_CACHE[key] = text
+        _save_roni_texts()
+
+
+# Load once on import
+_load_roni_texts()
 
 
 # ────────────── AgeVerifyStore (Mongo or JSON) ──────────────
@@ -89,7 +135,6 @@ class AgeVerifyStore:
 
         if not self._use_mongo:
             self._load_json()
-            log.info("AgeVerifyStore: JSON at %s", _JSON_PATH)
 
     # ---- JSON helpers ----
 
@@ -118,18 +163,15 @@ class AgeVerifyStore:
 
         with self._lock:
             if self._use_mongo:
-                try:
-                    from pymongo.errors import PyMongoError
-                except Exception:
-                    PyMongoError = Exception  # type: ignore
-
+                from pymongo.errors import PyMongoError
                 try:
                     update: Dict[str, Any] = {"$set": {**fields, "last_update": now}}
                     update.setdefault("$setOnInsert", {})["first_seen"] = now
                     self._col.update_one({"_id": user_id}, update, upsert=True)
                     return
                 except PyMongoError as e:
-                    log.warning("AgeVerifyStore Mongo upsert failed, using JSON backup: %s", e)
+                    log.warning("AgeVerifyStore Mongo upsert failed, ignoring: %s", e)
+                    # fall back into JSON cache
 
             rec = self._cache.get(uid, {})
             if "first_seen" not in rec:
@@ -195,7 +237,7 @@ PENDING_AGE_MEDIA: Dict[int, bool] = {}
 ADMIN_EDIT_STATE: Dict[int, Dict[str, Any]] = {}
 
 
-# ────────────── Helpers / keyboards ──────────────
+# ────────────── Helper functions / keyboards ──────────────
 
 def _is_verified(user_id: int) -> bool:
     rec = age_store.get(user_id)
@@ -239,6 +281,7 @@ def _roni_main_keyboard(*, is_owner: bool, verified: bool) -> InlineKeyboardMark
             [InlineKeyboardButton("⚙️ Roni Admin", callback_data="roni_portal:admin")]
         )
 
+    # No "Back to SuccuBot" here – this menu is just for your personal portal
     return InlineKeyboardMarkup(rows)
 
 
@@ -255,16 +298,7 @@ def _roni_admin_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def _get_menu_text(key: str, fallback: str) -> str:
-    txt = store.get_menu(key)
-    return txt or fallback
-
-
-def _set_menu_text(key: str, text: str) -> None:
-    store.set_menu(key, text)
-
-
-# ────────────── register() ──────────────
+# ────────────── Main register() ──────────────
 
 def register(app: Client) -> None:
     log.info("✅ handlers.roni_portal registered")
@@ -280,7 +314,7 @@ def register(app: Client) -> None:
 
         await m.reply_text(
             "Welcome to Roni’s personal access channel.\n"
-            "Tap below to open her assistant for booking, payments, and more. 💋",
+            "Click the button below to use her personal assistant SuccuBot for booking, payments, and more. 💋",
             reply_markup=kb,
             disable_web_page_preview=True,
         )
@@ -317,7 +351,7 @@ def register(app: Client) -> None:
             disable_web_page_preview=True,
         )
 
-    # ───────── Home / back ─────────
+    # ───────── Navigation: home from callbacks ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:home_owner$"))
     async def roni_home_owner_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id if cq.from_user else 0
@@ -350,7 +384,7 @@ def register(app: Client) -> None:
     # ───────── Roni Menu view ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:menu$"))
     async def roni_menu_cb(_, cq: CallbackQuery):
-        text = _get_menu_text(
+        text = _get_portal_text(
             RONI_MENU_KEY,
             "Roni hasn’t set up her personal menu yet.\n"
             "She can do it from the ⚙ Roni Admin button. 💕",
@@ -370,7 +404,7 @@ def register(app: Client) -> None:
     # ───────── Open Access / Announcements / Teaser views ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:open$"))
     async def open_access_cb(_, cq: CallbackQuery):
-        text = _get_menu_text(
+        text = _get_portal_text(
             OPEN_ACCESS_KEY,
             "Roni hasn’t added her open-access info yet. 💕",
         )
@@ -386,7 +420,7 @@ def register(app: Client) -> None:
 
     @app.on_callback_query(filters.regex(r"^roni_portal:announce$"))
     async def announce_cb(_, cq: CallbackQuery):
-        text = _get_menu_text(
+        text = _get_portal_text(
             ANNOUNCE_KEY,
             "Roni hasn’t posted any announcements or promos yet. 💕",
         )
@@ -410,7 +444,7 @@ def register(app: Client) -> None:
             )
             return
 
-        text = _get_menu_text(
+        text = _get_portal_text(
             TEASER_KEY,
             "Roni hasn’t added her teaser / promo channel list yet. 💕",
         )
@@ -519,31 +553,32 @@ def register(app: Client) -> None:
 
         state = ADMIN_EDIT_STATE.pop(OWNER_ID, None)
         if not state:
-            return  # normal DM from you
+            # No active edit – ignore, this is just a normal DM from you
+            return
 
         kind = state.get("kind")
         text = m.text.strip()
 
         if kind == "menu":
-            _set_menu_text(RONI_MENU_KEY, text)
+            _set_portal_text(RONI_MENU_KEY, text)
             await m.reply_text(
                 "📖 Saved your personal menu for Roni’s assistant. 💕",
                 reply_markup=_roni_admin_keyboard(),
             )
         elif kind == "open_access":
-            _set_menu_text(OPEN_ACCESS_KEY, text)
+            _set_portal_text(OPEN_ACCESS_KEY, text)
             await m.reply_text(
                 "🌸 Saved your Open Access text. 💕",
                 reply_markup=_roni_admin_keyboard(),
             )
         elif kind == "announce":
-            _set_menu_text(ANNOUNCE_KEY, text)
+            _set_portal_text(ANNOUNCE_KEY, text)
             await m.reply_text(
                 "📣 Saved your Announcements & Promos text. 💕",
                 reply_markup=_roni_admin_keyboard(),
             )
         elif kind == "teaser":
-            _set_menu_text(TEASER_KEY, text)
+            _set_portal_text(TEASER_KEY, text)
             await m.reply_text(
                 "🔥 Saved your Teaser & Promo text. 💕",
                 reply_markup=_roni_admin_keyboard(),
@@ -612,7 +647,7 @@ def register(app: Client) -> None:
             media_message_id=fwd.id,
         )
 
-        # Create review card for Roni (text message with buttons)
+        # Create review card for Roni
         review_text = (
             "✉️ <b>Age Verification Received</b>\n\n"
             f"From: @{u.username or 'no_username'}\n"
@@ -655,16 +690,13 @@ def register(app: Client) -> None:
     # ───────── Age Verification: Roni actions ─────────
 
     async def _close_review_card(cq: CallbackQuery, status_line: str):
-        """Append status text & remove buttons so it 'closes'."""
         try:
-            new_text = (cq.message.text or "") + f"\n\n{status_line}"
             await cq.message.edit_text(
-                new_text,
+                cq.message.text + f"\n\n{status_line}",
                 reply_markup=None,
                 disable_web_page_preview=True,
             )
         except Exception:
-            # Fallback: just strip the markup
             try:
                 await cq.message.edit_reply_markup(reply_markup=None)
             except Exception:
