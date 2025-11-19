@@ -20,10 +20,6 @@ RONI_USERNAME = (os.getenv("RONI_USERNAME") or "chaossub283").lstrip("@")
 
 
 def _roni_main_keyboard() -> InlineKeyboardMarkup:
-    """
-    Roni assistant menu with all planned buttons visible.
-    Only some will actually do something right now.
-    """
     rows = [
         [InlineKeyboardButton("📖 Roni’s Menu", callback_data="roni_portal:menu")],
         [InlineKeyboardButton("💌 Book Roni", callback_data="roni_portal:todo")],
@@ -50,13 +46,12 @@ def _roni_main_keyboard() -> InlineKeyboardMarkup:
 def register(app: Client) -> None:
     log.info("✅ handlers.roni_portal registered")
 
-    # ───────────────── /roni_portal command ─────────────────
+    # ───────── /roni_portal command (for your welcome channel) ─────────
     @app.on_message(filters.command("roni_portal"))
     async def roni_portal_command(_, m: Message):
         """
-        When you run /roni_portal in your welcome channel (or any chat),
-        the bot replies with a button that opens a DM with SuccuBot
-        in ASSISTANT MODE (not Sanctuary mode).
+        Run this in your welcome channel.
+        It replies with a button that opens DM with SuccuBot in assistant mode.
         """
         start_link = f"https://t.me/{BOT_USERNAME}?start=roni_assistant"
 
@@ -70,26 +65,21 @@ def register(app: Client) -> None:
             disable_web_page_preview=True,
         )
 
-    # ───────────────── /start roni_assistant (DM: assistant mode) ─────────────────
-    @app.on_message(filters.private & filters.command("start"))
+    # ───────── /start roni_assistant in DM (assistant mode) ─────────
+    # group=-1 makes this run BEFORE your normal /start handler from panels
+    @app.on_message(filters.private & filters.command("start"), group=-1)
     async def roni_assistant_entry(_, m: Message):
-        """
-        This ONLY handles /start roni_assistant in private chat.
-
-        It shows the Roni assistant menu instead of the Sanctuary welcome.
-        """
         if not m.text:
             return
 
         parts = m.text.split(maxsplit=1)
         param = parts[1].strip() if len(parts) > 1 else ""
 
-        # We only care about the roni_assistant payload
+        # Only handle /start roni_assistant
         if not param or not param.lower().startswith("roni_assistant"):
-            # Let the normal /start handler from panels handle everything else
-            return
+            return  # Let the normal /start handler handle everything else
 
-        # Stop other /start handlers from also responding
+        # This IS our special assistant start – stop other /start handlers
         try:
             m.stop_propagation()
         except Exception:
@@ -104,7 +94,7 @@ def register(app: Client) -> None:
             disable_web_page_preview=True,
         )
 
-    # ───────────────── Roni’s Menu placeholder ─────────────────
+    # ───────── Roni’s Menu placeholder ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:menu$"))
     async def roni_menu_cb(_, cq: CallbackQuery):
         text = (
@@ -121,7 +111,7 @@ def register(app: Client) -> None:
         await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
 
-    # ───────────────── Back to main assistant menu ─────────────────
+    # ───────── Back to main assistant menu ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:home$"))
     async def roni_home_cb(_, cq: CallbackQuery):
         kb = _roni_main_keyboard()
@@ -133,7 +123,7 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # ───────────────── Placeholder for not-yet-implemented buttons ─────────────────
+    # ───────── Placeholder for not-yet-implemented buttons ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:todo$"))
     async def roni_todo_cb(_, cq: CallbackQuery):
         await cq.answer("This feature is coming soon 💕", show_alert=True)
