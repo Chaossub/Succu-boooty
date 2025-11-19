@@ -30,7 +30,7 @@ OWNER_ID = int(os.getenv("RONI_OWNER_ID") or os.getenv("OWNER_ID", "6964994611")
 RONI_MENU_KEY   = "__roni_assistant_menu__"
 OPEN_ACCESS_KEY = "__roni_open_access__"
 TEASER_KEY      = "__roni_teaser_channels__"
-ANNOUNCE_KEY    = "__roni_announcements__"   # announcements & promos
+ANNOUNCE_KEY    = "__roni_announcements__"   # Announcements & Promos
 
 # Age-verification storage config
 _MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGO_URI")
@@ -89,6 +89,7 @@ class AgeVerifyStore:
 
         if not self._use_mongo:
             self._load_json()
+            log.info("AgeVerifyStore: JSON at %s", _JSON_PATH)
 
     # ---- JSON helpers ----
 
@@ -117,10 +118,18 @@ class AgeVerifyStore:
 
         with self._lock:
             if self._use_mongo:
-                update: Dict[str, Any] = {"$set": {**fields, "last_update": now}}
-                update.setdefault("$setOnInsert", {})["first_seen"] = now
-                self._col.update_one({"_id": user_id}, update, upsert=True)
-                return
+                try:
+                    from pymongo.errors import PyMongoError
+                except Exception:
+                    PyMongoError = Exception  # type: ignore
+
+                try:
+                    update: Dict[str, Any] = {"$set": {**fields, "last_update": now}}
+                    update.setdefault("$setOnInsert", {})["first_seen"] = now
+                    self._col.update_one({"_id": user_id}, update, upsert=True)
+                    return
+                except PyMongoError as e:
+                    log.warning("AgeVerifyStore Mongo upsert failed, using JSON backup: %s", e)
 
             rec = self._cache.get(uid, {})
             if "first_seen" not in rec:
@@ -134,7 +143,10 @@ class AgeVerifyStore:
         uid = str(user_id)
         with self._lock:
             if self._use_mongo:
-                return self._col.find_one({"_id": user_id})
+                try:
+                    return self._col.find_one({"_id": user_id})
+                except Exception as e:
+                    log.warning("AgeVerifyStore Mongo get failed: %s", e)
             rec = self._cache.get(uid)
             if rec is not None:
                 rec = {**rec, "_id": int(uid)}
@@ -143,15 +155,18 @@ class AgeVerifyStore:
     def list(self, status: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
         with self._lock:
             if self._use_mongo:
-                query: Dict[str, Any] = {}
-                if status:
-                    query["status"] = status
-                cur = (
-                    self._col.find(query)
-                    .sort("last_update", -1)
-                    .limit(int(limit))
-                )
-                return list(cur)
+                try:
+                    query: Dict[str, Any] = {}
+                    if status:
+                        query["status"] = status
+                    cur = (
+                        self._col.find(query)
+                        .sort("last_update", -1)
+                        .limit(int(limit))
+                    )
+                    return list(cur)
+                except Exception as e:
+                    log.warning("AgeVerifyStore Mongo list failed: %s", e)
 
             vals = []
             for uid, rec in self._cache.items():
@@ -176,11 +191,11 @@ age_store = AgeVerifyStore()
 PENDING_AGE_MEDIA: Dict[int, bool] = {}
 
 # Admin edit state
-# admin_id -> {"kind": "menu"|"open_access"|"teaser"|"announce"|"note", "user_id"?: int}
+# admin_id -> {"kind": "menu"|"open_access"|"announce"|"teaser"|"note", "user_id"?: int}
 ADMIN_EDIT_STATE: Dict[int, Dict[str, Any]] = {}
 
 
-# ────────────── Helper functions / keyboards ──────────────
+# ────────────── Helpers / keyboards ──────────────
 
 def _is_verified(user_id: int) -> bool:
     rec = age_store.get(user_id)
@@ -224,7 +239,6 @@ def _roni_main_keyboard(*, is_owner: bool, verified: bool) -> InlineKeyboardMark
             [InlineKeyboardButton("⚙️ Roni Admin", callback_data="roni_portal:admin")]
         )
 
-    # No "Back to SuccuBot" here – this menu is just for your personal portal
     return InlineKeyboardMarkup(rows)
 
 
@@ -250,7 +264,7 @@ def _set_menu_text(key: str, text: str) -> None:
     store.set_menu(key, text)
 
 
-# ────────────── Main register() ──────────────
+# ────────────── register() ──────────────
 
 def register(app: Client) -> None:
     log.info("✅ handlers.roni_portal registered")
@@ -266,7 +280,7 @@ def register(app: Client) -> None:
 
         await m.reply_text(
             "Welcome to Roni’s personal access channel.\n"
-            "Click the button below to use her personal assistant SuccuBot for booking, payments, and more. 💋",
+            "Tap below to open her assistant for booking, payments, and more. 💋",
             reply_markup=kb,
             disable_web_page_preview=True,
         )
@@ -303,7 +317,7 @@ def register(app: Client) -> None:
             disable_web_page_preview=True,
         )
 
-    # ───────── Navigation: home from callbacks ─────────
+    # ───────── Home / back ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:home_owner$"))
     async def roni_home_owner_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id if cq.from_user else 0
@@ -344,7 +358,6 @@ def register(app: Client) -> None:
         kb = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
-                [InlineKeyboardButton("🏠 Back to SuccuBot Menu", callback_data="panels:root")],
             ]
         )
         await cq.message.edit_text(
@@ -447,7 +460,7 @@ def register(app: Client) -> None:
             return
         await _start_admin_edit(
             "menu",
-            "📖 Send me your new *Roni Menu* text in one message.\n\n"
+            "📖 Send me your new Roni Menu text in one message.\n\n"
             "I’ll save it and your assistant will show it under “📖 Roni’s Menu”.",
             cq,
         )
@@ -459,7 +472,7 @@ def register(app: Client) -> None:
             return
         await _start_admin_edit(
             "open_access",
-            "🌸 Send me the text you want to show for *Open Access*.\n\n"
+            "🌸 Send me the text you want to show for Open Access.\n\n"
             "This is what people see even before they age-verify.",
             cq,
         )
@@ -471,7 +484,7 @@ def register(app: Client) -> None:
             return
         await _start_admin_edit(
             "announce",
-            "📣 Send me the text you want to show under *Announcements & Promos*.\n\n"
+            "📣 Send me the text you want to show under Announcements & Promos.\n\n"
             "Use this for important info, current promos, limited-time offers, etc.",
             cq,
         )
@@ -483,7 +496,7 @@ def register(app: Client) -> None:
             return
         await _start_admin_edit(
             "teaser",
-            "🔥 Send me the text that should show under *Teaser & Promo Channels* "
+            "🔥 Send me the text that should show under Teaser & Promo Channels "
             "(for verified users only).",
             cq,
         )
@@ -499,18 +512,14 @@ def register(app: Client) -> None:
         )
 
     # Save admin text edits (menu / open / announcements / teaser / note)
-    # group=-1 so this runs before any other private-text handlers
-    @app.on_message(filters.private & filters.user(OWNER_ID) & filters.text, group=-1)
+    @app.on_message(filters.private & filters.user(OWNER_ID), group=-1)
     async def admin_text_handler(_, m: Message):
-        state = ADMIN_EDIT_STATE.pop(OWNER_ID, None)
-        if not state:
+        if not m.text:
             return
 
-        # Don't let other handlers eat this edit message
-        try:
-            m.stop_propagation()
-        except Exception:
-            pass
+        state = ADMIN_EDIT_STATE.pop(OWNER_ID, None)
+        if not state:
+            return  # normal DM from you
 
         kind = state.get("kind")
         text = m.text.strip()
@@ -603,7 +612,7 @@ def register(app: Client) -> None:
             media_message_id=fwd.id,
         )
 
-        # Create review card for Roni
+        # Create review card for Roni (text message with buttons)
         review_text = (
             "✉️ <b>Age Verification Received</b>\n\n"
             f"From: @{u.username or 'no_username'}\n"
@@ -646,13 +655,16 @@ def register(app: Client) -> None:
     # ───────── Age Verification: Roni actions ─────────
 
     async def _close_review_card(cq: CallbackQuery, status_line: str):
+        """Append status text & remove buttons so it 'closes'."""
         try:
+            new_text = (cq.message.text or "") + f"\n\n{status_line}"
             await cq.message.edit_text(
-                cq.message.text + f"\n\n{status_line}",
+                new_text,
                 reply_markup=None,
                 disable_web_page_preview=True,
             )
         except Exception:
+            # Fallback: just strip the markup
             try:
                 await cq.message.edit_reply_markup(reply_markup=None)
             except Exception:
