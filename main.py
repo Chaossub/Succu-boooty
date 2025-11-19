@@ -79,6 +79,10 @@ def main():
     # Flyer scheduler (date/time -> post)
     _try_register("flyer_scheduler")
 
+    # ⭐⭐ NEW: Sanctuary requirements system (split into two smaller handlers)
+    _try_register("requirements_sanctuary_admin")  # logging payments, exemptions, status
+    _try_register("requirements_sanctuary_jobs")   # reminders, kicks, scheduler
+
     # 🔻 Give both schedulers the running loop so they can post from their threads
     try:
         from handlers import flyer_scheduler as _fs
