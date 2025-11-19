@@ -26,18 +26,16 @@ RONI_USERNAME = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
 # Your personal Telegram user ID – only you see admin controls
 OWNER_ID = int(os.getenv("RONI_OWNER_ID") or os.getenv("OWNER_ID", "6964994611"))
 
-# Keys for Roni portal text sections (in our own JSON store)
+# Keys for Roni portal text sections
 RONI_MENU_KEY   = "menu"
 OPEN_ACCESS_KEY = "open_access"
 TEASER_KEY      = "teaser"
 ANNOUNCE_KEY    = "announce"
 
-# JSON file for Roni portal texts (separate from MenuStore)
+# JSON file for fallback text storage
 _RONI_TEXT_PATH = os.getenv("RONI_PORTAL_TEXT_PATH", "data/roni_portal_texts.json")
-_RONI_TEXT_LOCK = threading.RLock()
-_RONI_TEXT_CACHE: Dict[str, str] = {}
 
-# Age-verification storage config
+# Shared Mongo config (same envs as age store)
 _MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGO_URI")
 _MONGO_DB = (
     os.getenv("MONGO_DB")
@@ -48,46 +46,112 @@ _MONGO_DB = (
 _AGE_COLL = os.getenv("MONGO_AGE_COLLECTION") or "roni_age_verifications"
 _JSON_PATH = os.getenv("RONI_AGE_STORE_PATH", "data/roni_age_verifications.json")
 
+# ────────────── RoniPortalTextStore (Mongo with JSON fallback) ──────────────
 
-# ────────────── RoniPortal text store (JSON, survives restarts) ──────────────
+class RoniPortalTextStore:
+    """
+    Stores Roni portal texts by key: menu, open_access, teaser, announce.
 
-def _load_roni_texts() -> None:
-    global _RONI_TEXT_CACHE
-    try:
-        with open(_RONI_TEXT_PATH, "r", encoding="utf-8") as f:
-            _RONI_TEXT_CACHE = json.load(f)
-    except FileNotFoundError:
-        _RONI_TEXT_CACHE = {}
-    except Exception as e:
-        log.warning("RoniPortal: failed to load JSON texts: %s", e)
-        _RONI_TEXT_CACHE = {}
+    Mongo doc shape:
+      { "_id": key, "text": str, "updated_at": iso str }
+
+    JSON fallback shape:
+      { key: text, ... }
+    """
+
+    def __init__(self, json_path: str):
+        self._lock = threading.RLock()
+        self._json_path = json_path
+        self._use_mongo = False
+        self._cache: Dict[str, str] = {}
+
+        if _MONGO_URL:
+            try:
+                from pymongo import MongoClient
+
+                self._mc = MongoClient(_MONGO_URL, serverSelectionTimeoutMS=3000)
+                self._mc.admin.command("ping")
+                self._col = self._mc[_MONGO_DB]["roni_portal_texts"]
+                self._use_mongo = True
+                log.info(
+                    "RoniPortalTextStore: Mongo OK db=%s coll=%s",
+                    _MONGO_DB,
+                    "roni_portal_texts",
+                )
+            except Exception as e:
+                log.warning(
+                    "RoniPortalTextStore: Mongo unavailable, falling back to JSON: %s",
+                    e,
+                )
+                self._use_mongo = False
+
+        if not self._use_mongo:
+            self._load_json()
+
+    # ---- JSON helpers ----
+
+    def _load_json(self) -> None:
+        try:
+            with open(self._json_path, "r", encoding="utf-8") as f:
+                self._cache = json.load(f)
+        except FileNotFoundError:
+            self._cache = {}
+        except Exception as e:
+            log.warning("RoniPortalTextStore: failed to load JSON: %s", e)
+            self._cache = {}
+
+    def _save_json(self) -> None:
+        tmp_path = self._json_path + ".tmp"
+        os.makedirs(os.path.dirname(self._json_path) or ".", exist_ok=True)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._cache, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self._json_path)
+        except Exception as e:
+            log.warning("RoniPortalTextStore: failed to save JSON: %s", e)
+
+    # ---- Public API ----
+
+    def get(self, key: str, fallback: str) -> str:
+        with self._lock:
+            if self._use_mongo:
+                try:
+                    doc = self._col.find_one({"_id": key})
+                    if doc and isinstance(doc.get("text"), str):
+                        return doc["text"]
+                except Exception as e:
+                    log.warning("RoniPortalTextStore Mongo get failed: %s", e)
+
+            # JSON / fallback
+            val = self._cache.get(key)
+            return val if isinstance(val, str) and val.strip() else fallback
+
+    def set(self, key: str, text: str) -> None:
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        with self._lock:
+            if self._use_mongo:
+                try:
+                    self._col.update_one(
+                        {"_id": key},
+                        {"$set": {"text": text, "updated_at": now}},
+                        upsert=True,
+                    )
+                    return
+                except Exception as e:
+                    log.warning("RoniPortalTextStore Mongo set failed: %s", e)
+                    # fall through to JSON
+
+            self._cache[key] = text
+            self._save_json()
 
 
-def _save_roni_texts() -> None:
-    os.makedirs(os.path.dirname(_RONI_TEXT_PATH) or ".", exist_ok=True)
-    tmp_path = _RONI_TEXT_PATH + ".tmp"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(_RONI_TEXT_CACHE, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, _RONI_TEXT_PATH)
-    except Exception as e:
-        log.warning("RoniPortal: failed to save JSON texts: %s", e)
-
+roni_text_store = RoniPortalTextStore(_RONI_TEXT_PATH)
 
 def _get_portal_text(key: str, fallback: str) -> str:
-    with _RONI_TEXT_LOCK:
-        val = _RONI_TEXT_CACHE.get(key)
-        return val if val else fallback
-
+    return roni_text_store.get(key, fallback)
 
 def _set_portal_text(key: str, text: str) -> None:
-    with _RONI_TEXT_LOCK:
-        _RONI_TEXT_CACHE[key] = text
-        _save_roni_texts()
-
-
-# Load once on import
-_load_roni_texts()
+    roni_text_store.set(key, text)
 
 
 # ────────────── AgeVerifyStore (Mongo or JSON) ──────────────
