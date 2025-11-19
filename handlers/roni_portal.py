@@ -30,7 +30,7 @@ OWNER_ID = int(os.getenv("RONI_OWNER_ID") or os.getenv("OWNER_ID", "6964994611")
 RONI_MENU_KEY   = "__roni_assistant_menu__"
 OPEN_ACCESS_KEY = "__roni_open_access__"
 TEASER_KEY      = "__roni_teaser_channels__"
-ANNOUNCE_KEY    = "__roni_announcements__"   # NEW: announcements & promos
+ANNOUNCE_KEY    = "__roni_announcements__"   # announcements & promos
 
 # Age-verification storage config
 _MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGO_URI")
@@ -499,11 +499,18 @@ def register(app: Client) -> None:
         )
 
     # Save admin text edits (menu / open / announcements / teaser / note)
-    @app.on_message(filters.private & filters.user(OWNER_ID) & filters.text)
+    # group=-1 so this runs before any other private-text handlers
+    @app.on_message(filters.private & filters.user(OWNER_ID) & filters.text, group=-1)
     async def admin_text_handler(_, m: Message):
         state = ADMIN_EDIT_STATE.pop(OWNER_ID, None)
         if not state:
             return
+
+        # Don't let other handlers eat this edit message
+        try:
+            m.stop_propagation()
+        except Exception:
+            pass
 
         kind = state.get("kind")
         text = m.text.strip()
