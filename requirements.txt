@@ -11,6 +11,9 @@ pytz>=2023.3
 fastapi==0.95.1
 uvicorn[standard]==0.23.2
 
+# Stripe Webhook Support (add this)
+stripe==7.11.0
+
 # Packaging
 setuptools>=65.0.0
 wheel>=0.38.4
