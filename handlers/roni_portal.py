@@ -58,8 +58,8 @@ class AgeVerifyStore:
         "last_update": iso str,
         "approved_at": iso str | None,
         "note": str | None,
-        "media_chat_id": int,      # where the stored copy of their media lives (your DM)
-        "media_message_id": int    # message id of stored media
+        "media_chat_id": int,
+        "media_message_id": int
     }
     """
 
@@ -136,7 +136,6 @@ class AgeVerifyStore:
                 return self._col.find_one({"_id": user_id})
             rec = self._cache.get(uid)
             if rec is not None:
-                # JSON doesn't store _id, fake it for convenience
                 rec = {**rec, "_id": int(uid)}
             return rec
 
@@ -172,11 +171,10 @@ class AgeVerifyStore:
 
 age_store = AgeVerifyStore()
 
-# Users who have tapped "Age Verify" and whose next media should be treated
-# as a verification submission.
+# Users who have tapped "Age Verify"
 PENDING_AGE_MEDIA: Dict[int, bool] = {}
 
-# Admin edit state (menu / open access / teaser / note)
+# Admin edit state
 # admin_id -> {"kind": "menu"|"open_access"|"teaser"|"note", "user_id"?: int}
 ADMIN_EDIT_STATE: Dict[int, Dict[str, Any]] = {}
 
@@ -465,7 +463,6 @@ def register(app: Client) -> None:
     async def admin_cancel_cb(_, cq: CallbackQuery):
         ADMIN_EDIT_STATE.pop(OWNER_ID, None)
         await cq.answer("Cancelled.", show_alert=False)
-        # Back to admin panel
         await cq.message.edit_text(
             "⚙ <b>Roni Admin Panel</b>",
             reply_markup=_roni_admin_keyboard(),
@@ -503,7 +500,10 @@ def register(app: Client) -> None:
         elif kind == "note":
             target_id = state.get("user_id")
             if not target_id:
-                await m.reply_text("Couldn’t find which user this note was for.", reply_markup=_roni_admin_keyboard())
+                await m.reply_text(
+                    "Couldn’t find which user this note was for.",
+                    reply_markup=_roni_admin_keyboard(),
+                )
                 return
             age_store.upsert(int(target_id), note=text)
             await m.reply_text(
@@ -604,7 +604,6 @@ def register(app: Client) -> None:
     # ───────── Age Verification: Roni actions ─────────
 
     async def _close_review_card(cq: CallbackQuery, status_line: str):
-        # Remove buttons & show final status on the card itself
         try:
             await cq.message.edit_text(
                 cq.message.text + f"\n\n{status_line}",
@@ -641,7 +640,6 @@ def register(app: Client) -> None:
         await _close_review_card(cq, f"✅ Approved at {now} (UTC)")
         await cq.answer("Approved ✅", show_alert=False)
 
-        # Tell the user + give them a fresh 'verified' menu
         try:
             await _send_verified_menu(target_id)
         except Exception as e:
@@ -718,7 +716,7 @@ def register(app: Client) -> None:
                     f"• @{uname} — <code>{uid}</code> — {approved_at}{note_flag}"
                 )
 
-                if idx < 10:  # only first 10 get quick buttons
+                if idx < 10:  # quick buttons for first few
                     label = f"@{uname}" if uname != "no_username" else str(uid)
                     buttons.append(
                         [
@@ -742,7 +740,7 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # View a single user's verification media + note button
+    # View a single user's verification media + note / reset buttons
     @app.on_callback_query(filters.regex(r"^roni_portal:age_view:(\d+)$"))
     async def admin_age_view_cb(_, cq: CallbackQuery):
         if cq.from_user.id != OWNER_ID:
@@ -755,7 +753,6 @@ def register(app: Client) -> None:
             await cq.answer("No record found for that user.", show_alert=True)
             return
 
-        # Re-send stored media (if we have it)
         media_chat_id = rec.get("media_chat_id")
         media_message_id = rec.get("media_message_id")
         if media_chat_id and media_message_id:
@@ -790,7 +787,18 @@ def register(app: Client) -> None:
                         callback_data=f"roni_portal:age_note:{target_id}",
                     )
                 ],
-                [InlineKeyboardButton("⬅ Back to List", callback_data="roni_portal:admin_age_list")],
+                [
+                    InlineKeyboardButton(
+                        "❌ Remove Approval",
+                        callback_data=f"roni_portal:age_reset:{target_id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅ Back to List",
+                        callback_data="roni_portal:admin_age_list",
+                    )
+                ],
             ]
         )
         await cq.message.edit_text(
@@ -820,6 +828,39 @@ def register(app: Client) -> None:
             disable_web_page_preview=True,
         )
         await cq.answer()
+
+    # NEW: Remove approval / reset verification
+    @app.on_callback_query(filters.regex(r"^roni_portal:age_reset:(\d+)$"))
+    async def admin_age_reset_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != OWNER_ID:
+            await cq.answer("Admin only 💕", show_alert=True)
+            return
+
+        target_id = int(cq.data.split(":", 2)[-1])
+
+        # Keep history & media, just mark them as pending again
+        age_store.upsert(target_id, status="pending", approved_at=None)
+
+        await cq.answer("Approval removed. User is no longer marked verified.", show_alert=True)
+
+        try:
+            # Refresh detail view to reflect new status
+            await cq.message.edit_text(
+                cq.message.text + "\n\n❌ Approval removed. Status reset to pending.",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+
+        # Optional: tell the user their verification was reset (handy for testing)
+        try:
+            await app.send_message(
+                target_id,
+                "🔁 Your age verification status has been reset. "
+                "You’ll need to verify again before seeing Roni’s teaser channels.",
+            )
+        except Exception as e:
+            log.warning("Failed to notify reset user %s: %s", target_id, e)
 
     # ───────── Placeholder for not-yet-wired buttons ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:todo$"))
