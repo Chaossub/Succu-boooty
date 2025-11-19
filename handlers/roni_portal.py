@@ -622,7 +622,7 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # Handle media sent after tapping Age Verify
+    # Handle media sent after tapping Age Verify OR when status = more_info
     @app.on_message(
         filters.private
         & ~filters.user(OWNER_ID)
@@ -633,12 +633,21 @@ def register(app: Client) -> None:
         if not u:
             return
 
-        if not PENDING_AGE_MEDIA.pop(u.id, False):
-            return  # not in age-verify flow
+        # Was this explicitly started via Age Verify button?
+        pending_flag = PENDING_AGE_MEDIA.pop(u.id, False)
+
+        # Or are they in "more_info" state and sending the extra photo?
+        rec = age_store.get(u.id)
+        more_info = bool(rec and rec.get("status") == "more_info")
+
+        if not pending_flag and not more_info:
+            # Not in any age-verify flow; ignore
+            return
 
         # Forward media to Roni
         fwd = await m.forward(OWNER_ID)
 
+        # Store/update record as pending review again
         age_store.upsert(
             u.id,
             username=u.username,
