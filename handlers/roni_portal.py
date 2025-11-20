@@ -23,6 +23,9 @@ log = logging.getLogger(__name__)
 BOT_USERNAME = (os.getenv("BOT_USERNAME") or "succubot_bot").lstrip("@")
 RONI_USERNAME = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
 
+# Same tip link env as panels.py
+RONI_TIP_LINK = (os.getenv("TIP_RONI_LINK") or "").strip()
+
 # Your personal Telegram user ID – only you see admin controls
 OWNER_ID = int(os.getenv("RONI_OWNER_ID") or os.getenv("OWNER_ID", "6964994611"))
 
@@ -293,8 +296,12 @@ age_store = AgeVerifyStore()
 PENDING_AGE_MEDIA: Dict[int, bool] = {}
 
 # admin edit state:
-#   admin_id -> {"kind": one of menu/open/announce/teaser/note, "user_id"?: int}
+#   admin_id -> {"kind": one of menu/open/announce/teaser}
 ADMIN_EDIT_STATE: Dict[int, Dict[str, Any]] = {}
+
+# age verification note state:
+#   admin_id -> target_user_id
+AGE_NOTE_STATE: Dict[int, int] = {}
 
 
 # ────────────── Helpers / keyboards ──────────────
@@ -308,10 +315,25 @@ def _roni_main_keyboard(*, is_owner: bool, verified: bool) -> InlineKeyboardMark
     rows: List[List[InlineKeyboardButton]] = [
         [InlineKeyboardButton("📖 Roni’s Menu", callback_data="roni_portal:menu")],
         [InlineKeyboardButton("💌 Book Roni", url=f"https://t.me/{RONI_USERNAME}")],
-        [InlineKeyboardButton("💸 Pay / Tip Roni", callback_data="roni_portal:todo")],
-        [InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:open")],
-        [InlineKeyboardButton("📣 Announcements & Promos", callback_data="roni_portal:announce")],
     ]
+
+    # Tip button logic – mirror panels.py behavior
+    if RONI_TIP_LINK:
+        rows.append(
+            [InlineKeyboardButton("💸 Pay / Tip Roni", url=RONI_TIP_LINK)]
+        )
+    else:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "💸 Pay / Tip Roni (coming soon)",
+                    callback_data="roni_portal:tip_coming",
+                )
+            ]
+        )
+
+    rows.append([InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:open")])
+    rows.append([InlineKeyboardButton("📣 Announcements & Promos", callback_data="roni_portal:announce")])
 
     if not verified:
         rows.append(
@@ -319,13 +341,21 @@ def _roni_main_keyboard(*, is_owner: bool, verified: bool) -> InlineKeyboardMark
         )
     else:
         rows.append(
-            [InlineKeyboardButton("🔥 Teaser & Promo Channels",
-                                  callback_data="roni_portal:teaser")]
+            [
+                InlineKeyboardButton(
+                    "🔥 Teaser & Promo Channels",
+                    callback_data="roni_portal:teaser",
+                )
+            ]
         )
 
     rows.append(
-        [InlineKeyboardButton("😈 Models & Creators — Tap Here",
-                              url=f"https://t.me/{RONI_USERNAME}")]
+        [
+            InlineKeyboardButton(
+                "😈 Models & Creators — Tap Here",
+                url=f"https://t.me/{RONI_USERNAME}",
+            )
+        ]
     )
 
     if is_owner:
@@ -518,10 +548,10 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # ── placeholder for not-yet-implemented buttons (tip etc.)
-    @app.on_callback_query(filters.regex(r"^roni_portal:todo$"))
-    async def roni_todo_cb(_, cq: CallbackQuery):
-        await cq.answer("This feature is coming soon 💕", show_alert=True)
+    # ── Tip coming soon fallback (only used if no TIP_RONI_LINK is set)
+    @app.on_callback_query(filters.regex(r"^roni_portal:tip_coming$"))
+    async def roni_tip_coming_cb(_, cq: CallbackQuery):
+        await cq.answer("💸 Tip support is coming soon!", show_alert=True)
 
     # ── Roni Admin entry
     @app.on_callback_query(filters.regex(r"^roni_portal:admin$"))
@@ -666,6 +696,8 @@ def register(app: Client) -> None:
                 [InlineKeyboardButton("✅ Approve", callback_data=f"roni_portal:age_approve:{user_id}")],
                 [InlineKeyboardButton("🪪 Need more info", callback_data=f"roni_portal:age_more:{user_id}")],
                 [InlineKeyboardButton("⛔ Deny", callback_data=f"roni_portal:age_deny:{user_id}")],
+                [InlineKeyboardButton("📝 Add / Edit Note", callback_data=f"roni_portal:age_note:{user_id}")],
+                [InlineKeyboardButton("🔄 Remove AV Status", callback_data=f"roni_portal:age_remove:{user_id}")],
             ]
         )
 
@@ -786,6 +818,82 @@ def register(app: Client) -> None:
             pass
         await cq.answer("Asked them for more info. 💕")
 
+    # ── Admin: Remove age-verified status explicitly
+    @app.on_callback_query(filters.regex(r"^roni_portal:age_remove:(\d+)$"))
+    async def age_remove_cb(_, cq: CallbackQuery):
+        if not await _ensure_owner(cq):
+            return
+        user_id = int(cq.data.split(":")[-1])
+
+        # Set them to denied and clear approved_at
+        age_store.upsert(user_id, status="denied", approved_at=None)
+
+        # Optionally notify user their access has been revoked
+        try:
+            await app.send_message(
+                user_id,
+                "⚠️ Your age-verified access to Roni’s assistant has been removed.\n"
+                "If you think this is a mistake, you can message Roni directly.",
+            )
+        except Exception:
+            pass
+
+        try:
+            await cq.message.edit_text(
+                "🔄 Age-verified status removed for this user.\n"
+                f"{await _age_decision_header(user_id, 'Access removed')}",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+
+        await cq.answer("Age-verified status removed.", show_alert=False)
+
+    # ── Admin: Add / Edit note for an age verification record
+    @app.on_callback_query(filters.regex(r"^roni_portal:age_note:(\d+)$"))
+    async def age_note_cb(_, cq: CallbackQuery):
+        if not await _ensure_owner(cq):
+            return
+        user_id = int(cq.data.split(":")[-1])
+
+        AGE_NOTE_STATE[cq.from_user.id] = user_id
+
+        await cq.answer()
+        await cq.message.reply_text(
+            f"📝 Send the note you want to attach to this user.\n\n"
+            f"Target ID: <code>{user_id}</code>\n\n"
+            "Whatever you send next (in this chat) will be saved as their note.",
+            disable_web_page_preview=True,
+            parse_mode="html",
+        )
+
+    # ── Receive admin note text
+    @app.on_message(filters.private & filters.text)
+    async def admin_note_text(_, m: Message):
+        # Only owner
+        if m.from_user.id != OWNER_ID:
+            return
+
+        # If we’re not in a note flow, let the other handler (admin_edit_text) handle it or ignore
+        target_user_id = AGE_NOTE_STATE.get(m.from_user.id)
+        if not target_user_id:
+            return
+
+        note_text = m.text.strip()
+        if not note_text:
+            await m.reply_text("That message was empty, send your note again. 💕")
+            return
+
+        age_store.upsert(int(target_user_id), note=note_text)
+        AGE_NOTE_STATE.pop(m.from_user.id, None)
+
+        await m.reply_text(
+            f"✅ Saved note for user <code>{target_user_id}</code>.\n"
+            "This will be stored with their age verification record.",
+            disable_web_page_preview=True,
+            parse_mode="html",
+        )
+
     # ── Admin age-verified list
     @app.on_callback_query(filters.regex(r"^roni_portal:admin_age_list$"))
     async def admin_age_list_cb(_, cq: CallbackQuery):
@@ -802,7 +910,15 @@ def register(app: Client) -> None:
                 uname = r.get("username")
                 uname_disp = f"@{uname}" if uname else "(no @username)"
                 approved_at = r.get("approved_at") or r.get("last_update")
-                lines.append(f"• {uname_disp} — <code>{uid}</code> — {approved_at}")
+                note = r.get("note")
+                if note:
+                    # keep note short in the list
+                    short_note = note
+                    if len(short_note) > 60:
+                        short_note = short_note[:57] + "..."
+                    lines.append(f"• {uname_disp} — <code>{uid}</code> — {approved_at}\n  📝 {short_note}")
+                else:
+                    lines.append(f"• {uname_disp} — <code>{uid}</code> — {approved_at}")
             txt = "\n".join(lines)
 
         await cq.message.edit_text(
