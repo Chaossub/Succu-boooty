@@ -80,10 +80,10 @@ def main():
     _try_register("flyer_scheduler")
 
     # ⭐⭐ NEW: Sanctuary requirements system (split into two smaller handlers)
-    _try_register("requirements_sanctuary_admin")  # logging payments, exemptions, status
-    _try_register("requirements_sanctuary_jobs")   # reminders, kicks, scheduler
+    _try_register("requirements_sanctuary_admin")  # logging payments, exemptions, status commands
+    _try_register("requirements_sanctuary_jobs")   # reminders, kicks, scheduled scans
 
-    # 🔻 Give both schedulers the running loop so they can post from their threads
+    # 🔻 Give schedulers the running loop so they can post from their threads
     try:
         from handlers import flyer_scheduler as _fs
         _fs.set_main_loop(app.loop)
@@ -97,6 +97,17 @@ def main():
         log.info("✅ Set main loop for schedulemsg")
     except Exception as e:
         log.warning("Could not set main loop for schedulemsg: %s", e)
+
+    # ⭐ NEW: wire the requirements job handler to the main loop
+    try:
+        from handlers import requirements_sanctuary_jobs as _rq
+        if hasattr(_rq, "set_main_loop"):
+            _rq.set_main_loop(app.loop)
+            log.info("✅ Set main loop for requirements_sanctuary_jobs")
+        else:
+            log.warning("requirements_sanctuary_jobs has no set_main_loop()")
+    except Exception as e:
+        log.warning("Could not set main loop for requirements_sanctuary_jobs: %s", e)
 
     # -------- Central “Back to Main” handler (portal:home) --------
     @app.on_callback_query(filters.regex("^portal:home$"))
