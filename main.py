@@ -56,6 +56,9 @@ def main():
     _try_register("dm_portal")               # legacy shim (+ optional /dmnow)
     _try_register("portal_cmd")              # /portal → DM button
 
+    # ⭐ NEW: Roni personal assistant portal (/roni_portal + /start roni_assistant)
+    _try_register("roni_portal")
+
     # Help panel (buttons -> env text)
     _try_register("help_panel")              # help:open + pages
 
@@ -126,4 +129,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
