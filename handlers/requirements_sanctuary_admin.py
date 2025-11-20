@@ -5,8 +5,8 @@ from datetime import datetime
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pymongo import MongoClient, ASCENDING
 from pyrogram.errors import RPCError
+from pymongo import MongoClient, ASCENDING
 
 log = logging.getLogger(__name__)
 
@@ -19,15 +19,15 @@ MONGO_DB = os.getenv("MONGO_DB", "Succubot")
 # main group where requirements apply
 SANCTU_GROUP_ID = int(os.getenv("SANCTU_GROUP_ID", "-1002823762054"))
 
-# Mongo collections
+# Mongo setup (no truthiness checks!)
 mongo = MongoClient(MONGO_URI) if MONGO_URI else None
-db = mongo[MONGO_DB] if mongo else None
+db = mongo[MONGO_DB] if mongo is not None else None
 
-payments_col = db["sanctuary_payments"] if db else None
-exempt_col = db["sanctuary_exempt"] if db else None
+payments_col = db["sanctuary_payments"] if db is not None else None
+exempt_col = db["sanctuary_exempt"] if db is not None else None
 
-# This MUST match whatever dm_ready.py uses; if we ever change it there, change it here too.
-DMREADY_COL = db["dm_ready_users"] if db else None
+# MUST match the collection used by dm_ready.py
+DMREADY_COL = db["dm_ready_users"] if db is not None else None
 
 
 def _owner_only(func):
@@ -43,19 +43,25 @@ def register(app: Client) -> None:
     Register admin / owner commands for the Sanctuary requirements system.
     """
 
-    if not mongo:
-        log.warning("requirements_sanctuary_admin: MONGO_URI not set; commands will be disabled.")
+    if mongo is None or db is None:
+        log.warning(
+            "requirements_sanctuary_admin: Mongo not configured "
+            "(MONGO_URI=%r, db=%r) — commands disabled.",
+            MONGO_URI, db
+        )
     else:
-        # make sure indexes exist
-        payments_col.create_index(
-            [("user_id", ASCENDING), ("created_at", ASCENDING)],
-            name="payments_user_created_at",
-        )
-        exempt_col.create_index(
-            [("user_id", ASCENDING)],
-            name="exempt_user_id",
-            unique=True,
-        )
+        # Make sure indexes exist (using is not None)
+        if payments_col is not None:
+            payments_col.create_index(
+                [("user_id", ASCENDING), ("created_at", ASCENDING)],
+                name="payments_user_created_at",
+            )
+        if exempt_col is not None:
+            exempt_col.create_index(
+                [("user_id", ASCENDING)],
+                name="exempt_user_id",
+                unique=True,
+            )
 
     log.info(
         "✅ handlers.requirements_sanctuary_admin registered (SANCTU_GROUP_ID=%s)",
@@ -69,46 +75,63 @@ def register(app: Client) -> None:
     @app.on_message(filters.command("exempt") & filters.private)
     @_owner_only
     async def cmd_exempt(_, m: Message):
-        if not exempt_col:
+        if exempt_col is None:
             return await m.reply_text("MongoDB not configured for exemptions.")
 
         if not m.reply_to_message and len(m.command) < 2:
-            return await m.reply_text("Reply to a user or use `/exempt @username`.", quote=True)
+            return await m.reply_text(
+                "Reply to a user or use `/exempt @username`.", quote=True
+            )
 
         target = None
         if m.reply_to_message:
             target = m.reply_to_message.from_user
         else:
-            # /exempt @user
-            if not m.entities or len(m.entities) < 2:
-                return await m.reply_text("Tag the user you want to exempt.", quote=True)
-            # Pyrogram already resolves @user in the entities, easier to just rely on reply usually.
-            return await m.reply_text("Please reply to a user to exempt them 💕", quote=True)
+            # To keep it simple we require reply mode for now
+            return await m.reply_text(
+                "Please reply to a user to exempt them 💕",
+                quote=True,
+            )
 
         exempt_col.update_one(
             {"user_id": target.id},
-            {"$set": {"user_id": target.id, "username": target.username, "ts": datetime.utcnow()}},
+            {
+                "$set": {
+                    "user_id": target.id,
+                    "username": target.username,
+                    "ts": datetime.utcnow(),
+                }
+            },
             upsert=True,
         )
-        await m.reply_text(f"✅ <b>{target.mention}</b> is now <b>EXEMPT</b> from requirements.")
+        await m.reply_text(
+            f"✅ <b>{target.mention}</b> is now <b>EXEMPT</b> from Sanctuary requirements."
+        )
 
     @app.on_message(filters.command("unexempt") & filters.private)
     @_owner_only
     async def cmd_unexempt(_, m: Message):
-        if not exempt_col:
+        if exempt_col is None:
             return await m.reply_text("MongoDB not configured for exemptions.")
 
         if not m.reply_to_message and len(m.command) < 2:
-            return await m.reply_text("Reply to a user or use `/unexempt @username`.", quote=True)
+            return await m.reply_text(
+                "Reply to a user or use `/unexempt @username`.", quote=True
+            )
 
         target = None
         if m.reply_to_message:
             target = m.reply_to_message.from_user
         else:
-            return await m.reply_text("Please reply to a user to unexempt them 💕", quote=True)
+            return await m.reply_text(
+                "Please reply to a user to unexempt them 💕",
+                quote=True,
+            )
 
         exempt_col.delete_one({"user_id": target.id})
-        await m.reply_text(f"🚫 <b>{target.mention}</b> is no longer exempt.")
+        await m.reply_text(
+            f"🚫 <b>{target.mention}</b> is no longer exempt from requirements."
+        )
 
     # ─────────────────────────────────────────────────────────
     # /testsanctuarydm  → send test DM to DM-ready + in Sanctuary
@@ -122,15 +145,20 @@ def register(app: Client) -> None:
         - marked DM-ready in Mongo
         - AND currently in the Succubus Sanctuary group
         """
-        if not DMREADY_COL:
+        if DMREADY_COL is None:
             return await m.reply_text("DM-ready store is not available (Mongo issue).")
 
-        test_text = "🧪 This is a test message from SuccuBot to verify DM-ready + Sanctuary membership."  # default
+        test_text = (
+            "🧪 This is a test message from SuccuBot to verify "
+            "DM-ready + Sanctuary membership."
+        )
         if len(m.command) > 1:
             # allow custom text after command
             test_text = m.text.split(None, 1)[1]
 
-        await m.reply_text("Scanning DM-ready users and Sanctuary members… this may take a moment.")
+        await m.reply_text(
+            "Scanning DM-ready users and Sanctuary members… this may take a moment."
+        )
 
         # 1) Get DM-ready users from Mongo
         dm_ready_docs = list(DMREADY_COL.find({}))
@@ -177,7 +205,6 @@ def register(app: Client) -> None:
             report_lines.append("Failed to deliver to:")
             for uid, reason in failed_users[:10]:
                 report_lines.append(f"• <code>{uid}</code> — {reason}")
-
             if len(failed_users) > 10:
                 report_lines.append(f"…and {len(failed_users) - 10} more")
 
@@ -191,9 +218,9 @@ def register(app: Client) -> None:
     @_owner_only
     async def cmd_req_status(_, m: Message):
         """Lightweight status summary for your requirements system."""
-        total_payments = payments_col.count_documents({}) if payments_col else 0
-        exempt_count = exempt_col.count_documents({}) if exempt_col else 0
-        dm_ready_count = DMREADY_COL.count_documents({}) if DMREADY_COL else 0
+        total_payments = payments_col.count_documents({}) if payments_col is not None else 0
+        exempt_count = exempt_col.count_documents({}) if exempt_col is not None else 0
+        dm_ready_count = DMREADY_COL.count_documents({}) if DMREADY_COL is not None else 0
 
         txt = (
             "📊 <b>Sanctuary Requirements Status</b>\n\n"
