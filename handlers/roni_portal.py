@@ -2,9 +2,7 @@
 import logging
 import os
 import json
-import threading
 from datetime import datetime
-from typing import Dict, Any, Optional, List
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -14,313 +12,200 @@ from pyrogram.types import (
     InlineKeyboardButton,
 )
 
-from utils.menu_store import store  # harmless even if not used much
+from utils.menu_store import store  # for persistent storage
 
 log = logging.getLogger(__name__)
 
 # ────────────── ENV / CONSTANTS ──────────────
 
-BOT_USERNAME = (os.getenv("BOT_USERNAME") or "succubot_bot").lstrip("@")
-RONI_USERNAME = (os.getenv("RONI_USERNAME") or "Chaossub283").lstrip("@")
+# Your bot's username (without @) – used for the deep link
+BOT_USERNAME = (os.getenv("BOT_USERNAME") or "YourBotUsernameHere").lstrip("@")
 
-# Same tip link env as panels.py
-RONI_TIP_LINK = (os.getenv("TIP_RONI_LINK") or "").strip()
+# Your personal @username – used for customer + business DMs
+RONI_USERNAME = (os.getenv("RONI_USERNAME") or "chaossub283").lstrip("@")
 
-# Your personal Telegram user ID – only you see admin controls
-OWNER_ID = int(os.getenv("RONI_OWNER_ID") or os.getenv("OWNER_ID", "6964994611"))
+# Your Telegram user ID (owner) – ONLY this ID sees / uses admin + approvals
+RONI_OWNER_ID = 6964994611
 
-# Keys for Roni portal text sections
-RONI_MENU_KEY   = "menu"
-OPEN_ACCESS_KEY = "open_access"
-TEASER_KEY      = "teaser"
-ANNOUNCE_KEY    = "announce"
+# Stripe tip link for Roni (same env used in panels)
+TIP_RONI_LINK = (os.getenv("TIP_RONI_LINK") or "").strip()
 
-# JSON file for editable text fallback
-_RONI_TEXT_PATH = os.getenv("RONI_PORTAL_TEXT_PATH", "data/roni_portal_texts.json")
+# Key used in menu_store for your *personal assistant* menu
+# (separate from the Sanctuary model menus)
+RONI_MENU_KEY = "RoniPersonalMenu"
 
-# Mongo / JSON for age verify
-_MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGO_URI")
-_MONGO_DB = (
-    os.getenv("MONGO_DB")
-    or os.getenv("MONGO_DB_NAME")
-    or os.getenv("MONGO_DBNAME")
-    or "Succubot"
-)
-_AGE_COLL = os.getenv("MONGO_AGE_COLLECTION") or "roni_age_verifications"
-_JSON_PATH = os.getenv("RONI_AGE_STORE_PATH", "data/roni_age_verifications.json")
+# Index key for age-verified users (JSON list of IDs)
+AGE_INDEX_KEY = "RoniAgeIndex"
+
+# Prefix for stored age-verify media
+AGE_MEDIA_PREFIX = "RoniAgeMedia:"
+
+# Keys for editable text blocks
+OPEN_ACCESS_KEY = "RoniOpenAccessText"
+TEASER_TEXT_KEY = "RoniTeaserChannelsText"
 
 
-# ────────────── RoniPortalTextStore (Mongo with JSON fallback) ──────────────
+# Helpers for age index
+def _load_age_index() -> list[int]:
+    raw = store.get_menu(AGE_INDEX_KEY) or "[]"
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return [int(x) for x in data]
+    except Exception:
+        pass
+    return []
 
-class RoniPortalTextStore:
+
+def _save_age_index(ids: list[int]) -> None:
+    try:
+        # dict.fromkeys to de-duplicate while preserving order
+        store.set_menu(AGE_INDEX_KEY, json.dumps(list(dict.fromkeys(ids))))
+    except Exception:
+        log.exception("Failed to save age index")
+
+
+# Base key for age verification flags (per-user)
+def _age_key(user_id: int) -> str:
+    return f"AGE_OK:{user_id}"
+
+
+def _media_key(user_id: int) -> str:
+    return f"{AGE_MEDIA_PREFIX}{user_id}"
+
+
+def _load_age_media(user_id: int) -> list[dict]:
+    raw = store.get_menu(_media_key(user_id)) or "[]"
+    try:
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return data
+    except Exception:
+        pass
+    return []
+
+
+def _save_age_media(user_id: int, items: list[dict]) -> None:
+    try:
+        store.set_menu(_media_key(user_id), json.dumps(items))
+    except Exception:
+        log.exception("Failed to save age media for %s", user_id)
+
+
+def _append_age_media(user_id: int, item: dict) -> None:
+    items = _load_age_media(user_id)
+    items.append(item)
+    _save_age_media(user_id, items)
+
+
+# Simple in-memory pending state for admin edits + age verify
+_pending_admin: dict[int, str] = {}
+_pending_age: dict[int, bool] = {}  # user_id -> waiting_for_media
+
+
+# ────────────── AGE VERIFY HELPERS ──────────────
+
+def is_age_verified(user_id: int | None) -> bool:
+    if not user_id:
+        return False
+    try:
+        return bool(store.get_menu(_age_key(user_id)))
+    except Exception:
+        return False
+
+
+def set_age_verified(user_id: int, username: str | None = None) -> None:
     """
-    Stores Roni portal texts by key:
-      menu, open_access, teaser, announce
-    Mongo doc: { "_id": key, "text": str, "updated_at": iso }
-    JSON fallback: { key: text }
-    """
-
-    def __init__(self, json_path: str):
-        self._lock = threading.RLock()
-        self._json_path = json_path
-        self._use_mongo = False
-        self._cache: Dict[str, str] = {}
-
-        if _MONGO_URL:
-            try:
-                from pymongo import MongoClient
-
-                self._mc = MongoClient(_MONGO_URL, serverSelectionTimeoutMS=3000)
-                self._mc.admin.command("ping")
-                self._col = self._mc[_MONGO_DB]["roni_portal_texts"]
-                self._use_mongo = True
-                log.info(
-                    "RoniPortalTextStore: Mongo OK db=%s coll=%s",
-                    _MONGO_DB,
-                    "roni_portal_texts",
-                )
-            except Exception as e:
-                log.warning(
-                    "RoniPortalTextStore: Mongo unavailable, falling back to JSON: %s",
-                    e,
-                )
-                self._use_mongo = False
-
-        if not self._use_mongo:
-            self._load_json()
-
-    # ---- JSON helpers ----
-
-    def _load_json(self) -> None:
-        try:
-            with open(self._json_path, "r", encoding="utf-8") as f:
-                self._cache = json.load(f)
-        except FileNotFoundError:
-            self._cache = {}
-        except Exception as e:
-            log.warning("RoniPortalTextStore: failed to load JSON: %s", e)
-            self._cache = {}
-
-    def _save_json(self) -> None:
-        tmp_path = self._json_path + ".tmp"
-        os.makedirs(os.path.dirname(self._json_path) or ".", exist_ok=True)
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(self._cache, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self._json_path)
-        except Exception as e:
-            log.warning("RoniPortalTextStore: failed to save JSON: %s", e)
-
-    # ---- Public API ----
-
-    def get(self, key: str, fallback: str) -> str:
-        with self._lock:
-            if self._use_mongo:
-                try:
-                    doc = self._col.find_one({"_id": key})
-                    if doc and isinstance(doc.get("text"), str):
-                        return doc["text"]
-                except Exception as e:
-                    log.warning("RoniPortalTextStore Mongo get failed: %s", e)
-
-            val = self._cache.get(key)
-            return val if isinstance(val, str) and val.strip() else fallback
-
-    def set(self, key: str, text: str) -> None:
-        now = datetime.utcnow().isoformat(timespec="seconds")
-        with self._lock:
-            if self._use_mongo:
-                try:
-                    self._col.update_one(
-                        {"_id": key},
-                        {"$set": {"text": text, "updated_at": now}},
-                        upsert=True,
-                    )
-                    return
-                except Exception as e:
-                    log.warning("RoniPortalTextStore Mongo set failed: %s", e)
-
-            self._cache[key] = text
-            self._save_json()
-
-
-roni_text_store = RoniPortalTextStore(_RONI_TEXT_PATH)
-
-
-def _get_portal_text(key: str, fallback: str) -> str:
-    return roni_text_store.get(key, fallback)
-
-
-def _set_portal_text(key: str, text: str) -> None:
-    roni_text_store.set(key, text)
-
-
-# ────────────── AgeVerifyStore (Mongo or JSON) ──────────────
-
-class AgeVerifyStore:
-    """
-    Stores age-verification per user.
-
-    record:
+    Store a JSON record for this user:
     {
-        "_id": user_id,
-        "username": str|None,
-        "status": "pending"|"approved"|"denied"|"more_info",
-        "first_seen": iso,
-        "last_update": iso,
-        "approved_at": iso|None,
-        "note": str|None,
-        "media_chat_id": int,
-        "media_message_id": int
+      "status": "ok",
+      "user_id": 123,
+      "username": "@name" or "Name",
+      "verified_at": "YYYY-MM-DD HH:MM UTC",
+      "note": "optional note"
     }
+    Also keeps an index of all verified IDs in AGE_INDEX_KEY.
     """
-
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
-        self._use_mongo = False
-        self._cache: Dict[str, Dict[str, Any]] = {}
-
-        if _MONGO_URL:
+    try:
+        # Preserve existing note if present
+        existing_raw = store.get_menu(_age_key(user_id)) or ""
+        note = ""
+        if existing_raw:
             try:
-                from pymongo import MongoClient
+                existing = json.loads(existing_raw)
+                if isinstance(existing, dict):
+                    note = existing.get("note", "") or ""
+            except Exception:
+                pass
 
-                self._mc = MongoClient(_MONGO_URL, serverSelectionTimeoutMS=3000)
-                self._mc.admin.command("ping")
-                self._col = self._mc[_MONGO_DB][_AGE_COLL]
-                self._col.create_index("status")
-                self._use_mongo = True
-                log.info(
-                    "AgeVerifyStore: Mongo OK db=%s coll=%s", _MONGO_DB, _AGE_COLL
-                )
-            except Exception as e:
-                log.warning(
-                    "AgeVerifyStore: Mongo unavailable, falling back to JSON: %s", e
-                )
-                self._use_mongo = False
+        verified_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        record = {
+            "status": "ok",
+            "user_id": user_id,
+            "username": username or "",
+            "verified_at": verified_at,
+            "note": note,
+        }
+        store.set_menu(_age_key(user_id), json.dumps(record))
 
-        if not self._use_mongo:
-            self._load_json()
+        # Update index
+        ids = _load_age_index()
+        if user_id not in ids:
+            ids.append(user_id)
+            _save_age_index(ids)
 
-    # ---- JSON helpers ----
+    except Exception:
+        log.exception("Failed to persist age verify state for %s", user_id)
 
-    def _load_json(self) -> None:
-        try:
-            with open(_JSON_PATH, "r", encoding="utf-8") as f:
-                self._cache = json.load(f)
-        except FileNotFoundError:
-            self._cache = {}
-        except Exception as e:
-            log.warning("AgeVerifyStore: failed to load JSON: %s", e)
-            self._cache = {}
 
-    def _save_json(self) -> None:
-        tmp_path = _JSON_PATH + ".tmp"
-        os.makedirs(os.path.dirname(_JSON_PATH) or ".", exist_ok=True)
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(self._cache, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, _JSON_PATH)
+def _load_age_record(user_id: int) -> dict:
+    raw = store.get_menu(_age_key(user_id)) or ""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
 
-    # ---- Public API ----
 
-    def upsert(self, user_id: int, **fields: Any) -> None:
-        uid = str(user_id)
-        now = datetime.utcnow().isoformat(timespec="seconds")
+def _save_age_record(user_id: int, record: dict) -> None:
+    try:
+        store.set_menu(_age_key(user_id), json.dumps(record))
+    except Exception:
+        log.exception("Failed to save age record for %s", user_id)
 
-        with self._lock:
-            if self._use_mongo:
-                try:
-                    update: Dict[str, Any] = {"$set": {**fields, "last_update": now}}
-                    update.setdefault("$setOnInsert", {})["first_seen"] = now
-                    self._col.update_one({"_id": user_id}, update, upsert=True)
-                    return
-                except Exception as e:
-                    log.warning("AgeVerifyStore Mongo upsert failed: %s", e)
 
-            rec = self._cache.get(uid, {})
-            if "first_seen" not in rec:
-                rec["first_seen"] = now
-            rec.update(fields)
-            rec["last_update"] = now
-            self._cache[uid] = rec
-            self._save_json()
+# ────────────── KEYBOARDS ──────────────
 
-    def get(self, user_id: int) -> Optional[Dict[str, Any]]:
-        uid = str(user_id)
-        with self._lock:
-            if self._use_mongo:
-                try:
-                    return self._col.find_one({"_id": user_id})
-                except Exception as e:
-                    log.warning("AgeVerifyStore Mongo get failed: %s", e)
-            rec = self._cache.get(uid)
-            if rec is not None:
-                rec = {**rec, "_id": int(uid)}
-            return rec
+def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
+    """
+    Build Roni's assistant keyboard.
+    If user_id == RONI_OWNER_ID, show the admin button too.
+    If user is age-verified, show Teaser button instead of Age Verify.
+    Owner bypasses age check for teaser.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
 
-    def list(self, status: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
-        with self._lock:
-            if self._use_mongo:
-                try:
-                    query: Dict[str, Any] = {}
-                    if status:
-                        query["status"] = status
-                    cur = (
-                        self._col.find(query)
-                        .sort("last_update", -1)
-                        .limit(int(limit))
-                    )
-                    return list(cur)
-                except Exception as e:
-                    log.warning("AgeVerifyStore Mongo list failed: %s", e)
+    # Roni’s Menu (backed by Mongo via menu_store)
+    rows.append([InlineKeyboardButton("📖 Roni’s Menu", callback_data="roni_portal:menu")])
 
-            vals = []
-            for uid, rec in self._cache.items():
-                rec_with_id = {**rec, "_id": int(uid)}
-                vals.append(rec_with_id)
-
-            if status:
-                vals = [v for v in vals if v.get("status") == status]
-
-            vals.sort(
-                key=lambda r: r.get("last_update")
-                or r.get("first_seen")
-                or "",
-                reverse=True,
+    # 💌 Book Roni → open Roni’s DMs (customer side)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "💌 Book Roni",
+                url=f"https://t.me/{RONI_USERNAME}",
             )
-            return vals[:limit]
+        ]
+    )
 
-
-age_store = AgeVerifyStore()
-
-# track who is currently sending age media
-PENDING_AGE_MEDIA: Dict[int, bool] = {}
-
-# admin edit state:
-#   admin_id -> {"kind": one of menu/open/announce/teaser}
-ADMIN_EDIT_STATE: Dict[int, Dict[str, Any]] = {}
-
-# age verification note state:
-#   admin_id -> target_user_id
-AGE_NOTE_STATE: Dict[int, int] = {}
-
-
-# ────────────── Helpers / keyboards ──────────────
-
-def _is_verified(user_id: int) -> bool:
-    rec = age_store.get(user_id)
-    return bool(rec and rec.get("status") == "approved")
-
-
-def _roni_main_keyboard(*, is_owner: bool, verified: bool) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = [
-        [InlineKeyboardButton("📖 Roni’s Menu", callback_data="roni_portal:menu")],
-        [InlineKeyboardButton("💌 Book Roni", url=f"https://t.me/{RONI_USERNAME}")],
-    ]
-
-    # Tip button logic – mirror panels.py behavior
-    if RONI_TIP_LINK:
+    # 💸 Pay / Tip Roni – use Stripe if set, otherwise “coming soon”
+    if TIP_RONI_LINK:
         rows.append(
-            [InlineKeyboardButton("💸 Pay / Tip Roni", url=RONI_TIP_LINK)]
+            [InlineKeyboardButton("💸 Pay / Tip Roni", url=TIP_RONI_LINK)]
         )
     else:
         rows.append(
@@ -332,23 +217,21 @@ def _roni_main_keyboard(*, is_owner: bool, verified: bool) -> InlineKeyboardMark
             ]
         )
 
-    rows.append([InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:open")])
-    rows.append([InlineKeyboardButton("📣 Announcements & Promos", callback_data="roni_portal:announce")])
+    # 🌸 Open Access – SFW/preview stuff, editable via admin
+    rows.append([InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:open_access")])
 
-    if not verified:
+    # Age gate vs teaser:
+    # Owner always sees teaser button (bypass), others need age verify
+    if user_id == RONI_OWNER_ID or (user_id and is_age_verified(user_id)):
         rows.append(
-            [InlineKeyboardButton("✅ Age Verify", callback_data="roni_portal:age")]
+            [InlineKeyboardButton("🔥 Teaser & Promo Channels", callback_data="roni_portal:teaser")]
         )
     else:
         rows.append(
-            [
-                InlineKeyboardButton(
-                    "🔥 Teaser & Promo Channels",
-                    callback_data="roni_portal:teaser",
-                )
-            ]
+            [InlineKeyboardButton("✅ Age Verify", callback_data="roni_portal:age")]
         )
 
+    # 😈 Models & Creators — currently just opens your DMs
     rows.append(
         [
             InlineKeyboardButton(
@@ -358,642 +241,878 @@ def _roni_main_keyboard(*, is_owner: bool, verified: bool) -> InlineKeyboardMark
         ]
     )
 
-    if is_owner:
+    # ⚙️ Roni Admin – only for you
+    if user_id == RONI_OWNER_ID:
         rows.append(
-            [InlineKeyboardButton("⚙️ Roni Admin", callback_data="roni_portal:admin")]
+            [InlineKeyboardButton("⚙️ Roni Admin", callback_data="roni_admin:open")]
         )
 
-    # no “Back to SuccuBot Menu” here – this portal is just for Roni
+    # Back to main SuccuBot menu (Sanctuary side)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "🏠 Back to SuccuBot Menu",
+                callback_data="panels:root",
+            )
+        ]
+    )
+
     return InlineKeyboardMarkup(rows)
 
 
-def _roni_admin_keyboard() -> InlineKeyboardMarkup:
+def _admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📖 Edit Roni Menu", callback_data="roni_portal:admin_edit_menu")],
-            [InlineKeyboardButton("🌸 Edit Open Access Text", callback_data="roni_portal:admin_edit_open")],
-            [InlineKeyboardButton("📣 Edit Announcements & Promos", callback_data="roni_portal:admin_edit_announce")],
-            [InlineKeyboardButton("🔥 Edit Teaser Text", callback_data="roni_portal:admin_edit_teaser")],
-            [InlineKeyboardButton("✅ Age-Verified List", callback_data="roni_portal:admin_age_list")],
-            [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home_owner")],
+            [InlineKeyboardButton("📖 Edit Roni Menu", callback_data="roni_admin:edit_menu")],
+            [InlineKeyboardButton("🌸 Edit Open Access", callback_data="roni_admin:edit_open")],
+            [InlineKeyboardButton("🔥 Edit Teaser/Promo Text", callback_data="roni_admin:edit_teaser")],
+            [InlineKeyboardButton("✅ Age-Verified List", callback_data="roni_admin:age_list")],
+            [InlineKeyboardButton("⬅ Back to Assistant", callback_data="roni_portal:home")],
         ]
     )
 
 
-def _welcome_text(verified: bool) -> str:
-    """
-    NEW copy for the assistant welcome, with different text depending
-    on whether the user is age-verified already.
-    """
-    if verified:
-        # already age verified
-        return (
-            "Hi cutie, I’m SuccuBot — Roni’s personal assistant. 💗\n"
-            "You’re already age verified, so feel free to dive in and enjoy everything Roni offers.\n"
-            "Use the buttons below to explore her menu, previews, and promos — and you can DM her directly any time with “💌 Book Roni”. 😈💌"
-        )
-    else:
-        # not yet verified
-        return (
-            "Hi cutie, I’m SuccuBot — Roni’s personal assistant. 💗\n"
-            "Use the buttons below to explore her menu, booking options, and more.\n"
-            "You can also DM Roni directly any time by tapping “💌 Book Roni”.\n\n"
-            "Before we go too far, you’ll need to Age Verify so Roni can keep her space 18+ only.\n"
-            "Once you’re verified, you’ll unlock her teaser & promo channels. 💕"
-        )
+def _age_verified_status_text(mention: str, uid: int) -> str:
+    rec = _load_age_record(uid)
+    approved_at = rec.get("verified_at", "unknown time")
+    note = rec.get("note")
+    base = (
+        "✅ <b>Age-Verified User</b>\n\n"
+        f"User: {mention}\n"
+        f"ID: <code>{uid}</code>\n"
+        f"Approved at: {approved_at}"
+    )
+    if note:
+        base += f"\n\n<b>Note:</b>\n{note}"
+    return base
 
 
-# ────────────── register(app) ──────────────
+def _age_verified_status_keyboard(uid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "📝 Add / Edit Note",
+                    callback_data=f"roni_admin:note:{uid}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "♻️ Remove AV Status",
+                    callback_data=f"roni_admin:age_remove:{uid}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅ Back to Age-Verified List",
+                    callback_data="roni_admin:age_list",
+                )
+            ],
+        ]
+    )
+
+
+# ────────────── REGISTER ──────────────
 
 def register(app: Client) -> None:
-    log.info("✅ handlers.roni_portal registered")
+    log.info(
+        "✅ handlers.roni_portal registered (owner=%s, bot=%s, roni=%s, tip_link=%s)",
+        RONI_OWNER_ID,
+        BOT_USERNAME,
+        RONI_USERNAME,
+        "set" if TIP_RONI_LINK else "missing",
+    )
 
-    # ── /roni_portal in your welcome channel (creates deep-link to assistant mode)
+    # ───────── /roni_portal command (for your welcome channel) ─────────
     @app.on_message(filters.command("roni_portal"))
     async def roni_portal_command(_, m: Message):
+        """
+        Run this in your welcome channel.
+        It replies with a button that opens DM with SuccuBot in assistant mode.
+        """
         start_link = f"https://t.me/{BOT_USERNAME}?start=roni_assistant"
+
         kb = InlineKeyboardMarkup(
             [[InlineKeyboardButton("💗 Open Roni’s Assistant", url=start_link)]]
         )
+
         await m.reply_text(
             "Welcome to Roni’s personal access channel.\n"
-            "Click the button below to use her personal assistant SuccuBot for booking, payments, and more. 💋",
+            "Click the button below to use my personal assistant SuccuBot for booking, "
+            "payments, and more. 💋",
             reply_markup=kb,
             disable_web_page_preview=True,
         )
 
-    # ── /start roni_assistant in private chat (assistant mode)
+    # ───────── /start roni_assistant in DM (assistant mode) ─────────
+    # group=-1 makes this run BEFORE your normal /start handler from panels
     @app.on_message(filters.private & filters.command("start"), group=-1)
     async def roni_assistant_entry(_, m: Message):
         if not m.text:
             return
+
         parts = m.text.split(maxsplit=1)
         param = parts[1].strip() if len(parts) > 1 else ""
-        if not param or not param.lower().startswith("roni_assistant"):
-            return
 
+        # Only handle /start roni_assistant
+        if not param or not param.lower().startswith("roni_assistant"):
+            return  # Let the normal /start handler handle everything else
+
+        # This IS our special assistant start – stop other /start handlers
         try:
             m.stop_propagation()
         except Exception:
             pass
 
-        u = m.from_user
-        user_id = u.id if u else 0
-        is_owner = user_id == OWNER_ID
-        verified = _is_verified(user_id)
-        kb = _roni_main_keyboard(is_owner=is_owner, verified=verified)
+        user_id = m.from_user.id if m.from_user else None
+        kb = _roni_main_keyboard(user_id)
 
         await m.reply_text(
-            _welcome_text(verified),
+            "Welcome to Roni’s personal assistant. 💗\n"
+            "Use the buttons below to explore her menu, booking options, and more.\n"
+            "Some features are still being built, so you might see 'coming soon' for now. 💕",
             reply_markup=kb,
             disable_web_page_preview=True,
         )
 
-    # ── navigation back to home
-    @app.on_callback_query(filters.regex(r"^roni_portal:home_owner$"))
-    async def roni_home_owner_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id if cq.from_user else 0
-        verified = _is_verified(user_id)
-        kb = _roni_main_keyboard(is_owner=(user_id == OWNER_ID), verified=verified)
-        await cq.message.edit_text(
-            _welcome_text(verified),
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^roni_portal:home$"))
-    async def roni_home_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id if cq.from_user else 0
-        verified = _is_verified(user_id)
-        kb = _roni_main_keyboard(is_owner=(user_id == OWNER_ID), verified=verified)
-        await cq.message.edit_text(
-            _welcome_text(verified),
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
-    # ── Roni menu / open access / announcements / teaser views
+    # ───────── Roni’s Menu (reads from *RoniPersonalMenu* key) ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:menu$"))
     async def roni_menu_cb(_, cq: CallbackQuery):
-        text = _get_portal_text(
-            RONI_MENU_KEY,
-            "Roni hasn’t set up her personal menu yet.\n"
-            "She can do it from the ⚙ Roni Admin button. 💕",
-        )
+        menu_text = store.get_menu(RONI_MENU_KEY)
+
+        if menu_text:
+            text = f"📖 <b>Roni’s Menu</b>\n\n{menu_text}"
+        else:
+            text = (
+                "📖 <b>Roni’s Menu</b>\n\n"
+                "Roni hasn’t set up her personal menu yet.\n"
+                "She can do it from the ⚙️ Roni Admin button. 💕"
+            )
+
         kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")]]
+            [
+                [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
+                [InlineKeyboardButton("🏠 Back to SuccuBot Menu", callback_data="panels:root")],
+            ]
         )
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer()
+
+    # ───────── Back to main assistant menu ─────────
+    @app.on_callback_query(filters.regex(r"^roni_portal:home$"))
+    async def roni_home_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id if cq.from_user else None
+        kb = _roni_main_keyboard(user_id)
         await cq.message.edit_text(
-            f"📖 <b>Roni’s Menu</b>\n\n{text}",
+            "Welcome to Roni’s personal assistant. 💗\n"
+            "Use the buttons below to explore her menu, booking options, and more.",
             reply_markup=kb,
             disable_web_page_preview=True,
         )
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^roni_portal:open$"))
-    async def open_access_cb(_, cq: CallbackQuery):
-        text = _get_portal_text(
-            OPEN_ACCESS_KEY,
-            "Roni hasn’t added her open-access info yet. 💕",
+    # ───────── Tip coming soon alert (if no Stripe link set) ─────────
+    @app.on_callback_query(filters.regex(r"^roni_portal:tip_coming$"))
+    async def roni_tip_coming_cb(_, cq: CallbackQuery):
+        await cq.answer("Roni’s Stripe tip link is coming soon 💕", show_alert=True)
+
+    # ───────── OPEN ACCESS: show SFW/preview text ─────────
+    @app.on_callback_query(filters.regex(r"^roni_portal:open_access$"))
+    async def roni_open_access_cb(_, cq: CallbackQuery):
+        text = store.get_menu(OPEN_ACCESS_KEY) or (
+            "🌸 <b>Open Access</b>\n\n"
+            "Roni will add some safe-to-view goodies and general info here soon. 💕"
         )
+
         kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")]]
+            [
+                [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
+                [InlineKeyboardButton("🏠 Back to SuccuBot Menu", callback_data="panels:root")],
+            ]
         )
-        await cq.message.edit_text(
-            f"🌸 <b>Open Access</b>\n\n{text}",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
+
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^roni_portal:announce$"))
-    async def announce_cb(_, cq: CallbackQuery):
-        text = _get_portal_text(
-            ANNOUNCE_KEY,
-            "Roni hasn’t posted any announcements or promos yet. 💕",
-        )
-        kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")]]
-        )
-        await cq.message.edit_text(
-            f"📣 <b>Announcements & Promos</b>\n\n{text}",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
+    # ───────── TEASER & PROMO CHANNELS (gated) ─────────
     @app.on_callback_query(filters.regex(r"^roni_portal:teaser$"))
-    async def teaser_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id if cq.from_user else 0
-        if not _is_verified(user_id):
+    async def roni_teaser_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id if cq.from_user else None
+
+        # Owner bypass; others must be verified
+        if user_id != RONI_OWNER_ID and not (user_id and is_age_verified(user_id)):
             await cq.answer(
-                "You’ll unlock the teaser & promo channels after age verification. 💕",
+                "You’ll need to complete age verification before seeing Roni’s teaser channels. 💕",
                 show_alert=True,
             )
             return
 
-        text = _get_portal_text(
-            TEASER_KEY,
-            "Roni hasn’t added her teaser / promo channel list yet. 💕",
-        )
-        kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")]]
-        )
-        await cq.message.edit_text(
-            f"🔥 <b>Teaser & Promo Channels</b>\n\n{text}",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
-    # ── Tip coming soon fallback (only used if no TIP_RONI_LINK is set)
-    @app.on_callback_query(filters.regex(r"^roni_portal:tip_coming$"))
-    async def roni_tip_coming_cb(_, cq: CallbackQuery):
-        await cq.answer("💸 Tip support is coming soon!", show_alert=True)
-
-    # ── Roni Admin entry
-    @app.on_callback_query(filters.regex(r"^roni_portal:admin$"))
-    async def roni_admin_cb(_, cq: CallbackQuery):
-        if cq.from_user.id != OWNER_ID:
-            await cq.answer("Admin-only. 💕", show_alert=True)
-            return
-        ADMIN_EDIT_STATE.pop(OWNER_ID, None)
-        await cq.message.edit_text(
-            "⚙️ <b>Roni Admin Panel</b>\nChoose what you want to edit or review.",
-            reply_markup=_roni_admin_keyboard(),
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
-    # ── Admin edit flows (menu / open / announce / teaser)
-    async def _start_admin_edit(cq: CallbackQuery, kind: str, label: str):
-        if cq.from_user.id != OWNER_ID:
-            await cq.answer("Admin-only. 💕", show_alert=True)
-            return
-        ADMIN_EDIT_STATE[OWNER_ID] = {"kind": kind}
-        await cq.message.edit_text(
-            f"✏️ Send the new text for <b>{label}</b> in one message.\n\n"
-            "When you’re done, I’ll save it and update the button.",
-            disable_web_page_preview=True,
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("❌ Cancel", callback_data="roni_portal:admin_cancel")]]
-            ),
-        )
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^roni_portal:admin_edit_menu$"))
-    async def admin_edit_menu_cb(_, cq: CallbackQuery):
-        await _start_admin_edit(cq, "menu", "Roni’s Menu")
-
-    @app.on_callback_query(filters.regex(r"^roni_portal:admin_edit_open$"))
-    async def admin_edit_open_cb(_, cq: CallbackQuery):
-        await _start_admin_edit(cq, "open_access", "Open Access")
-
-    @app.on_callback_query(filters.regex(r"^roni_portal:admin_edit_announce$"))
-    async def admin_edit_announce_cb(_, cq: CallbackQuery):
-        await _start_admin_edit(cq, "announce", "Announcements & Promos")
-
-    @app.on_callback_query(filters.regex(r"^roni_portal:admin_edit_teaser$"))
-    async def admin_edit_teaser_cb(_, cq: CallbackQuery):
-        await _start_admin_edit(cq, "teaser", "Teaser & Promo Channels")
-
-    @app.on_callback_query(filters.regex(r"^roni_portal:admin_cancel$"))
-    async def admin_cancel_cb(_, cq: CallbackQuery):
-        if cq.from_user.id == OWNER_ID:
-            ADMIN_EDIT_STATE.pop(OWNER_ID, None)
-        await cq.answer("Canceled.", show_alert=False)
-        await roni_home_owner_cb(_, cq)
-
-    # receive text from you while in admin edit mode OR note mode
-    @app.on_message(filters.private & filters.text)
-    async def admin_text_router(_, m: Message):
-        if m.from_user.id != OWNER_ID:
-            return
-
-        # Note flow first
-        target_user_id = AGE_NOTE_STATE.get(m.from_user.id)
-        if target_user_id:
-            note_text = m.text.strip()
-            if not note_text:
-                await m.reply_text("That message was empty, send your note again. 💕")
-                return
-
-            age_store.upsert(int(target_user_id), note=note_text)
-            AGE_NOTE_STATE.pop(m.from_user.id, None)
-
-            await m.reply_text(
-                f"✅ Saved note for user <code>{target_user_id}</code>.\n"
-                "This will be stored with their age verification record.",
-                disable_web_page_preview=True,
-                parse_mode="html",
-            )
-            return
-
-        # Admin edit text flow
-        state = ADMIN_EDIT_STATE.get(OWNER_ID)
-        if not state:
-            return
-
-        kind = state.get("kind")
-        txt = m.text.strip()
-        if not txt:
-            await m.reply_text("That message was empty, send your new text again. 💕")
-            return
-
-        if kind == "menu":
-            _set_portal_text(RONI_MENU_KEY, txt)
-            label = "Roni’s Menu"
-        elif kind == "open_access":
-            _set_portal_text(OPEN_ACCESS_KEY, txt)
-            label = "Open Access"
-        elif kind == "announce":
-            _set_portal_text(ANNOUNCE_KEY, txt)
-            label = "Announcements & Promos"
-        elif kind == "teaser":
-            _set_portal_text(TEASER_KEY, txt)
-            label = "Teaser & Promo Channels"
-        else:
-            return
-
-        ADMIN_EDIT_STATE.pop(OWNER_ID, None)
-        await m.reply_text(
-            f"✅ Saved your new text for <b>{label}</b> and updated the button.\n"
-            "This will survive restarts. 💕",
-            disable_web_page_preview=True,
-        )
-
-    # ── Age Verify: user taps button
-    @app.on_callback_query(filters.regex(r"^roni_portal:age$"))
-    async def age_verify_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        PENDING_AGE_MEDIA[user_id] = True
-
-        txt = (
-            "🧾 <b>Age Verification</b>\n\n"
-            "Please send a clear photo of you touching your nose with a fork, "
-            "or with your pinky or thumb.\n\n"
-            "If you look extra fresh-faced, Roni may ask for a second picture "
-            "showing your face next to your ID (only your name and birthday need to be visible).\n\n"
-            "No minors. No exceptions. 💅"
-        )
-        await cq.message.edit_text(
-            txt,
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")]]
-            ),
-            disable_web_page_preview=True,
-        )
-        await cq.answer("Send your verification photo here. 💕")
-
-    # ── Age Verify: user sends media while pending
-    @app.on_message(filters.private & (filters.photo | filters.video | filters.animation))
-    async def handle_age_media(_, m: Message):
-        user = m.from_user
-        if not user:
-            return
-        user_id = user.id
-        if not PENDING_AGE_MEDIA.get(user_id):
-            return
-
-        PENDING_AGE_MEDIA.pop(user_id, None)
-
-        # forward to you
-        fwd = await m.forward(OWNER_ID)
-        username = f"@{user.username}" if user.username else "(no @username)"
-
-        age_store.upsert(
-            user_id,
-            username=user.username,
-            status="pending",
-            media_chat_id=fwd.chat.id,
-            media_message_id=fwd.id,
-            approved_at=None,
+        teaser_text = store.get_menu(TEASER_TEXT_KEY) or (
+            os.getenv("RONI_TEASER_CHANNELS_TEXT")
+            or "Roni will add her teaser & promo channels here soon. 💕"
         )
 
         kb = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("✅ Approve", callback_data=f"roni_portal:age_approve:{user_id}")],
-                [InlineKeyboardButton("🪪 Need more info", callback_data=f"roni_portal:age_more:{user_id}")],
-                [InlineKeyboardButton("⛔ Deny", callback_data=f"roni_portal:age_deny:{user_id}")],
-                [InlineKeyboardButton("📝 Add / Edit Note", callback_data=f"roni_portal:age_note:{user_id}")],
-                [InlineKeyboardButton("🔄 Remove AV Status", callback_data=f"roni_portal:age_remove:{user_id}")],
+                [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
+                [InlineKeyboardButton("🏠 Back to SuccuBot Menu", callback_data="panels:root")],
             ]
         )
 
-        await app.send_message(
-            OWNER_ID,
-            (
-                "📩 <b>Age Verification Received</b>\n\n"
-                f"From: {username}\n"
-                f"User ID: <code>{user_id}</code>\n\n"
-                "Their media is forwarded above. Review it and choose an action:"
+        await cq.message.edit_text(teaser_text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer()
+
+    # ───────── AGE VERIFY: start flow ─────────
+    @app.on_callback_query(filters.regex(r"^roni_portal:age$"))
+    async def roni_age_start_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id if cq.from_user else None
+        if not user_id:
+            await cq.answer()
+            return
+
+        if is_age_verified(user_id):
+            await cq.answer("You’re already age verified, naughty one. 💕", show_alert=True)
+            return
+
+        # Mark that we’re waiting for a selfie from this user
+        _pending_age[user_id] = True
+
+        text = (
+            "Hi cutie, I just need to confirm you’re 18+ so Roni can keep things safe and adults-only. 💕\n\n"
+            "Please send one clear photo or short video in this chat:\n"
+            "• Touching your nose with a fork, or\n"
+            "• Touching your nose with your pinky finger\n\n"
+            "If you look extra fresh-faced, Roni might ask for a second photo with your ID "
+            "showing your face and birth date.\n\n"
+            "No minors. Sending underage content will get you blocked and removed. 💜"
+        )
+
+        await cq.message.edit_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")]]
             ),
+            disable_web_page_preview=True,
+        )
+        await cq.answer()
+
+    # ───────── AGE VERIFY: capture selfie (photo/video) ─────────
+    # group=-2 so it runs early but after admin text-capture is checked
+    @app.on_message(filters.private & (filters.photo | filters.video), group=-2)
+    async def roni_age_capture(_, m: Message):
+        if not m.from_user:
+            return
+        user_id = m.from_user.id
+
+        if not _pending_age.get(user_id):
+            return  # not in age-verify mode
+
+        # Stop other handlers from touching this media
+        try:
+            m.stop_propagation()
+        except Exception:
+            pass
+
+        _pending_age.pop(user_id, None)
+
+        username = m.from_user.username
+        mention = f"@{username}" if username else m.from_user.first_name or "Someone"
+
+        # Log media (file_id + type + time)
+        media_type = "photo" if m.photo else "video"
+        file_id = ""
+        if m.photo:
+            file_id = m.photo[-1].file_id
+        elif m.video:
+            file_id = m.video.file_id
+
+        if file_id:
+            _append_age_media(
+                user_id,
+                {
+                    "type": media_type,
+                    "file_id": file_id,
+                    "saved_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+                },
+            )
+
+        # 1️⃣ Copy media to Roni with context caption
+        try:
+            await m.copy(
+                chat_id=RONI_OWNER_ID,
+                caption=(
+                    "📩 <b>Age Verification Media</b>\n\n"
+                    f"From: {mention}\n"
+                    f"User ID: <code>{user_id}</code>"
+                ),
+            )
+        except Exception:
+            log.exception("Failed to copy age verify media for %s", user_id)
+
+        # 2️⃣ Send identification message + buttons to Roni
+        id_text = (
+            "📩 <b>Age Verification Received</b>\n\n"
+            f"From: {mention}\n"
+            f"User ID: <code>{user_id}</code>\n\n"
+            "Their media is above. Review it and choose an action:"
+        )
+
+        controls = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"age:approve:{user_id}"),
+                ],
+                [
+                    InlineKeyboardButton("🪪 Need more info", callback_data=f"age:more:{user_id}"),
+                ],
+                [
+                    InlineKeyboardButton("⛔ Deny", callback_data=f"age:deny:{user_id}"),
+                ],
+            ]
+        )
+
+        await _.send_message(
+            RONI_OWNER_ID,
+            id_text,
+            reply_markup=controls,
+            disable_web_page_preview=True,
+        )
+
+        # 3️⃣ Confirm to the user
+        await m.reply_text(
+            "Thanks! I’ve sent this to Roni for review. 💕\n"
+            "You’ll get a message as soon as she approves you or asks for more info.",
+            disable_web_page_preview=True,
+        )
+
+    # ───────── AGE VERIFY: owner actions (approve / more info / deny) ─────────
+    @app.on_callback_query(filters.regex(r"^age:(approve|more|deny):(\d+)$"))
+    async def roni_age_action_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer("Only Roni can do that 💜", show_alert=True)
+            return
+
+        action, user_id_str = cq.data.split(":", 2)[1:]
+        target_id = int(user_id_str)
+
+        # Prepare basic user display for admin card
+        username = ""
+        mention = f"ID {target_id}"
+        try:
+            user = await _.get_users(target_id)
+            if user.username:
+                username = f"@{user.username}"
+            else:
+                username = user.first_name or ""
+            if username:
+                mention = username
+        except Exception:
+            log.exception("Failed to fetch user for age action")
+
+        # Remove the original button card to "close" it"
+        try:
+            await cq.message.delete()
+        except Exception:
+            try:
+                await cq.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+
+        if action == "approve":
+            set_age_verified(target_id, username=username)
+
+            # Tell the user + refresh their assistant keyboard
+            kb_user = _roni_main_keyboard(target_id)
+            await _.send_message(
+                target_id,
+                "You’re all set — Roni has verified you as 18+ ✅\n\n"
+                "You now have access to her teaser & promo options. 💕",
+                reply_markup=kb_user,
+                disable_web_page_preview=True,
+            )
+
+            # New status card for you with add/edit note + remove AV + back to list
+            status_text = _age_verified_status_text(mention, target_id)
+            await _.send_message(
+                RONI_OWNER_ID,
+                status_text,
+                reply_markup=_age_verified_status_keyboard(target_id),
+                disable_web_page_preview=True,
+            )
+
+            await cq.answer("Marked as age verified ✅", show_alert=True)
+
+        elif action == "more":
+            # Ask user for ID / extra info
+            await _.send_message(
+                target_id,
+                "Hey, Roni just needs a little more info to finish verifying you. 💕\n\n"
+                "Please send one more photo in this chat:\n"
+                "• Your face + your photo ID visible\n"
+                "• Only your face and birth date need to be readable — you can cover other details.\n\n"
+                "No minors. If your ID shows under 18, you’ll be removed.",
+                disable_web_page_preview=True,
+            )
+
+            _pending_age[target_id] = True  # wait for another media message
+
+            await _.send_message(
+                RONI_OWNER_ID,
+                "📩 <b>Age Verification Processed</b>\n\n"
+                f"Action: 🪪 <b>Requested More Info</b>\n"
+                f"User: {mention}\n"
+                f"User ID: <code>{target_id}</code>\n\n"
+                "They’ve been asked to send an additional photo. You can still add a note from the list view if needed. 💜",
+                disable_web_page_preview=True,
+            )
+
+            await cq.answer("Asked them for more info 🪪", show_alert=True)
+
+        elif action == "deny":
+            # Not verified – let user know
+            await _.send_message(
+                target_id,
+                "Roni wasn’t able to verify you as 18+, so she can’t give access to her explicit content. 💜\n\n"
+                "If you believe this is a mistake, you can reach out politely and ask what’s needed to verify.",
+                disable_web_page_preview=True,
+            )
+
+            await _.send_message(
+                RONI_OWNER_ID,
+                "📩 <b>Age Verification Processed</b>\n\n"
+                f"Action: ⛔ <b>Denied</b>\n"
+                f"User: {mention}\n"
+                f"User ID: <code>{target_id}</code>\n\n"
+                "You can leave a note on why this was denied from the age-verified list view if you want to remember for later. 💜",
+                disable_web_page_preview=True,
+            )
+
+            await cq.answer("Marked as not verified ⛔", show_alert=True)
+
+    # ───────── AGE VERIFY: close status card (still here for old cards) ─────────
+    @app.on_callback_query(filters.regex(r"^age:close$"))
+    async def roni_age_close_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer("Only Roni can do that 💜", show_alert=True)
+            return
+
+        try:
+            await cq.message.delete()
+        except Exception:
+            try:
+                await cq.message.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+
+        await cq.answer("Closed ✔")
+
+    # ───────── ADMIN: open admin panel (button-only) ─────────
+    @app.on_callback_query(filters.regex(r"^roni_admin:open$"))
+    async def roni_admin_open_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
+
+        current = store.get_menu(RONI_MENU_KEY) or "No menu set yet."
+
+        await cq.message.edit_text(
+            "💜 <b>Roni Admin Panel</b>\n\n"
+            "This controls what shows under “📖 Roni’s Menu” in your assistant, "
+            "your Open Access text, teaser/promo text, and lets you review age verification.\n\n"
+            f"<b>Current menu preview:</b>\n\n{current}",
+            reply_markup=_admin_keyboard(),
+            disable_web_page_preview=True,
+        )
+        await cq.answer()
+
+    # ───────── ADMIN: view age-verified list ─────────
+    @app.on_callback_query(filters.regex(r"^roni_admin:age_list$"))
+    async def roni_admin_age_list_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer()
+            return
+
+        ids = _load_age_index()
+        if not ids:
+            text = (
+                "💜 <b>Age-Verified Users</b>\n\n"
+                "No one has been marked as age verified yet."
+            )
+            kb = _admin_keyboard()
+            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+            await cq.answer()
+            return
+
+        lines = ["💜 <b>Age-Verified Users</b>\n"]
+        note_buttons: list[list[InlineKeyboardButton]] = []
+
+        # Limit how many we list in one message to avoid flooding
+        max_list = 25
+        for uid in ids[:max_list]:
+            rec = _load_age_record(uid)
+            uname = rec.get("username") or f"ID {uid}"
+            verified_at = rec.get("verified_at", "unknown time")
+            note = rec.get("note", "")
+            line = f"• {uname} (ID: <code>{uid}</code>) — verified {verified_at}"
+            if note:
+                line += f"\n  Note: {note}"
+            lines.append(line)
+            note_buttons.append(
+                [InlineKeyboardButton(f"📝 Note for {uid}", callback_data=f"roni_admin:note:{uid}")]
+            )
+
+        if len(ids) > max_list:
+            lines.append(f"\n…and {len(ids) - max_list} more.")
+
+        text = "\n".join(lines)
+
+        # Add back button row at the bottom
+        note_buttons.append(
+            [InlineKeyboardButton("⬅ Back to Admin", callback_data="roni_admin:open")]
+        )
+
+        kb = InlineKeyboardMarkup(note_buttons)
+
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer()
+
+    # ───────── ADMIN: start note edit for specific user ─────────
+    @app.on_callback_query(filters.regex(r"^roni_admin:note:(\d+)$"))
+    async def roni_admin_note_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer()
+            return
+
+        parts = cq.data.split(":")
+        target_id = int(parts[-1])
+
+        _pending_admin[cq.from_user.id] = f"note:{target_id}"
+
+        rec = _load_age_record(target_id)
+        existing_note = rec.get("note", "") or "None set."
+
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("❌ Cancel", callback_data="roni_admin:cancel")],
+            ]
+        )
+
+        await cq.message.edit_text(
+            f"📝 Editing note for user ID <code>{target_id}</code>.\n\n"
+            f"Current note:\n{existing_note}\n\n"
+            "Send a new note in one message. It will replace the existing note.",
             reply_markup=kb,
             disable_web_page_preview=True,
         )
-
-        await m.reply_text(
-            "💕 Thanks! Roni will review your verification and get back to you soon.",
-            disable_web_page_preview=True,
-        )
-
-    # helpers for admin decisions
-    async def _ensure_owner(cq: CallbackQuery) -> bool:
-        if cq.from_user.id != OWNER_ID:
-            await cq.answer("Admin-only. 💕", show_alert=True)
-            return False
-        return True
-
-    async def _age_decision_header(user_id: int, decision: str) -> str:
-        rec = age_store.get(user_id)
-        uname = rec.get("username") if rec else None
-        uname = f"@{uname}" if uname else "(no @username)"
-        return f"{decision} for {uname} (ID: <code>{user_id}</code>)."
-
-    @app.on_callback_query(filters.regex(r"^roni_portal:age_approve:(\d+)$"))
-    async def age_approve_cb(_, cq: CallbackQuery):
-        if not await _ensure_owner(cq):
-            return
-        user_id = int(cq.data.split(":")[-1])
-        age_store.upsert(
-            user_id,
-            status="approved",
-            approved_at=datetime.utcnow().isoformat(timespec="seconds"),
-        )
-
-        # notify user
-        try:
-            await app.send_message(
-                user_id,
-                "✅ You’re age-verified for Roni’s assistant.\n"
-                "You now have access to her teaser & promo channels whenever she shares them. 💕",
-            )
-        except Exception:
-            pass
-
-        # update admin message & close buttons
-        try:
-            await cq.message.edit_text(
-                "✅ Age verification approved.\n"
-                f"{await _age_decision_header(user_id, 'Approved')}",
-                disable_web_page_preview=True,
-            )
-        except Exception:
-            pass
-        await cq.answer("Approved. 💕")
-
-    @app.on_callback_query(filters.regex(r"^roni_portal:age_deny:(\d+)$"))
-    async def age_deny_cb(_, cq: CallbackQuery):
-        if not await _ensure_owner(cq):
-            return
-        user_id = int(cq.data.split(":")[-1])
-        age_store.upsert(user_id, status="denied", approved_at=None)
-
-        try:
-            await app.send_message(
-                user_id,
-                "⛔ Your age verification was not approved.\n"
-                "If this is a mistake, you can contact Roni and ask if she’s open to reviewing again.",
-            )
-        except Exception:
-            pass
-
-        try:
-            await cq.message.edit_text(
-                "⛔ Age verification denied.\n"
-                f"{await _age_decision_header(user_id, 'Denied')}",
-                disable_web_page_preview=True,
-            )
-        except Exception:
-            pass
-        await cq.answer("Denied.", show_alert=False)
-
-    @app.on_callback_query(filters.regex(r"^roni_portal:age_more:(\d+)$"))
-    async def age_more_info_cb(_, cq: CallbackQuery):
-        if not await _ensure_owner(cq):
-            return
-        user_id = int(cq.data.split(":")[-1])
-        age_store.upsert(user_id, status="more_info")
-
-        # message user asking for more info
-        try:
-            await app.send_message(
-                user_id,
-                "🪪 Roni needs a little more info to verify you.\n\n"
-                "Please send a selfie holding your ID next to your face.\n"
-                "Only your <b>name</b> and <b>birthday</b> need to be visible.\n\n"
-                "You can send it here, and I’ll forward it to her.",
-            )
-        except Exception:
-            pass
-
-        try:
-            await cq.message.edit_text(
-                "🪪 Marked as 'Need more info'.\n"
-                f"{await _age_decision_header(user_id, 'More info requested')}",
-                disable_web_page_preview=True,
-            )
-        except Exception:
-            pass
-        await cq.answer("Asked them for more info. 💕")
-
-    # ── Admin: Remove age-verified status explicitly
-    @app.on_callback_query(filters.regex(r"^roni_portal:age_remove:(\d+)$"))
-    async def age_remove_cb(_, cq: CallbackQuery):
-        if not await _ensure_owner(cq):
-            return
-        user_id = int(cq.data.split(":")[-1])
-
-        # Set them to denied and clear approved_at
-        age_store.upsert(user_id, status="denied", approved_at=None)
-
-        # Optionally notify user their access has been revoked
-        try:
-            await app.send_message(
-                user_id,
-                "⚠️ Your age-verified access to Roni’s assistant has been removed.\n"
-                "If you think this is a mistake, you can message Roni directly.",
-            )
-        except Exception:
-            pass
-
-        try:
-            await cq.message.edit_text(
-                "🔄 Age-verified status removed for this user.\n"
-                f"{await _age_decision_header(user_id, 'Access removed')}",
-                disable_web_page_preview=True,
-            )
-        except Exception:
-            pass
-
-        await cq.answer("Age-verified status removed.", show_alert=False)
-
-    # ── Admin: Add / Edit note for an age verification record
-    @app.on_callback_query(filters.regex(r"^roni_portal:age_note:(\d+)$"))
-    async def age_note_cb(_, cq: CallbackQuery):
-        if not await _ensure_owner(cq):
-            return
-        user_id = int(cq.data.split(":")[-1])
-
-        AGE_NOTE_STATE[cq.from_user.id] = user_id
-
         await cq.answer()
-        await cq.message.reply_text(
-            f"📝 Send the note you want to attach to this user.\n\n"
-            f"Target ID: <code>{user_id}</code>\n\n"
-            "Whatever you send next (in this chat) will be saved as their note.",
-            disable_web_page_preview=True,
-            parse_mode="html",
-        )
 
-    # ── Admin age-verified list
-    @app.on_callback_query(filters.regex(r"^roni_portal:admin_age_list$"))
-    async def admin_age_list_cb(_, cq: CallbackQuery):
-        if not await _ensure_owner(cq):
+    # ───────── ADMIN: remove AV status ─────────
+    @app.on_callback_query(filters.regex(r"^roni_admin:age_remove:(\d+)$"))
+    async def roni_admin_age_remove_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer()
             return
 
-        recs = age_store.list(status="approved", limit=30)
+        parts = cq.data.split(":")
+        target_id = int(parts[-1])
 
-        if not recs:
-            txt = "No one is age-verified yet. 💕"
-            kb = _roni_admin_keyboard()
-        else:
-            lines = ["✅ <b>Age-Verified Users</b> (latest 30)\n"]
-            buttons: List[List[InlineKeyboardButton]] = []
+        # Remove from record + index
+        store.set_menu(_age_key(target_id), "")
+        ids = _load_age_index()
+        ids = [i for i in ids if i != target_id]
+        _save_age_index(ids)
 
-            for r in recs:
-                uid = r.get("_id")
-                uname = r.get("username")
-                uname_disp = f"@{uname}" if uname else "(no @username)"
-                approved_at = r.get("approved_at") or r.get("last_update")
-                note = r.get("note")
+        # Notify user that their AV was removed
+        try:
+            await _.send_message(
+                target_id,
+                "Roni has removed your age-verified status, so you no longer have access to her explicit content. 💜\n\n"
+                "If you believe this is a mistake, you can reach out politely to ask about re-verifying.",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            log.exception("Failed to notify user about AV removal for %s", target_id)
 
-                if note:
-                    short_note = note
-                    if len(short_note) > 60:
-                        short_note = short_note[:57] + "..."
-                    lines.append(
-                        f"• {uname_disp} — <code>{uid}</code> — {approved_at}\n"
-                        f"  📝 {short_note}"
-                    )
-                else:
-                    lines.append(
-                        f"• {uname_disp} — <code>{uid}</code> — {approved_at}"
-                    )
-
-                # Up to 10 quick-select buttons for managing specific users
-                if len(buttons) < 10 and uid is not None:
-                    label = uname_disp if len(uname_disp) <= 25 else f"ID {uid}"
-                    buttons.append(
+        # Update this card
+        try:
+            await cq.message.edit_text(
+                "❌ <b>Age Verification Status Removed</b>\n\n"
+                f"User ID: <code>{target_id}</code>\n\n"
+                "They have been removed from the age-verified list.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
                         [
                             InlineKeyboardButton(
-                                label,
-                                callback_data=f"roni_portal:age_manage:{uid}",
+                                "⬅ Back to Age-Verified List",
+                                callback_data="roni_admin:age_list",
                             )
                         ]
-                    )
-
-            # Add back button at bottom
-            buttons.append(
-                [InlineKeyboardButton("⬅ Back to Admin", callback_data="roni_portal:admin")]
+                    ]
+                ),
+                disable_web_page_preview=True,
             )
+        except Exception:
+            log.exception("Failed to edit message after AV removal for %s", target_id)
 
-            txt = "\n".join(lines)
-            kb = InlineKeyboardMarkup(buttons)
+        await cq.answer("Removed age-verified status ❌", show_alert=True)
 
-        await cq.message.edit_text(
-            txt,
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
-    # ── Admin: manage a specific age-verified user from the list
-    @app.on_callback_query(filters.regex(r"^roni_portal:age_manage:(\d+)$"))
-    async def admin_age_manage_cb(_, cq: CallbackQuery):
-        if not await _ensure_owner(cq):
-            return
-        user_id = int(cq.data.split(":")[-1])
-
-        rec = age_store.get(user_id)
-        if not rec:
-            await cq.answer("No age-verification record found for this user.", show_alert=True)
+    # ───────── ADMIN: start editing menu ─────────
+    @app.on_callback_query(filters.regex(r"^roni_admin:edit_menu$"))
+    async def roni_admin_edit_menu_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer("Only Roni can edit this 💜", show_alert=True)
             return
 
-        uname = rec.get("username")
-        uname_disp = f"@{uname}" if uname else "(no @username)"
-        approved_at = rec.get("approved_at") or rec.get("last_update")
-        note = rec.get("note")
-
-        lines = [
-            "✅ <b>Age-Verified User</b>",
-            f"User: {uname_disp}",
-            f"ID: <code>{user_id}</code>",
-        ]
-        if approved_at:
-            lines.append(f"Approved at: {approved_at}")
-        if note:
-            if len(note) > 500:
-                short_note = note[:500] + "…"
-            else:
-                short_note = note
-            lines.append("\n📝 <b>Current note:</b>\n" + short_note)
-
-        txt = "\n".join(lines)
+        _pending_admin[cq.from_user.id] = "menu"
 
         kb = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("📝 Add / Edit Note", callback_data=f"roni_portal:age_note:{user_id}")],
-                [InlineKeyboardButton("🔄 Remove AV Status", callback_data=f"roni_portal:age_remove:{user_id}")],
-                [InlineKeyboardButton("⬅ Back to Age-Verified List", callback_data="roni_portal:admin_age_list")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="roni_admin:cancel")],
             ]
         )
 
         await cq.message.edit_text(
-            txt,
+            "📖 Send me your new menu text in one message.\n\n"
+            "I’ll save it and your assistant will show it under “📖 Roni’s Menu”.",
             reply_markup=kb,
             disable_web_page_preview=True,
         )
         await cq.answer()
+
+    # ───────── ADMIN: start editing Open Access ─────────
+    @app.on_callback_query(filters.regex(r"^roni_admin:edit_open$"))
+    async def roni_admin_edit_open_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer("Only Roni can edit this 💜", show_alert=True)
+            return
+
+        _pending_admin[cq.from_user.id] = "open_access"
+
+        current = store.get_menu(OPEN_ACCESS_KEY) or "No Open Access text set yet."
+
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("❌ Cancel", callback_data="roni_admin:cancel")],
+            ]
+        )
+
+        await cq.message.edit_text(
+            "🌸 <b>Edit Open Access</b>\n\n"
+            "This is what people see when they tap “🌸 Open Access”.\n\n"
+            f"<b>Current text:</b>\n\n{current}\n\n"
+            "Send me the new text in one message, and I’ll replace it.",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+        await cq.answer()
+
+    # ───────── ADMIN: start editing Teaser/Promo text ─────────
+    @app.on_callback_query(filters.regex(r"^roni_admin:edit_teaser$"))
+    async def roni_admin_edit_teaser_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer("Only Roni can edit this 💜", show_alert=True)
+            return
+
+        _pending_admin[cq.from_user.id] = "teaser"
+
+        current = store.get_menu(TEASER_TEXT_KEY) or (
+            os.getenv("RONI_TEASER_CHANNELS_TEXT") or "No teaser/promo text set yet."
+        )
+
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("❌ Cancel", callback_data="roni_admin:cancel")],
+            ]
+        )
+
+        await cq.message.edit_text(
+            "🔥 <b>Edit Teaser & Promo Text</b>\n\n"
+            "This is what verified users see when they tap “🔥 Teaser & Promo Channels”.\n\n"
+            f"<b>Current text:</b>\n\n{current}\n\n"
+            "Send me the new text in one message, and I’ll replace it.",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+        await cq.answer()
+
+    # ───────── ADMIN: cancel editing ─────────
+    @app.on_callback_query(filters.regex(r"^roni_admin:cancel$"))
+    async def roni_admin_cancel_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer()
+            return
+
+        _pending_admin.pop(cq.from_user.id, None)
+
+        user_id = cq.from_user.id
+        kb = _roni_main_keyboard(user_id)
+
+        await cq.message.edit_text(
+            "Cancelled. No changes were made. 💜",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+        await cq.answer()
+
+    # ───────── ADMIN: capture new menu text / open access / teaser / age note ─────────
+    # group=-2 so it runs BEFORE other private text handlers that might stop_propagation
+    @app.on_message(filters.private & filters.text, group=-2)
+    async def roni_admin_capture(_, m: Message):
+        if not m.from_user or m.from_user.id != RONI_OWNER_ID:
+            return
+
+        action = _pending_admin.get(m.from_user.id)
+        if not action:
+            return
+
+        # Stop other handlers from touching this message
+        try:
+            m.stop_propagation()
+        except Exception:
+            pass
+
+        # Menu edit
+        if action == "menu":
+            store.set_menu(RONI_MENU_KEY, m.text)
+            _pending_admin.pop(m.from_user.id, None)
+
+            current = store.get_menu(RONI_MENU_KEY) or "No menu set yet."
+
+            await m.reply_text(
+                "Saved your personal menu. 💕\n\n"
+                "You’re back in the Roni Admin panel — here’s your current menu preview:\n\n"
+                f"{current}",
+                reply_markup=_admin_keyboard(),
+                disable_web_page_preview=True,
+            )
+            return
+
+        # Open Access edit
+        if action == "open_access":
+            store.set_menu(OPEN_ACCESS_KEY, m.text)
+            _pending_admin.pop(m.from_user.id, None)
+
+            await m.reply_text(
+                "Saved your 🌸 Open Access text. 💕\n\n"
+                "Anyone tapping “🌸 Open Access” will now see this updated block.",
+                reply_markup=_admin_keyboard(),
+                disable_web_page_preview=True,
+            )
+            return
+
+        # Teaser/Promo edit
+        if action == "teaser":
+            store.set_menu(TEASER_TEXT_KEY, m.text)
+            _pending_admin.pop(m.from_user.id, None)
+
+            await m.reply_text(
+                "Saved your 🔥 Teaser & Promo text. 💕\n\n"
+                "Age-verified users tapping “🔥 Teaser & Promo Channels” will now see this updated block.",
+                reply_markup=_admin_keyboard(),
+                disable_web_page_preview=True,
+            )
+            return
+
+        # Note edit: action format "note:<user_id>"
+        if action.startswith("note:"):
+            try:
+                _, user_id_str = action.split(":", 1)
+                target_id = int(user_id_str)
+            except Exception:
+                _pending_admin.pop(m.from_user.id, None)
+                await m.reply_text(
+                    "Something went wrong while editing the note. 💜",
+                    disable_web_page_preview=True,
+                )
+                return
+
+            rec = _load_age_record(target_id)
+            if not rec:
+                # Make a basic record if it didn't exist
+                rec = {
+                    "status": "ok",
+                    "user_id": target_id,
+                    "username": "",
+                    "verified_at": "unknown",
+                    "note": "",
+                }
+
+            rec["note"] = m.text
+            _save_age_record(target_id, rec)
+
+            # Ensure ID is in index
+            ids = _load_age_index()
+            if target_id not in ids:
+                ids.append(target_id)
+                _save_age_index(ids)
+
+            _pending_admin.pop(m.from_user.id, None)
+
+            await m.reply_text(
+                f"Saved note for user ID {target_id}. 💕",
+                reply_markup=_admin_keyboard(),
+                disable_web_page_preview=True,
+            )
+            return
+
+    # ───────── OWNER CMD: pull stored age-verify media ─────────
+    @app.on_message(filters.command("age_media"))
+    async def roni_age_media_cmd(_, m: Message):
+        if not m.from_user or m.from_user.id != RONI_OWNER_ID:
+            return
+
+        parts = m.text.split(maxsplit=1)
+        if len(parts) < 2:
+            await m.reply_text(
+                "Usage: <code>/age_media &lt;user_id&gt;</code>\n\n"
+                "I’ll resend any stored age verification media for that user.",
+                disable_web_page_preview=True,
+            )
+            return
+
+        try:
+            target_id = int(parts[1])
+        except ValueError:
+            await m.reply_text("User ID must be a number. 💜", disable_web_page_preview=True)
+            return
+
+        media_list = _load_age_media(target_id)
+        if not media_list:
+            await m.reply_text(
+                f"No stored age verification media found for user ID <code>{target_id}</code>.",
+                disable_web_page_preview=True,
+            )
+            return
+
+        rec = _load_age_record(target_id)
+        uname = rec.get("username") or f"ID {target_id}"
+
+        for item in media_list:
+            file_id = item.get("file_id")
+            mtype = item.get("type", "photo")
+            saved_at = item.get("saved_at", "unknown time")
+
+            caption = (
+                "📂 <b>Logged Age Verification Media</b>\n\n"
+                f"User: {uname}\n"
+                f"User ID: <code>{target_id}</code>\n"
+                f"Logged at: {saved_at}"
+            )
+
+            try:
+                if mtype == "video":
+                    await _.send_video(
+                        m.chat.id,
+                        file_id,
+                        caption=caption,
+                        disable_web_page_preview=True,
+                    )
+                else:
+                    await _.send_photo(
+                        m.chat.id,
+                        file_id,
+                        caption=caption,
+                        disable_web_page_preview=True,
+                    )
+            except Exception:
+                log.exception("Failed to resend age media for %s", target_id)
