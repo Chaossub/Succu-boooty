@@ -164,13 +164,13 @@ def set_age_verified(user_id: int, username: str | None = None) -> None:
         log.exception("Failed to persist age verify state for %s", user_id)
 
 
-# ────────────── KEYBOARDS ──────────────
+# ────────────── KEYBOARDS & TEXT ──────────────
 
 def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     """
     Build Roni's assistant keyboard.
-    Owner always sees teaser & admin.
-    Others see teaser only if age-verified.
+    Owner: sees both Teaser & Age Verify (test).
+    Normal users: Age Verify before AV, Teaser after AV.
     """
     rows: list[list[InlineKeyboardButton]] = []
 
@@ -194,13 +194,23 @@ def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
 
     rows.append([InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:open_access")])
 
-    # teaser vs age verify (owner bypasses gate)
-    if user_id == RONI_OWNER_ID or (user_id and is_age_verified(user_id)):
+    # teaser vs age verify
+    if user_id == RONI_OWNER_ID:
+        # Owner: show BOTH so you can test
+        rows.append(
+            [InlineKeyboardButton("🔥 Teaser & Promo Channels", callback_data="roni_portal:teaser")]
+        )
+        rows.append(
+            [InlineKeyboardButton("✅ Age Verify (test)", callback_data="roni_portal:age")]
+        )
+    elif user_id and is_age_verified(user_id):
         rows.append(
             [InlineKeyboardButton("🔥 Teaser & Promo Channels", callback_data="roni_portal:teaser")]
         )
     else:
-        rows.append([InlineKeyboardButton("✅ Age Verify", callback_data="roni_portal:age")])
+        rows.append(
+            [InlineKeyboardButton("✅ Age Verify", callback_data="roni_portal:age")]
+        )
 
     rows.append(
         [InlineKeyboardButton("😈 Models & Creators — Tap Here", url=f"https://t.me/{RONI_USERNAME}")]
@@ -266,6 +276,28 @@ def _age_verified_status_keyboard(uid: int) -> InlineKeyboardMarkup:
     )
 
 
+def _assistant_welcome_text(user_id: int | None) -> str:
+    """Different welcome text depending on age-verified status."""
+    is_owner = (user_id == RONI_OWNER_ID)
+    av = is_owner or (user_id and is_age_verified(user_id))
+
+    if av:
+        # After age verification (or you)
+        return (
+            "Welcome back to Roni’s personal assistant. 💗\n"
+            "You’re age-verified, so you can use the buttons below to see her menu, "
+            "booking options, and her teaser & promo channels. ❤️‍🔥"
+        )
+    else:
+        # Before age verification
+        return (
+            "Welcome to Roni’s personal assistant. 💗\n"
+            "Use the buttons below to explore her menu, booking options, and more.\n\n"
+            "If you want access to Roni’s free NSFW links and teaser / promo channels, "
+            "tap ✅ <b>Age Verify</b> to confirm you’re 18+. ❤️‍🔥"
+        )
+
+
 # ────────────── REGISTER ──────────────
 
 def register(app: Client) -> None:
@@ -311,11 +343,10 @@ def register(app: Client) -> None:
 
         user_id = m.from_user.id if m.from_user else None
         kb = _roni_main_keyboard(user_id)
+        text = _assistant_welcome_text(user_id)
 
         await m.reply_text(
-            "Welcome to Roni’s personal assistant. 💗\n"
-            "Use the buttons below to explore her menu, booking options, and more.\n"
-            "Some features are still being built, so you might see 'coming soon' for now. 💕",
+            text,
             reply_markup=kb,
             disable_web_page_preview=True,
         )
@@ -348,9 +379,10 @@ def register(app: Client) -> None:
     async def roni_home_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id if cq.from_user else None
         kb = _roni_main_keyboard(user_id)
+        text = _assistant_welcome_text(user_id)
+
         await cq.message.edit_text(
-            "Welcome to Roni’s personal assistant. 💗\n"
-            "Use the buttons below to explore her menu, booking options, and more.",
+            text,
             reply_markup=kb,
             disable_web_page_preview=True,
         )
