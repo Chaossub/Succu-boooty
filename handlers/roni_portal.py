@@ -12,7 +12,7 @@ from pyrogram.types import (
     InlineKeyboardButton,
 )
 
-from utils.menu_store import store  # persistent storage (Mongo / JSON depending on setup)
+from utils.menu_store import store  # persistent storage
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 
 BOT_USERNAME = (os.getenv("BOT_USERNAME") or "YourBotUsernameHere").lstrip("@")
 RONI_USERNAME = (os.getenv("RONI_USERNAME") or "chaossub283").lstrip("@")
-RONI_OWNER_ID = 6964994611  # your Telegram user ID
+RONI_OWNER_ID = 6964994611
 
 TIP_RONI_LINK = (os.getenv("TIP_RONI_LINK") or "").strip()
 
@@ -31,8 +31,20 @@ AGE_MEDIA_PREFIX = "RoniAgeMedia:"
 OPEN_ACCESS_KEY = "RoniOpenAccessText"
 TEASER_TEXT_KEY = "RoniTeaserChannelsText"
 
+# in-memory state (safe to lose on restart)
+_pending_admin: dict[int, str] = {}   # owner_id -> "menu" / "open_access" / "teaser" / "note:<uid>"
+_pending_age: dict[int, bool] = {}    # user_id -> waiting_for_media
+
 
 # ────────────── STORAGE HELPERS ──────────────
+
+def _age_key(user_id: int) -> str:
+    return f"AGE_OK:{user_id}"
+
+
+def _media_key(user_id: int) -> str:
+    return f"{AGE_MEDIA_PREFIX}{user_id}"
+
 
 def _load_age_index() -> list[int]:
     raw = store.get_menu(AGE_INDEX_KEY) or "[]"
@@ -53,19 +65,10 @@ def _save_age_index(ids: list[int]) -> None:
 
 
 def _ensure_in_index(user_id: int) -> None:
-    """Make sure a given user_id is present in the age index list."""
     ids = _load_age_index()
     if user_id not in ids:
         ids.append(user_id)
         _save_age_index(ids)
-
-
-def _age_key(user_id: int) -> str:
-    return f"AGE_OK:{user_id}"
-
-
-def _media_key(user_id: int) -> str:
-    return f"{AGE_MEDIA_PREFIX}{user_id}"
 
 
 def _load_age_media(user_id: int) -> list[dict]:
@@ -92,9 +95,25 @@ def _append_age_media(user_id: int, item: dict) -> None:
     _save_age_media(user_id, items)
 
 
-# in-memory, safe to lose on restart
-_pending_admin: dict[int, str] = {}
-_pending_age: dict[int, bool] = {}  # user_id -> waiting_for_media
+def _load_age_record(user_id: int) -> dict:
+    raw = store.get_menu(_age_key(user_id)) or ""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_age_record(user_id: int, record: dict) -> None:
+    try:
+        store.set_menu(_age_key(user_id), json.dumps(record))
+        _ensure_in_index(user_id)
+    except Exception:
+        log.exception("Failed to save age record for %s", user_id)
 
 
 # ────────────── AGE VERIFY HELPERS ──────────────
@@ -145,27 +164,6 @@ def set_age_verified(user_id: int, username: str | None = None) -> None:
         log.exception("Failed to persist age verify state for %s", user_id)
 
 
-def _load_age_record(user_id: int) -> dict:
-    raw = store.get_menu(_age_key(user_id)) or ""
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            return data
-    except Exception:
-        pass
-    return {}
-
-
-def _save_age_record(user_id: int, record: dict) -> None:
-    try:
-        store.set_menu(_age_key(user_id), json.dumps(record))
-        _ensure_in_index(user_id)
-    except Exception:
-        log.exception("Failed to save age record for %s", user_id)
-
-
 # ────────────── KEYBOARDS ──────────────
 
 def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
@@ -196,7 +194,7 @@ def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
 
     rows.append([InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:open_access")])
 
-    # teaser vs age verify
+    # teaser vs age verify (owner bypasses gate)
     if user_id == RONI_OWNER_ID or (user_id and is_age_verified(user_id)):
         rows.append(
             [InlineKeyboardButton("🔥 Teaser & Promo Channels", callback_data="roni_portal:teaser")]
@@ -462,7 +460,8 @@ def register(app: Client) -> None:
         media_type = "photo" if m.photo else "video"
         file_id = ""
         if m.photo:
-            file_id = m.photo[-1].file_id
+            # Pyrogram v2: m.photo is a single Photo object (not a list)
+            file_id = m.photo.file_id
         elif m.video:
             file_id = m.video.file_id
 
@@ -539,7 +538,7 @@ def register(app: Client) -> None:
         except Exception:
             log.exception("Failed to fetch user for age action")
 
-        # close the old card
+        # Close the old card
         try:
             await cq.message.delete()
         except Exception:
@@ -588,8 +587,7 @@ def register(app: Client) -> None:
                 "📩 <b>Age Verification Processed</b>\n\n"
                 f"Action: 🪪 <b>Requested More Info</b>\n"
                 f"User: {mention}\n"
-                f"User ID: <code>{target_id}</code>\n\n"
-                "They’ve been asked to send an additional photo. You can still add a note from the list view if needed. 💜",
+                f"User ID: <code>{target_id}</code>",
                 disable_web_page_preview=True,
             )
 
@@ -608,14 +606,13 @@ def register(app: Client) -> None:
                 "📩 <b>Age Verification Processed</b>\n\n"
                 f"Action: ⛔ <b>Denied</b>\n"
                 f"User: {mention}\n"
-                f"User ID: <code>{target_id}</code>\n\n"
-                "You can leave a note on why this was denied from the age-verified list view if you want to remember for later. 💜",
+                f"User ID: <code>{target_id}</code>",
                 disable_web_page_preview=True,
             )
 
             await cq.answer("Marked as not verified ⛔", show_alert=True)
 
-    # legacy close handler (for older cards)
+    # legacy close handler (optional)
     @app.on_callback_query(filters.regex(r"^age:close$"))
     async def roni_age_close_cb(_, cq: CallbackQuery):
         if cq.from_user.id != RONI_OWNER_ID:
@@ -630,7 +627,7 @@ def register(app: Client) -> None:
                 pass
         await cq.answer("Closed ✔")
 
-    # ───────── Admin panel ─────────
+    # ───────── Admin panel (text stuff + list) ─────────
     @app.on_callback_query(filters.regex(r"^roni_admin:open$"))
     async def roni_admin_open_cb(_, cq: CallbackQuery):
         if cq.from_user.id != RONI_OWNER_ID:
@@ -649,7 +646,6 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # ───────── Age-verified list ─────────
     @app.on_callback_query(filters.regex(r"^roni_admin:age_list$"))
     async def roni_admin_age_list_cb(_, cq: CallbackQuery):
         if cq.from_user.id != RONI_OWNER_ID:
@@ -670,7 +666,7 @@ def register(app: Client) -> None:
         lines = ["💜 <b>Age-Verified Users</b>\n"]
         note_buttons: list[list[InlineKeyboardButton]] = []
 
-        # show ALL users (no 25 cap)
+        # Show ALL age-verified users
         for uid in ids:
             rec = _load_age_record(uid)
             uname = rec.get("username") or f"ID {uid}"
@@ -685,7 +681,6 @@ def register(app: Client) -> None:
             )
 
         text = "\n".join(lines)
-
         note_buttons.append(
             [InlineKeyboardButton("⬅ Back to Admin", callback_data="roni_admin:open")]
         )
@@ -694,7 +689,6 @@ def register(app: Client) -> None:
         await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
 
-    # ───────── Start note edit ─────────
     @app.on_callback_query(filters.regex(r"^roni_admin:note:(\d+)$"))
     async def roni_admin_note_cb(_, cq: CallbackQuery):
         if cq.from_user.id != RONI_OWNER_ID:
@@ -722,7 +716,6 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # ───────── Remove AV status ─────────
     @app.on_callback_query(filters.regex(r"^roni_admin:age_remove:(\d+)$"))
     async def roni_admin_age_remove_cb(_, cq: CallbackQuery):
         if cq.from_user.id != RONI_OWNER_ID:
@@ -732,7 +725,7 @@ def register(app: Client) -> None:
         parts = cq.data.split(":")
         target_id = int(parts[-1])
 
-        # clear record
+        # Clear record + index
         store.set_menu(_age_key(target_id), "")
 
         ids = _load_age_index()
@@ -771,7 +764,7 @@ def register(app: Client) -> None:
 
         await cq.answer("Removed age-verified status ❌", show_alert=True)
 
-    # ───────── Edit menu / open / teaser ─────────
+    # ───────── Admin: edit texts ─────────
     @app.on_callback_query(filters.regex(r"^roni_admin:edit_menu$"))
     async def roni_admin_edit_menu_cb(_, cq: CallbackQuery):
         if cq.from_user.id != RONI_OWNER_ID:
@@ -828,16 +821,23 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # ───────── Cancel admin edit ─────────
+    # ───────── Admin: cancel ─────────
     @app.on_callback_query(filters.regex(r"^roni_admin:cancel$"))
     async def roni_admin_cancel_cb(_, cq: CallbackQuery):
         if cq.from_user.id != RONI_OWNER_ID:
             await cq.answer()
             return
 
+        action = _pending_admin.get(cq.from_user.id)
+        if not action:
+            await cq.answer()
+            return
+
         _pending_admin.pop(cq.from_user.id, None)
+
         user_id = cq.from_user.id
         kb = _roni_main_keyboard(user_id)
+
         await cq.message.edit_text(
             "Cancelled. No changes were made. 💜",
             reply_markup=kb,
@@ -845,31 +845,7 @@ def register(app: Client) -> None:
         )
         await cq.answer()
 
-    # ───────── Fix index entry (from /age_check) ─────────
-    @app.on_callback_query(filters.regex(r"^roni_admin:fix_index:(\d+)$"))
-    async def roni_admin_fix_index_cb(_, cq: CallbackQuery):
-        if cq.from_user.id != RONI_OWNER_ID:
-            await cq.answer()
-            return
-
-        try:
-            target_id = int(cq.data.split(":")[-1])
-        except Exception:
-            await cq.answer("Something went wrong parsing the ID 💜", show_alert=True)
-            return
-
-        rec = _load_age_record(target_id)
-        if not rec:
-            await cq.answer(
-                "There’s no age-verify record stored for this user, so I can’t fix the index. 💜",
-                show_alert=True,
-            )
-            return
-
-        _ensure_in_index(target_id)
-        await cq.answer("Index fixed for this user ✅", show_alert=True)
-
-    # ───────── Capture admin text edits ─────────
+    # ───────── Admin: capture text edits (menu/open/teaser/note) ─────────
     @app.on_message(filters.private & filters.text, group=-2)
     async def roni_admin_capture(_, m: Message):
         if not m.from_user or m.from_user.id != RONI_OWNER_ID:
@@ -884,6 +860,7 @@ def register(app: Client) -> None:
         except Exception:
             pass
 
+        # Menu edit
         if action == "menu":
             store.set_menu(RONI_MENU_KEY, m.text)
             _pending_admin.pop(m.from_user.id, None)
@@ -897,9 +874,11 @@ def register(app: Client) -> None:
             )
             return
 
+        # Open Access edit
         if action == "open_access":
             store.set_menu(OPEN_ACCESS_KEY, m.text)
             _pending_admin.pop(m.from_user.id, None)
+
             await m.reply_text(
                 "Saved your 🌸 Open Access text. 💕\n\n"
                 "Anyone tapping “🌸 Open Access” will now see this updated block.",
@@ -908,9 +887,11 @@ def register(app: Client) -> None:
             )
             return
 
+        # Teaser/Promo edit
         if action == "teaser":
             store.set_menu(TEASER_TEXT_KEY, m.text)
             _pending_admin.pop(m.from_user.id, None)
+
             await m.reply_text(
                 "Saved your 🔥 Teaser & Promo text. 💕\n\n"
                 "Age-verified users tapping “🔥 Teaser & Promo Channels” will now see this updated block.",
@@ -919,6 +900,7 @@ def register(app: Client) -> None:
             )
             return
 
+        # Note edit: action format "note:<user_id>"
         if action.startswith("note:"):
             try:
                 _, user_id_str = action.split(":", 1)
@@ -1017,6 +999,30 @@ def register(app: Client) -> None:
             )
 
         await m.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
+
+    # ───────── Fix index entry (from /age_check) ─────────
+    @app.on_callback_query(filters.regex(r"^roni_admin:fix_index:(\d+)$"))
+    async def roni_admin_fix_index_cb(_, cq: CallbackQuery):
+        if cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer()
+            return
+
+        try:
+            target_id = int(cq.data.split(":")[-1])
+        except Exception:
+            await cq.answer("Something went wrong parsing the ID 💜", show_alert=True)
+            return
+
+        rec = _load_age_record(target_id)
+        if not rec:
+            await cq.answer(
+                "There’s no age-verify record stored for this user, so I can’t fix the index. 💜",
+                show_alert=True,
+            )
+            return
+
+        _ensure_in_index(target_id)
+        await cq.answer("Index fixed for this user ✅", show_alert=True)
 
     # ───────── Owner helper: /age_media ─────────
     @app.on_message(filters.command("age_media"))
