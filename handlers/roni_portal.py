@@ -219,8 +219,7 @@ def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     if user_id == RONI_OWNER_ID:
         rows.append([InlineKeyboardButton("⚙️ Roni Admin", callback_data="roni_admin:open")])
 
-    rows.append([InlineKeyboardButton("🏠 Back to SuccuBot Menu", callback_data="panels:root")])
-
+    # NOTE: intentionally NO "Back to SuccuBot Menu" here – portal stays self-contained
     return InlineKeyboardMarkup(rows)
 
 
@@ -368,7 +367,6 @@ def register(app: Client) -> None:
         kb = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
-                [InlineKeyboardButton("🏠 Back to SuccuBot Menu", callback_data="panels:root")],
             ]
         )
         await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
@@ -403,7 +401,6 @@ def register(app: Client) -> None:
         kb = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
-                [InlineKeyboardButton("🏠 Back to SuccuBot Menu", callback_data="panels:root")],
             ]
         )
         await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
@@ -429,7 +426,6 @@ def register(app: Client) -> None:
         kb = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
-                [InlineKeyboardButton("🏠 Back to SuccuBot Menu", callback_data="panels:root")],
             ]
         )
 
