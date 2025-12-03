@@ -1,4 +1,4 @@
-# main.py
+# main.py 
 import os
 import logging
 from pyrogram import Client, filters
@@ -80,8 +80,8 @@ def main():
     # Flyer scheduler (date/time -> post)
     _try_register("flyer_scheduler")
 
-    # ⭐ NEW: Requirements panel (Part 1 – member status + basic UI)
-    _try_register("requirements_panel_1")
+    # ⭐ NEW: Requirements panel (Requirements Help UI)
+    _try_register("requirements_panel")      # <- IMPORTANT: no "_1" here
 
     # 🔻 Give both schedulers the running loop so they can post from their threads
     try:
