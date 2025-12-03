@@ -56,8 +56,9 @@ def main():
     _try_register("dm_portal")               # legacy shim (+ optional /dmnow)
     _try_register("portal_cmd")              # /portal → DM button
 
-    # ⭐ NEW: Roni personal assistant portal (/roni_portal + /start roni_assistant)
-    _try_register("roni_portal")
+    # ⭐ Roni personal assistant portal (/roni_portal + /start roni_assistant)
+    _try_register("roni_portal")             # core portal UI + text blocks
+    _try_register("roni_portal_age")         # age verification + AV admin
 
     # Help panel (buttons -> env text)
     _try_register("help_panel")              # help:open + pages
@@ -78,6 +79,9 @@ def main():
 
     # Flyer scheduler (date/time -> post)
     _try_register("flyer_scheduler")
+
+    # ⭐ NEW: Requirements panel (Part 1 – member status + basic UI)
+    _try_register("requirements_panel_1")
 
     # 🔻 Give both schedulers the running loop so they can post from their threads
     try:
@@ -101,6 +105,7 @@ def main():
             [InlineKeyboardButton("💞 Menus", callback_data="panels:root")],
             [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
             [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
+            [InlineKeyboardButton("📌 Requirements Help", callback_data="reqpanel:home")],  # NEW
             [InlineKeyboardButton("❓ Help", callback_data="help:open")],
         ])
         try:
