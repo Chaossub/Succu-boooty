@@ -11,7 +11,7 @@ from typing import Dict, Tuple, Optional
 from pyrogram import Client, filters
 from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 
-from handlers.payments import get_monthly_progress
+from payments import get_monthly_progress
 from req_store import ReqStore  # uses your existing DM-ready / exemption store
 
 log = logging.getLogger(__name__)
