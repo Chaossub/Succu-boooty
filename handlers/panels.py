@@ -46,6 +46,7 @@ def _main_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("💞 Menus", callback_data="panels:menus")],
             [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
             [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
+            [InlineKeyboardButton("📌 Requirements Help", callback_data="reqpanel:home")],  # NEW
             [InlineKeyboardButton("❓ Help", callback_data="help:open")],
         ]
     )
