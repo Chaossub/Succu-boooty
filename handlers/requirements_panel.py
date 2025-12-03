@@ -6,15 +6,58 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Union
 
 from pyrogram import Client, filters
 from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
 
-from payments import get_monthly_progress
-from req_store import ReqStore  # uses your existing DM-ready / exemption store
-
 log = logging.getLogger(__name__)
+
+# ────────────── SAFE IMPORTS FOR PAYMENTS / REQ STORE ──────────────
+
+# Try to pull real monthly progress from your payments.py
+try:
+    from payments import get_monthly_progress as _real_get_monthly_progress  # type: ignore
+
+    def get_monthly_progress(user_id: int, year: int, month: int) -> Tuple[float, int]:
+        # game_dollars, model_count
+        return _real_get_monthly_progress(user_id, year, month)
+except Exception:
+    log.warning("requirements_panel: payments.get_monthly_progress not available, using dummy 0/0")
+
+    def get_monthly_progress(user_id: int, year: int, month: int) -> Tuple[float, int]:
+        # Fallback: nothing tracked yet
+        return 0.0, 0
+
+
+# Try to use your existing ReqStore (for exemptions)
+try:
+    from req_store import ReqStore as _RealReqStore  # type: ignore
+
+    _store = _RealReqStore()
+except Exception:
+    log.warning("requirements_panel: req_store.ReqStore not available, using in-memory dummy store")
+
+    class _DummyStore:
+        def __init__(self):
+            self._exempt: set[int] = set()
+
+        def has_valid_exemption(self, user_id: int, chat_id: Optional[int] = None) -> bool:
+            return user_id in self._exempt
+
+        def remove_exemption(self, user_id: int, chat_id: Optional[int] = None) -> None:
+            self._exempt.discard(user_id)
+
+        def add_exemption(
+            self,
+            user_id: int,
+            chat_id: Optional[int] = None,
+            until_ts: Optional[float] = None,
+        ) -> None:
+            self._exempt.add(user_id)
+
+    _store = _DummyStore()
+
 
 # ────────────── ENV / CONSTANTS ──────────────
 
@@ -31,8 +74,6 @@ REQ_ADMINS_RAW = os.getenv("REQUIREMENTS_ADMINS", "") or ""
 # Requirement thresholds (can be overridden via env)
 REQ_MIN_DOLLARS = float(os.getenv("REQ_REQUIRE_DOLLARS", "20"))
 REQ_MIN_MODELS = int(os.getenv("REQ_REQUIRE_MODELS", "2"))
-
-_store = ReqStore()
 
 # user_id -> action code (for admin/model flows)
 _pending_actions: Dict[int, str] = {}
@@ -230,11 +271,11 @@ def _owner_home_kb() -> InlineKeyboardMarkup:
 
 # ────────────── UI helpers ──────────────
 
-async def _show_home(client: Client, cq: CallbackQuery | Message):
-    user = cq.from_user if isinstance(cq, CallbackQuery) else cq.from_user
+async def _show_home(client: Client, obj: Union[CallbackQuery, Message]):
+    user = obj.from_user
     if not user:
-        if isinstance(cq, CallbackQuery):
-            await cq.answer()
+        if isinstance(obj, CallbackQuery):
+            await obj.answer()
         return
 
     role = _role(user.id)
@@ -262,14 +303,14 @@ async def _show_home(client: Client, cq: CallbackQuery | Message):
         )
         kb = _member_home_kb()
 
-    if isinstance(cq, CallbackQuery):
+    if isinstance(obj, CallbackQuery):
         try:
-            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+            await obj.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         except Exception:
             pass
-        await cq.answer()
+        await obj.answer()
     else:
-        await cq.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await obj.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
 
 
 # ────────────── register(app) ──────────────
