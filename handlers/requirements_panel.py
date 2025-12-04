@@ -95,7 +95,7 @@ except Exception:
 OWNER_ID_ENV = os.getenv("OWNER_ID")
 OWNER_ID: Optional[int] = int(OWNER_ID_ENV) if OWNER_ID_ENV else None
 
-# Comma or semicolon separated list of Telegram IDs who should see the model tools
+# Comma or semicolon separated list of Telegram IDs who should see model tools
 REQ_ADMINS_RAW = os.getenv("REQUIREMENTS_ADMINS", "") or ""
 
 # Requirement thresholds (can be overridden via env)
@@ -362,6 +362,7 @@ def _model_home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📍 Check My Status", callback_data="reqpanel:check_self")],
+            [InlineKeyboardButton("ℹ️ What Counts as Requirements?", callback_data="reqpanel:info")],
             [InlineKeyboardButton("👤 Look Up Member", callback_data="reqpanel:lookup_prompt")],
             [InlineKeyboardButton("💸 Add Manual Spend", callback_data="reqpanel:add_spend_prompt")],
             [InlineKeyboardButton("⏸ Exempt / Un-exempt", callback_data="reqpanel:exempt_prompt")],
@@ -371,9 +372,21 @@ def _model_home_kb() -> InlineKeyboardMarkup:
 
 
 def _owner_home_kb() -> InlineKeyboardMarkup:
+    """Home keyboard owner sees – includes Admin Controls button only for you."""
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📍 Check My Status", callback_data="reqpanel:check_self")],
+            [InlineKeyboardButton("ℹ️ What Counts as Requirements?", callback_data="reqpanel:info")],
+            [InlineKeyboardButton("🛠 Admin Controls", callback_data="reqpanel:admin_home")],
+            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="panels:root")],
+        ]
+    )
+
+
+def _owner_admin_kb() -> InlineKeyboardMarkup:
+    """Full admin controls screen – only reachable by OWNER_ID via Admin Controls button."""
+    return InlineKeyboardMarkup(
+        [
             [InlineKeyboardButton("👤 Look Up Member", callback_data="reqpanel:lookup_prompt")],
             [InlineKeyboardButton("💸 Add Manual Spend", callback_data="reqpanel:add_spend_prompt")],
             [InlineKeyboardButton("⏸ Exempt / Un-exempt", callback_data="reqpanel:exempt_prompt")],
@@ -381,7 +394,7 @@ def _owner_home_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("🧾 Exempt Members", callback_data="reqpanel:list_exempt"),
                 InlineKeyboardButton("📒 Manual Credits", callback_data="reqpanel:list_manual"),
             ],
-            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="panels:root")],
+            [InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")],
         ]
     )
 
@@ -400,8 +413,9 @@ async def _show_home(client: Client, obj: Union[CallbackQuery, Message]):
     if role == "owner":
         text = (
             "📌 <b>Requirements Panel – Owner</b>\n\n"
-            "Use these tools to check status, add manual credit for offline games, mark members exempt, "
-            "and review who is currently exempt or has manual credits logged.\n\n"
+            "You can check your own status like everyone else, and you also have an "
+            "<b>Admin Controls</b> button that opens all the tools for logging offline games, "
+            "marking exemptions, and reviewing credits.\n\n"
             "All changes here affect this month’s requirement checks and future sweeps/reminders."
         )
         kb = _owner_home_kb()
@@ -534,6 +548,31 @@ def register(app: Client) -> None:
     async def reqpanel_cmd(client: Client, m: Message):
         await _show_home(client, m)
 
+    # ───────── OWNER: Admin Controls screen ─────────
+    @app.on_callback_query(filters.regex(r"^reqpanel:admin_home$"))
+    async def reqpanel_admin_home(client: Client, cq: CallbackQuery):
+        user = cq.from_user
+        if not user or _role(user.id) != "owner":
+            await cq.answer()
+            return
+
+        text = (
+            "🛠 <b>Admin Controls</b>\n\n"
+            "From here you can:\n"
+            "• Look up a member’s monthly status\n"
+            "• Add manual spend for offline games or CashApp\n"
+            "• Mark members exempt / un-exempt\n"
+            "• See everyone currently exempt\n"
+            "• Review all manual credits for this month\n\n"
+            "These tools are only visible to you."
+        )
+        kb = _owner_admin_kb()
+        try:
+            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        except Exception:
+            pass
+        await cq.answer()
+
     # ───────── member: check own status ─────────
     @app.on_callback_query(filters.regex(r"^reqpanel:check_self$"))
     async def reqpanel_check_self(client: Client, cq: CallbackQuery):
@@ -545,10 +584,19 @@ def register(app: Client) -> None:
         year, month = _current_year_month()
         text, _data = _status_for_user(user.id, year, month)
 
+        # Home keyboard based on role again
+        role = _role(user.id)
+        if role == "owner":
+            kb = _owner_home_kb()
+        elif role == "model":
+            kb = _model_home_kb()
+        else:
+            kb = _member_home_kb()
+
         try:
             await cq.message.edit_text(
                 text,
-                reply_markup=_member_home_kb(),
+                reply_markup=kb,
                 disable_web_page_preview=True,
             )
         except Exception:
@@ -564,10 +612,20 @@ def register(app: Client) -> None:
             f"or bundles during the month, and support for at least <b>{REQ_MIN_MODELS}</b> different models.\n\n"
             "Manual credit that a model adds for you (for CashApp, offline games, etc.) also counts here once it’s logged."
         )
+
+        user = cq.from_user
+        role = _role(user.id) if user else "member"
+        if role == "owner":
+            kb = _owner_home_kb()
+        elif role == "model":
+            kb = _model_home_kb()
+        else:
+            kb = _member_home_kb()
+
         try:
             await cq.message.edit_text(
                 text,
-                reply_markup=_member_home_kb(),
+                reply_markup=kb,
                 disable_web_page_preview=True,
             )
         except Exception:
@@ -633,7 +691,7 @@ def register(app: Client) -> None:
                 "Listing exemptions isn’t available because an external requirements store is in use."
             )
             kb = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin_home")]]
             )
             try:
                 await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
@@ -649,7 +707,7 @@ def register(app: Client) -> None:
                 "No one is currently marked exempt for requirements."
             )
             kb = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin_home")]]
             )
             try:
                 await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
@@ -667,7 +725,7 @@ def register(app: Client) -> None:
 
         text = "\n".join(lines)
         kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+            [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin_home")]]
         )
         try:
             await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
@@ -693,7 +751,7 @@ def register(app: Client) -> None:
                 "No manual credits have been logged yet this month."
             )
             kb = InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin_home")]]
             )
             try:
                 await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
@@ -720,7 +778,7 @@ def register(app: Client) -> None:
 
         text = "\n".join(lines)
         kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+            [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin_home")]]
         )
         try:
             await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
