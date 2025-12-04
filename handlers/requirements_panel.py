@@ -243,7 +243,7 @@ def _member_home_kb() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("📍 Check My Status", callback_data="reqpanel:check_self")],
             [InlineKeyboardButton("ℹ️ What Counts as Requirements?", callback_data="reqpanel:info")],
-            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="portal:home")],
+            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="panels:root")],
         ]
     )
 
@@ -255,7 +255,7 @@ def _model_home_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("👤 Look Up Member", callback_data="reqpanel:lookup_prompt")],
             [InlineKeyboardButton("💸 Add Manual Spend", callback_data="reqpanel:add_spend_prompt")],
             [InlineKeyboardButton("⏸ Exempt / Un-exempt", callback_data="reqpanel:exempt_prompt")],
-            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="portal:home")],
+            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="panels:root")],
         ]
     )
 
@@ -268,7 +268,7 @@ def _owner_home_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("👤 Look Up Member", callback_data="reqpanel:lookup_prompt")],
             [InlineKeyboardButton("💸 Add Manual Spend", callback_data="reqpanel:add_spend_prompt")],
             [InlineKeyboardButton("⏸ Exempt / Un-exempt", callback_data="reqpanel:exempt_prompt")],
-            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="portal:home")],
+            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="panels:root")],
         ]
     )
 
