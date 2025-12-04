@@ -33,6 +33,7 @@ members_coll.create_index([("user_id", ASCENDING)], unique=True)
 
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
+
 def _parse_id_list(val: str | None) -> Set[int]:
     if not val:
         return set()
@@ -53,7 +54,6 @@ MODELS: Set[int] = _parse_id_list(os.getenv("MODELS"))
 # Sanctuary group IDs to scan
 _group_ids_str = os.getenv("SANCTUARY_GROUP_IDS")
 if not _group_ids_str:
-    # Fallback: single group from SUCCUBUS_SANCTUARY
     _single = os.getenv("SUCCUBUS_SANCTUARY")
     SANCTUARY_GROUP_IDS: List[int] = [int(_single)] if _single else []
 else:
@@ -71,28 +71,35 @@ for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
 # Minimum requirement total to be "met"
 REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 
-# Simple in-memory state for multi-step flows (manual spend, lookups, etc.)
+# Simple in-memory state for multi-step flows
 STATE: Dict[int, Dict[str, Any]] = {}
 
 # ────────────── Helper functions ──────────────
 
+
 def _is_owner(user_id: int) -> bool:
     return user_id == OWNER_ID
+
 
 def _is_super_admin(user_id: int) -> bool:
     return user_id in SUPER_ADMINS or _is_owner(user_id)
 
+
 def _is_model(user_id: int) -> bool:
+    # Owner always counts as model+exempt for requirements
     return user_id in MODELS or _is_owner(user_id)
+
 
 def _is_admin_or_model(user_id: int) -> bool:
     return _is_super_admin(user_id) or _is_model(user_id)
+
 
 async def _safe_edit_text(msg: Message, **kwargs):
     try:
         return await msg.edit_text(**kwargs)
     except MessageNotModified:
         return msg
+
 
 async def _safe_send(app: Client, chat_id: int, text: str):
     try:
@@ -101,29 +108,56 @@ async def _safe_send(app: Client, chat_id: int, text: str):
         log.warning("requirements_panel: failed to send message to %s: %s", chat_id, e)
         return None
 
+
 async def _log_event(app: Client, text: str):
     if LOG_GROUP_ID is None:
         return
     await _safe_send(app, LOG_GROUP_ID, f"[Requirements] {text}")
 
+
 def _member_doc(user_id: int) -> Dict[str, Any]:
+    """
+    Load a member doc and apply derived fields:
+    - Owner & models are always effectively exempt from requirements
+    """
     doc = members_coll.find_one({"user_id": user_id}) or {}
+    is_owner = user_id == OWNER_ID
+    is_model = user_id in MODELS or is_owner
+    db_exempt = bool(doc.get("is_exempt", False))
+    effective_exempt = db_exempt or is_model
+
     return {
         "user_id": user_id,
         "first_name": doc.get("first_name", ""),
         "username": doc.get("username"),
         "manual_spend": float(doc.get("manual_spend", 0.0)),
-        "is_exempt": bool(doc.get("is_exempt", False)),
+        "is_exempt": effective_exempt,
+        "db_exempt": db_exempt,
+        "is_model": is_model,
+        "is_owner": is_owner,
         "reminder_sent": bool(doc.get("reminder_sent", False)),
         "final_warning_sent": bool(doc.get("final_warning_sent", False)),
         "last_updated": doc.get("last_updated"),
     }
 
+
 def _format_member_status(doc: Dict[str, Any]) -> str:
     total = doc["manual_spend"]
     exempt = doc["is_exempt"]
-    status: str
-    if exempt:
+    is_model = doc.get("is_model", False)
+    is_owner = doc.get("is_owner", False)
+
+    if is_owner:
+        status = (
+            "👑 <b>Sanctuary owner</b> – you’re automatically exempt from monthly "
+            "requirements. SuccuBot will never mark you behind or kick you for this."
+        )
+    elif exempt and is_model:
+        status = (
+            "✅ <b>Model</b> – you’re automatically exempt from requirements. "
+            "Even if your spend shows as $0, you won’t be warned or kicked."
+        )
+    elif exempt:
         status = "✅ Marked exempt from requirements this month."
     elif total >= REQUIRED_MIN_SPEND:
         status = f"✅ Requirements met with ${total:.2f} logged."
@@ -132,8 +166,9 @@ def _format_member_status(doc: Dict[str, Any]) -> str:
             f"⚠️ Currently behind.\n"
             f"Logged so far: ${total:.2f} (minimum ${REQUIRED_MIN_SPEND:.2f})."
         )
+
     lines = [
-        f"<b>Requirement Status</b>",
+        "<b>Requirement Status</b>",
         "",
         status,
     ]
@@ -142,15 +177,14 @@ def _format_member_status(doc: Dict[str, Any]) -> str:
         lines.append(f"\nLast updated: <code>{dt}</code>")
     return "\n".join(lines)
 
+
 # ────────────── DM text templates ──────────────
 
 REMINDER_MSGS = [
     "Hi {name}! 💋 Just a sweet reminder that Sanctuary requirements are still open this month. "
     "If you’d like to stay in the Sanctuary, make sure you’ve hit your minimum by the deadline. 💞",
-
     "Hey {name} ✨ You’re showing as <b>behind</b> on Sanctuary requirements right now. "
     "If that’s a mistake or you’ve already played/spent, please let one of the models know so we can update it.",
-
     "Psst, {name}… 😈 SuccuBot here. I’m showing that you haven’t hit requirements yet for this month. "
     "Please check the menus or DM a model so we can get you caught up ♥",
 ]
@@ -159,15 +193,14 @@ FINAL_WARNING_MSGS = [
     "Hi {name}. This is your <b>final warning</b> for Sanctuary requirements this month. "
     "If your requirements are not met by the deadline, you’ll be removed from the Sanctuary and will "
     "need to pay the door fee again to come back.",
-
     "{name}, you are still showing as <b>behind</b> on Sanctuary requirements. This is your last notice. "
     "If this isn’t updated in time, you’ll be removed until requirements are met and the door fee is repaid.",
-
     "Final notice for this month, {name}: Sanctuary requirements are still not met on your account. "
     "If this isn’t fixed before the sweep, you’ll be removed and will need to re-enter through the door fee.",
 ]
 
 # ────────────── Keyboards ──────────────
+
 
 def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = [
@@ -186,6 +219,7 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="portal:home")]
     )
     return InlineKeyboardMarkup(rows)
+
 
 def _admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -213,6 +247,7 @@ def _admin_kb() -> InlineKeyboardMarkup:
     )
 
 # ────────────── Core handlers ──────────────
+
 
 def register(app: Client):
 
@@ -258,7 +293,6 @@ def register(app: Client):
         )
         await cq.answer()
 
-    # Direct open from somewhere else (optional)
     @app.on_callback_query(filters.regex("^reqpanel:open$"))
     async def reqpanel_open_cb(_, cq: CallbackQuery):
         await reqpanel_home_cb(_, cq)
@@ -427,6 +461,7 @@ def register(app: Client):
                 return
 
             doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
+            # flip ONLY the DB flag; model/owner auto-exempt still applies on read
             new_val = not bool(doc.get("is_exempt", False))
             members_coll.update_one(
                 {"user_id": target_id},
@@ -439,9 +474,15 @@ def register(app: Client):
                 },
                 upsert=True,
             )
+            model_note = ""
+            if target_id == OWNER_ID:
+                model_note = " (OWNER – still exempt overall)"
+            elif target_id in MODELS:
+                model_note = " (MODEL – still exempt overall)"
+
             await msg.reply_text(
                 f"User <code>{target_id}</code> is now "
-                f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month."
+                f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month.{model_note}"
             )
             await _log_event(
                 client,
@@ -470,15 +511,31 @@ def register(app: Client):
             for d in docs:
                 uid = d["user_id"]
                 total = float(d.get("manual_spend", 0.0))
-                exempt = d.get("is_exempt", False)
-                if exempt:
+                db_exempt = d.get("is_exempt", False)
+                is_owner = uid == OWNER_ID
+                is_model = uid in MODELS or is_owner
+                effective_exempt = db_exempt or is_model
+
+                if is_owner:
+                    status = "OWNER (EXEMPT)"
+                elif is_model:
+                    status = "MODEL (EXEMPT)"
+                elif effective_exempt:
                     status = "EXEMPT"
                 elif total >= REQUIRED_MIN_SPEND:
                     status = "MET"
                 else:
                     status = "BEHIND"
+
+                first_name = d.get("first_name") or ""
+                username = d.get("username")
+                display_name = first_name.strip() or (f"@{username}" if username else "Unknown")
+
+                if username and first_name:
+                    display_name = f"{first_name} (@{username})"
+
                 lines.append(
-                    f"• <code>{uid}</code> – {status} (${total:.2f})"
+                    f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})"
                 )
             text = "\n".join(lines)
 
@@ -529,7 +586,8 @@ def register(app: Client):
             text=(
                 "<b>Exempt / Un-exempt Member</b>\n\n"
                 "Send me the numeric Telegram user ID for the member.\n\n"
-                "I’ll flip their exempt status for this month."
+                "I’ll flip their exempt status for this month.\n\n"
+                "<i>Owner and models stay effectively exempt even if you uncheck them here.</i>"
             ),
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton("⬅ Back to Requirements Menu", callback_data="reqpanel:home")]]
@@ -594,7 +652,6 @@ def register(app: Client):
             await cq.answer("Only Roni and models can send reminders.", show_alert=True)
             return
 
-        # behind + not exempt + no reminder yet
         docs = members_coll.find(
             {
                 "is_exempt": {"$ne": True},
@@ -606,6 +663,10 @@ def register(app: Client):
         count = 0
         for d in docs:
             uid = d["user_id"]
+            # Owner & models are always treated as exempt for sweeps
+            if uid == OWNER_ID or uid in MODELS:
+                continue
+
             name = d.get("first_name") or "there"
             msg = random.choice(REMINDER_MSGS).format(name=name)
             sent = await _safe_send(client, uid, msg)
@@ -644,6 +705,10 @@ def register(app: Client):
         count = 0
         for d in docs:
             uid = d["user_id"]
+            # Owner & models are always protected from requirement kicks
+            if uid == OWNER_ID or uid in MODELS:
+                continue
+
             name = d.get("first_name") or "there"
             msg = random.choice(FINAL_WARNING_MSGS).format(name=name)
             sent = await _safe_send(client, uid, msg)
