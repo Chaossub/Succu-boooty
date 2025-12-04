@@ -1,586 +1,665 @@
 # handlers/requirements_panel.py
+
 import os
 import logging
-from datetime import datetime
-from typing import List, Dict, Any, Tuple
+import random
+from datetime import datetime, timezone
+from typing import List, Set, Dict, Any, Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import (
-    Message,
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    Message,
 )
+from pyrogram.errors import MessageNotModified
+
 from pymongo import MongoClient, ASCENDING
 
 log = logging.getLogger(__name__)
 
-# ───────────────── ENV / ROLES ─────────────────
+# ────────────── ENV & CONSTANTS ──────────────
 
-OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))
+MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
+if not MONGO_URI:
+    raise RuntimeError("MONGODB_URI / MONGO_URI must be set for requirements_panel")
 
-# SUPER_ADMINS = "123,456"
-_super_raw = os.getenv("SUPER_ADMINS", "").strip()
-SUPER_ADMINS = {
-    int(x) for x in _super_raw.replace(" ", "").split(",") if x.strip().lstrip("-").isdigit()
-}
-SUPER_ADMINS.add(OWNER_ID)
+mongo = MongoClient(MONGO_URI)
+db = mongo["Succubot"]
+members_coll = db["requirements_members"]
 
-# Model IDs from env (RONI_ID, RUBY_ID, RIN_ID, SAVY_ID)
-def _env_int(name: str) -> int | None:
-    v = os.getenv(name)
-    if not v:
-        return None
-    v = v.strip()
-    if not v.lstrip("-").isdigit():
-        return None
-    return int(v)
+members_coll.create_index([("user_id", ASCENDING)], unique=True)
 
+OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
-MODEL_IDS = {
-    v
-    for v in [
-        _env_int("RONI_ID"),
-        _env_int("RUBY_ID"),
-        _env_int("RIN_ID"),
-        _env_int("SAVY_ID"),
-    ]
-    if v is not None
-}
-
-# Sanctuary groups to scan
-def _parse_id_list(raw: str) -> List[int]:
-    out: List[int] = []
-    for part in raw.split(","):
-        p = part.strip()
-        if not p:
+def _parse_id_list(val: str | None) -> Set[int]:
+    if not val:
+        return set()
+    out: Set[int] = set()
+    for part in val.replace(" ", "").split(","):
+        if not part:
             continue
-        if p.lstrip("-").isdigit():
-            out.append(int(p))
+        try:
+            out.add(int(part))
+        except ValueError:
+            log.warning("requirements_panel: bad ID in list: %r", part)
     return out
 
 
-SANCTUARY_GROUP_IDS: List[int] = _parse_id_list(
-    os.getenv("SANCTUARY_GROUP_IDS", "")
-)
+SUPER_ADMINS: Set[int] = _parse_id_list(os.getenv("SUPER_ADMINS"))
+MODELS: Set[int] = _parse_id_list(os.getenv("MODELS"))
 
-if not SANCTUARY_GROUP_IDS:
-    # Fallback to single main group
-    main_gid = _env_int("SUCCUBUS_SANCTUARY")
-    if main_gid:
-        SANCTUARY_GROUP_IDS = [main_gid]
+# Sanctuary group IDs to scan
+_group_ids_str = os.getenv("SANCTUARY_GROUP_IDS")
+if not _group_ids_str:
+    # Fallback: single group from SUCCUBUS_SANCTUARY
+    _single = os.getenv("SUCCUBUS_SANCTUARY")
+    SANCTUARY_GROUP_IDS: List[int] = [int(_single)] if _single else []
+else:
+    SANCTUARY_GROUP_IDS = [int(x) for x in _group_ids_str.replace(" ", "").split(",") if x]
 
-SANCTU_LOG_GROUP_ID = _env_int("SANCTU_LOG_GROUP_ID") or _env_int(
-    "SANCTUARY_LOG_CHANNEL"
-)
-
-# ───────────────── MONGO ─────────────────
-
-_MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
-if not _MONGO_URI:
-    raise RuntimeError("MONGO_URI / MONGODB_URI is required for requirements_panel")
-
-_mclient = MongoClient(_MONGO_URI)
-_db = _mclient["Succubot"]
-
-members_coll = _db["requirements_members"]
-payments_coll = _db["requirements_payments"]
-
-# Indexes (idempotent)
-members_coll.create_index([("user_id", ASCENDING)], unique=True)
-payments_coll.create_index([("month_key", ASCENDING), ("user_id", ASCENDING)])
-
-
-# ───────────────── ROLE HELPERS ─────────────────
-
-def _is_owner(uid: int) -> bool:
-    return uid == OWNER_ID
-
-
-def _is_super(uid: int) -> bool:
-    return uid in SUPER_ADMINS
-
-
-def _is_model(uid: int) -> bool:
-    return uid in MODEL_IDS
-
-
-def _role_for(uid: int) -> str:
-    """
-    owner/superadmin => "owner"
-    model            => "model"
-    everyone else    => "user"
-    """
-    if _is_super(uid):
-        return "owner"
-    if _is_model(uid):
-        return "model"
-    return "user"
-
-
-# ───────────────── TEXT / MESSAGES ─────────────────
-
-REQUIREMENTS_PANEL_TEXT = (
-    "📌 <b>Requirements Panel – Owner / Models</b>\n\n"
-    "Use these tools to manage Sanctuary requirements for the month.\n"
-    "Everything you do here updates what SuccuBot uses when checking "
-    "member status or running sweeps, so double-check before you confirm changes.\n\n"
-    "From here you can:\n"
-    "▫️ View the full member status list\n"
-    "▫️ Add manual spend credit for offline payments\n"
-    "▫️ Exempt / un-exempt members\n"
-    "▫️ Scan groups into the tracker\n"
-    "▫️ Send reminder DMs to members who are behind\n"
-    "▫️ Send final-warning DMs to those still not meeting minimums\n\n"
-    "All changes here affect this month’s requirement checks and future sweeps/reminders.\n\n"
-    "<i>Only you and approved model admins see this panel. Members just see their own status.</i>"
-)
-
-# Randomized reminder messages – behind, final etc.
-# (You can tweak / add more strings any time.)
-REMINDER_MESSAGES_BEHIND: List[str] = [
-    "👀 Little Sanctuary check-in: you’re a bit behind on this month’s requirements. "
-    "If you want to stay in the Sanctuary, make sure you get your spend or games in before the deadline, okay? 💋",
-
-    "✨ Psst… your name popped up on my ‘behind on requirements’ list. "
-    "We’d love to keep you in the Sanctuary, so please catch up before the month resets. 💕",
-
-    "📌 Friendly reminder from your SuccuBabes: you haven’t quite met this month’s minimums yet. "
-    "Take a peek at the rules and grab a game or a goodie so you don’t lose access. 😈",
-]
-
-FINAL_WARNING_MESSAGES: List[str] = [
-    "🚨 Final Sanctuary warning: you still haven’t met this month’s requirements. "
-    "If nothing changes by the deadline, you’ll be removed from the Sanctuary until you’re ready to meet the minimums.",
-
-    "❗ This is your last reminder about requirements. "
-    "You’re still short for this month and will be removed if you don’t catch up before the cutoff.",
-
-    "⚠️ Final notice: your account is still marked as not meeting Sanctuary requirements. "
-    "Please fix it ASAP if you want to keep your access.",
-]
-
-
-# ───────────────── SMALL UTILITIES ─────────────────
-
-def _month_key_now() -> str:
-    now = datetime.utcnow()
-    return f"{now.year:04d}-{now.month:02d}"
-
-
-def _build_owner_keyboard() -> InlineKeyboardMarkup:
-    # Full admin / owner keyboard
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "📋 Member Status List", callback_data="reqpanel:list_members"
-                ),
-                InlineKeyboardButton(
-                    "➕ Add Manual Spend", callback_data="reqpanel:add_spend"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🛡 Exempt / Un-exempt", callback_data="reqpanel:exempt_menu"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📡 Scan Group Members", callback_data="reqpanel:scan"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "💌 Send Reminders (Behind Only)",
-                    callback_data="reqpanel:send_reminders",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🚨 Send Final Warnings",
-                    callback_data="reqpanel:send_final",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⬅️ Back to Requirements Menu",
-                    callback_data="reqpanel:home",
-                )
-            ],
-        ]
-    )
-
-
-def _build_model_keyboard() -> InlineKeyboardMarkup:
-    # Limited model keyboard (no scan / no exemptions / no final warnings)
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "📋 Member Status List", callback_data="reqpanel:list_members"
-                ),
-                InlineKeyboardButton(
-                    "➕ Add Manual Spend", callback_data="reqpanel:add_spend"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "💌 Send Reminders (Behind Only)",
-                    callback_data="reqpanel:send_reminders",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "⬅️ Back to Requirements Menu",
-                    callback_data="reqpanel:home",
-                )
-            ],
-        ]
-    )
-
-
-def _build_denied_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "⬅️ Back to Sanctuary Menu", callback_data="portal:home"
-                )
-            ]
-        ]
-    )
-
-
-def _log_to_group(client: Client, text: str):
-    if not SANCTU_LOG_GROUP_ID:
-        return
-    try:
-        client.loop.create_task(
-            client.send_message(SANCTU_LOG_GROUP_ID, text, disable_web_page_preview=True)
-        )
-    except Exception as e:
-        log.warning("requirements_panel: failed to send log message: %s", e)
-
-
-# ───────────────── CORE DB HELPERS ─────────────────
-
-def upsert_member_from_tg(user_obj, group_id: int):
-    """
-    Store / update a member from Telegram user object.
-    """
-    if user_obj.is_bot:
-        return
-
-    members_coll.update_one(
-        {"user_id": user_obj.id},
-        {
-            "$set": {
-                "user_id": user_obj.id,
-                "first_name": user_obj.first_name or "",
-                "last_name": user_obj.last_name or "",
-                "username": user_obj.username or "",
-                "updated_at": datetime.utcnow(),
-            },
-            "$addToSet": {"groups": group_id},
-        },
-        upsert=True,
-    )
-
-
-def add_manual_spend(user_id: int, amount: float, note: str | None = None):
-    now = datetime.utcnow()
-    month_key = _month_key_now()
-    doc = {
-        "user_id": user_id,
-        "amount": float(amount),
-        "note": note or "",
-        "created_at": now,
-        "month_key": month_key,
-    }
-    payments_coll.insert_one(doc)
-
-
-def get_monthly_progress() -> Tuple[int, int]:
-    """
-    Returns (met, total). For now, this is a very simple calculation:
-    - We treat anyone with >= 20 spend this month as 'met'.
-    - Everyone else in members_coll is 'total'.
-    You can tweak thresholds later.
-    """
-    month_key = _month_key_now()
-    pipeline = [
-        {"$match": {"month_key": month_key}},
-        {
-            "$group": {
-                "_id": "$user_id",
-                "total": {"$sum": "$amount"},
-            }
-        },
-    ]
-    spends: Dict[int, float] = {
-        row["_id"]: float(row["total"]) for row in payments_coll.aggregate(pipeline)
-    }
-
-    all_members = [m["user_id"] for m in members_coll.find({}, {"user_id": 1})]
-    total = len(all_members)
-    if not total:
-        return 0, 0
-
-    MET_THRESHOLD = float(os.getenv("REQUIREMENTS_SPEND_MIN", "20"))
-    met = sum(1 for uid in all_members if spends.get(uid, 0.0) >= MET_THRESHOLD)
-    return met, total
-
-
-# ───────────────── SCAN HELPERS ─────────────────
-
-async def scan_sanctuary_groups(app: Client) -> int:
-    """
-    Scan all configured SANCTUARY_GROUP_IDS and upsert members into Mongo.
-
-    This DOES NOT care where the command was pressed (DM or group);
-    it always uses the env-configured group IDs.
-    """
-    if not SANCTUARY_GROUP_IDS:
-        raise RuntimeError("No SANCTUARY_GROUP_IDS or SUCCUBUS_SANCTUARY configured")
-
-    total = 0
-    for gid in SANCTUARY_GROUP_IDS:
+LOG_GROUP_ID: Optional[int] = None
+for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
+    if os.getenv(key):
         try:
-            async for member in app.get_chat_members(gid):
-                upsert_member_from_tg(member.user, gid)
-                total += 1
-        except Exception as e:
-            log.warning("requirements_panel: failed scanning group %s: %s", gid, e)
-    return total
+            LOG_GROUP_ID = int(os.getenv(key))
+            break
+        except ValueError:
+            pass
 
+# Minimum requirement total to be "met"
+REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 
-# ───────────────── REGISTER ─────────────────
+# Simple in-memory state for multi-step flows (manual spend, lookups, etc.)
+STATE: Dict[int, Dict[str, Any]] = {}
+
+# ────────────── Helper functions ──────────────
+
+def _is_owner(user_id: int) -> bool:
+    return user_id == OWNER_ID
+
+def _is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMINS or _is_owner(user_id)
+
+def _is_model(user_id: int) -> bool:
+    return user_id in MODELS or _is_owner(user_id)
+
+def _is_admin_or_model(user_id: int) -> bool:
+    return _is_super_admin(user_id) or _is_model(user_id)
+
+async def _safe_edit_text(msg: Message, **kwargs):
+    try:
+        return await msg.edit_text(**kwargs)
+    except MessageNotModified:
+        return msg
+
+async def _safe_send(app: Client, chat_id: int, text: str):
+    try:
+        return await app.send_message(chat_id, text)
+    except Exception as e:
+        log.warning("requirements_panel: failed to send message to %s: %s", chat_id, e)
+        return None
+
+async def _log_event(app: Client, text: str):
+    if LOG_GROUP_ID is None:
+        return
+    await _safe_send(app, LOG_GROUP_ID, f"[Requirements] {text}")
+
+def _member_doc(user_id: int) -> Dict[str, Any]:
+    doc = members_coll.find_one({"user_id": user_id}) or {}
+    return {
+        "user_id": user_id,
+        "first_name": doc.get("first_name", ""),
+        "username": doc.get("username"),
+        "manual_spend": float(doc.get("manual_spend", 0.0)),
+        "is_exempt": bool(doc.get("is_exempt", False)),
+        "reminder_sent": bool(doc.get("reminder_sent", False)),
+        "final_warning_sent": bool(doc.get("final_warning_sent", False)),
+        "last_updated": doc.get("last_updated"),
+    }
+
+def _format_member_status(doc: Dict[str, Any]) -> str:
+    total = doc["manual_spend"]
+    exempt = doc["is_exempt"]
+    status: str
+    if exempt:
+        status = "✅ Marked exempt from requirements this month."
+    elif total >= REQUIRED_MIN_SPEND:
+        status = f"✅ Requirements met with ${total:.2f} logged."
+    else:
+        status = (
+            f"⚠️ Currently behind.\n"
+            f"Logged so far: ${total:.2f} (minimum ${REQUIRED_MIN_SPEND:.2f})."
+        )
+    lines = [
+        f"<b>Requirement Status</b>",
+        "",
+        status,
+    ]
+    if doc.get("last_updated"):
+        dt = doc["last_updated"].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        lines.append(f"\nLast updated: <code>{dt}</code>")
+    return "\n".join(lines)
+
+# ────────────── DM text templates ──────────────
+
+REMINDER_MSGS = [
+    "Hi {name}! 💋 Just a sweet reminder that Sanctuary requirements are still open this month. "
+    "If you’d like to stay in the Sanctuary, make sure you’ve hit your minimum by the deadline. 💞",
+
+    "Hey {name} ✨ You’re showing as <b>behind</b> on Sanctuary requirements right now. "
+    "If that’s a mistake or you’ve already played/spent, please let one of the models know so we can update it.",
+
+    "Psst, {name}… 😈 SuccuBot here. I’m showing that you haven’t hit requirements yet for this month. "
+    "Please check the menus or DM a model so we can get you caught up ♥",
+]
+
+FINAL_WARNING_MSGS = [
+    "Hi {name}. This is your <b>final warning</b> for Sanctuary requirements this month. "
+    "If your requirements are not met by the deadline, you’ll be removed from the Sanctuary and will "
+    "need to pay the door fee again to come back.",
+
+    "{name}, you are still showing as <b>behind</b> on Sanctuary requirements. This is your last notice. "
+    "If this isn’t updated in time, you’ll be removed until requirements are met and the door fee is repaid.",
+
+    "Final notice for this month, {name}: Sanctuary requirements are still not met on your account. "
+    "If this isn’t fixed before the sweep, you’ll be removed and will need to re-enter through the door fee.",
+]
+
+# ────────────── Keyboards ──────────────
+
+def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("📍 Check My Status", callback_data="reqpanel:self")],
+    ]
+
+    if is_admin:
+        rows.append(
+            [InlineKeyboardButton("🧾 Look Up Member", callback_data="reqpanel:lookup")]
+        )
+        rows.append(
+            [InlineKeyboardButton("🛠 Owner / Models Tools", callback_data="reqpanel:admin")]
+        )
+
+    rows.append(
+        [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="portal:home")]
+    )
+    return InlineKeyboardMarkup(rows)
+
+def _admin_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📋 Member Status List", callback_data="reqpanel:list"),
+                InlineKeyboardButton("➕ Add Manual Spend", callback_data="reqpanel:add_spend"),
+            ],
+            [
+                InlineKeyboardButton("✅ Exempt / Un-exempt", callback_data="reqpanel:toggle_exempt"),
+            ],
+            [
+                InlineKeyboardButton("📡 Scan Group Members", callback_data="reqpanel:scan"),
+            ],
+            [
+                InlineKeyboardButton("💌 Send Reminders (Behind Only)", callback_data="reqpanel:reminders"),
+            ],
+            [
+                InlineKeyboardButton("⚠️ Send Final Warnings", callback_data="reqpanel:final_warnings"),
+            ],
+            [
+                InlineKeyboardButton("⬅ Back to Requirements Menu", callback_data="reqpanel:home"),
+            ],
+        ]
+    )
+
+# ────────────── Core handlers ──────────────
 
 def register(app: Client):
-    # Just so we don't crash if payments module is missing
-    try:
-        met, total = get_monthly_progress()
-        log.info(
-            "requirements_panel: payments.get_monthly_progress -> met=%s total=%s",
-            met,
-            total,
-        )
-    except Exception as e:
-        log.warning(
-            "requirements_panel: payments.get_monthly_progress not available, using dummy 0/0 (%s)",
-            e,
-        )
 
     log.info(
         "✅ handlers.requirements_panel registered (OWNER_ID=%s, super_admins=%s, models=%s, groups=%s)",
         OWNER_ID,
         SUPER_ADMINS,
-        MODEL_IDS,
+        MODELS,
         SANCTUARY_GROUP_IDS,
     )
 
-    # ── ENTRY POINT: open the panel (owner/models only) ──
-    @app.on_callback_query(filters.regex(r"^reqpanel:open$"))
-    async def reqpanel_open_cb(_, cq: CallbackQuery):
-        uid = cq.from_user.id
-        role = _role_for(uid)
-
-        if role == "user":
-            await cq.message.edit_text(
-                "You don’t have access to the Requirements Panel.\n"
-                "If you think this is a mistake, contact Sanctuary management.",
-                reply_markup=_build_denied_keyboard(),
-            )
-            await cq.answer()
-            return
-
-        kb = _build_owner_keyboard() if role == "owner" else _build_model_keyboard()
-        await cq.message.edit_text(
-            REQUIREMENTS_PANEL_TEXT,
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
-    # Simple "home" goes back to same panel
-    @app.on_callback_query(filters.regex(r"^reqpanel:home$"))
+    # Entry point from main menu button
+    @app.on_callback_query(filters.regex("^reqpanel:home$"))
     async def reqpanel_home_cb(_, cq: CallbackQuery):
-        uid = cq.from_user.id
-        role = _role_for(uid)
-
-        if role == "user":
-            await cq.message.edit_text(
-                "You don’t have access to the Requirements Panel.\n"
-                "If you think this is a mistake, contact Sanctuary management.",
-                reply_markup=_build_denied_keyboard(),
+        user_id = cq.from_user.id
+        is_admin = _is_admin_or_model(user_id)
+        text_lines = [
+            "<b>Requirements Panel – Sanctuary</b>",
+            "",
+            "Use this panel to check how you’re doing on Sanctuary requirements this month.",
+            "",
+            "• <b>Check My Status</b> – see if you’re met or behind.",
+        ]
+        if is_admin:
+            text_lines.extend(
+                [
+                    "• <b>Look Up Member</b> – view another member’s status.",
+                    "• <b>Owner / Models Tools</b> – open the full admin tools panel "
+                    "(scans, manual credits, exemptions, reminders).",
+                ]
             )
-            await cq.answer()
-            return
+        text_lines.append("")
+        text_lines.append(
+            "Only you and approved model admins see the admin tools. "
+            "Regular members just see their own status."
+        )
 
-        kb = _build_owner_keyboard() if role == "owner" else _build_model_keyboard()
-        await cq.message.edit_text(
-            REQUIREMENTS_PANEL_TEXT,
-            reply_markup=kb,
+        await _safe_edit_text(
+            cq.message,
+            text="\n".join(text_lines),
+            reply_markup=_root_kb(is_admin),
             disable_web_page_preview=True,
         )
         await cq.answer()
 
-    # ── SCAN GROUPS ──
-    @app.on_callback_query(filters.regex(r"^reqpanel:scan$"))
-    async def reqpanel_scan_cb(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id
-        if not _is_super(uid):
-            await cq.answer("Only Roni / super admins can run a scan.", show_alert=True)
-            return
+    # Direct open from somewhere else (optional)
+    @app.on_callback_query(filters.regex("^reqpanel:open$"))
+    async def reqpanel_open_cb(_, cq: CallbackQuery):
+        await reqpanel_home_cb(_, cq)
 
-        try:
-            count = await scan_sanctuary_groups(client)
-            msg = f"✅ Scan complete.\nIndexed or updated <b>{count}</b> members from Sanctuary group(s)."
-            await cq.message.edit_text(
-                msg,
-                reply_markup=_build_owner_keyboard(),
-                disable_web_page_preview=True,
-            )
-            await cq.answer("Scan complete.", show_alert=False)
-            _log_to_group(
-                client,
-                f"✅ Requirements scan run by <code>{uid}</code> → indexed {count} members.",
-            )
-        except Exception as e:
-            log.exception("requirements_panel: scan failed: %s", e)
-            await cq.answer("Scan failed. Check logs.", show_alert=True)
-
-    # ── MEMBER STATUS LIST (owner + models) ──
-    @app.on_callback_query(filters.regex(r"^reqpanel:list_members$"))
-    async def reqpanel_list_members_cb(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id
-        role = _role_for(uid)
-        if role == "user":
-            await cq.answer("You don’t have access to member status.", show_alert=True)
-            return
-
-        docs = list(
-            members_coll.find({}, {"user_id": 1, "first_name": 1, "username": 1}).limit(
-                50
-            )
-        )
-        if not docs:
-            text = "No tracked members yet. Try running a scan first."
-        else:
-            lines = []
-            for d in docs:
-                uname = f"@{d.get('username')}" if d.get("username") else ""
-                nm = d.get("first_name") or "Member"
-                lines.append(f"• <code>{d['user_id']}</code> {nm} {uname}")
-            text = "📋 <b>Tracked members (first 50):</b>\n\n" + "\n".join(lines)
-
-        kb = _build_owner_keyboard() if role == "owner" else _build_model_keyboard()
-        await cq.message.edit_text(
-            text,
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
-    # ── ADD MANUAL SPEND (owner + models) ──
-    @app.on_callback_query(filters.regex(r"^reqpanel:add_spend$"))
-    async def reqpanel_add_spend_cb(_, cq: CallbackQuery):
-        uid = cq.from_user.id
-        role = _role_for(uid)
-        if role == "user":
-            await cq.answer("You don’t have permission to add manual spend.", show_alert=True)
+    # Owner / models tools panel
+    @app.on_callback_query(filters.regex("^reqpanel:admin$"))
+    async def reqpanel_admin_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and approved models can open this.", show_alert=True)
             return
 
         text = (
-            "➕ <b>Add Manual Spend</b>\n\n"
-            "Send me a message in this format:\n"
-            "<code>USER_ID  amount  [note]</code>\n\n"
-            "Example:\n"
-            "<code>123456789  15  from CashApp game night</code>\n\n"
-            "This adds extra credited dollars on top of Stripe games for this month only."
+            "<b>Requirements Panel – Owner / Models</b>\n\n"
+            "Use these tools to manage Sanctuary requirements for the month.\n"
+            "Everything you do here updates what SuccuBot uses when checking "
+            "member status or running sweeps, so double-check before you confirm changes.\n\n"
+            "From here you can:\n"
+            "▪️ View the full member status list\n"
+            "▪️ Add manual spend credit for offline payments\n"
+            "▪️ Exempt / un-exempt members\n"
+            "▪️ Scan groups into the tracker\n"
+            "▪️ Send reminder DMs to members who are behind\n"
+            "▪️ Send final-warning DMs to those still not meeting minimums\n\n"
+            "All changes here affect this month’s requirement checks and future sweeps/reminders.\n\n"
+            "<i>Only you and approved model admins see this panel. Members just see their own status.</i>"
         )
-        await cq.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ Back", callback_data="reqpanel:home"
-                        )
-                    ]
-                ]
-            ),
+
+        await _safe_edit_text(
+            cq.message,
+            text=text,
+            reply_markup=_admin_kb(),
             disable_web_page_preview=True,
         )
         await cq.answer()
 
-    @app.on_message(filters.private & filters.reply)
-    async def requirements_reply_handler(client: Client, m: Message):
-        """
-        When Roni / models reply to the 'Add Manual Spend' message in DMs
-        with 'USER_ID amount note', parse and store.
-        """
-        uid = m.from_user.id
-        role = _role_for(uid)
-        if role == "user":
+    # ────────────── Self-status & lookup ──────────────
+
+    @app.on_callback_query(filters.regex("^reqpanel:self$"))
+    async def reqpanel_self_cb(_, cq: CallbackQuery):
+        user = cq.from_user
+        doc = _member_doc(user.id)
+        text = _format_member_status(doc)
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=text,
+            reply_markup=_root_kb(_is_admin_or_model(user.id)),
+            disable_web_page_preview=True,
+        )
+
+    @app.on_callback_query(filters.regex("^reqpanel:lookup$"))
+    async def reqpanel_lookup_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can look up other members.", show_alert=True)
             return
 
-        if "Add Manual Spend" not in (m.reply_to_message.text or ""):
+        STATE[user_id] = {"mode": "lookup"}
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=(
+                "<b>Look Up Member</b>\n\n"
+                "Send me either:\n"
+                "• A forwarded message from the member\n"
+                "• Their @username\n"
+                "• Or their numeric Telegram ID\n\n"
+                "I’ll show you their current requirement status."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back to Requirements Menu", callback_data="reqpanel:home")]]
+            ),
+        )
+
+    @app.on_message(filters.private & filters.text)
+    async def requirements_state_router(client: Client, msg: Message):
+        user_id = msg.from_user.id
+        state = STATE.get(user_id)
+        if not state:
             return
 
-        parts = (m.text or "").split()
-        if len(parts) < 2:
-            await m.reply_text(
-                "Format is:\n<code>USER_ID  amount  [note]</code>", quote=True
+        mode = state.get("mode")
+
+        # LOOKUP FLOW
+        if mode == "lookup":
+            target_id: Optional[int] = None
+
+            if msg.forward_from:
+                target_id = msg.forward_from.id
+            elif msg.text.startswith("@"):
+                username = msg.text[1:].strip().lower()
+                doc = members_coll.find_one({"username": username})
+                if doc:
+                    target_id = doc["user_id"]
+            else:
+                try:
+                    target_id = int(msg.text.strip())
+                except ValueError:
+                    pass
+
+            if not target_id:
+                await msg.reply_text(
+                    "I couldn’t figure out who you meant. Try again with a forwarded message, "
+                    "@username, or numeric ID."
+                )
+                return
+
+            doc = _member_doc(target_id)
+            text = _format_member_status(doc)
+            await msg.reply_text(text)
+            STATE.pop(user_id, None)
+            return
+
+        # ADD SPEND FLOW
+        if mode == "add_spend":
+            try:
+                parts = msg.text.strip().split()
+                if len(parts) < 2:
+                    raise ValueError
+                target_id = int(parts[0])
+                amount = float(parts[1])
+                note = " ".join(parts[2:]) if len(parts) > 2 else ""
+            except ValueError:
+                await msg.reply_text(
+                    "Format should be:\n"
+                    "<code>USER_ID amount [note]</code>\n\n"
+                    "Example:\n<code>123456789 15 cashapp game night</code>"
+                )
+                return
+
+            doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
+            new_total = float(doc.get("manual_spend", 0.0)) + amount
+
+            members_coll.update_one(
+                {"user_id": target_id},
+                {
+                    "$set": {
+                        "manual_spend": new_total,
+                        "last_updated": datetime.now(timezone.utc),
+                    },
+                    "$setOnInsert": {
+                        "first_name": "",
+                    },
+                },
+                upsert=True,
             )
+
+            await msg.reply_text(
+                f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
+                f"New manual total: ${new_total:.2f}"
+            )
+            await _log_event(
+                client,
+                f"Manual spend +${amount:.2f} for {target_id} by {user_id}. Note: {note or '(none)'}",
+            )
+            STATE.pop(user_id, None)
             return
 
-        try:
-            target_id = int(parts[0])
-            amount = float(parts[1])
-        except ValueError:
-            await m.reply_text("USER_ID and amount must be numbers.", quote=True)
+        # TOGGLE EXEMPT FLOW
+        if mode == "toggle_exempt":
+            try:
+                target_id = int(msg.text.strip())
+            except ValueError:
+                await msg.reply_text("Please send just the numeric Telegram user ID.")
+                return
+
+            doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
+            new_val = not bool(doc.get("is_exempt", False))
+            members_coll.update_one(
+                {"user_id": target_id},
+                {
+                    "$set": {
+                        "is_exempt": new_val,
+                        "last_updated": datetime.now(timezone.utc),
+                    },
+                    "$setOnInsert": {"first_name": ""},
+                },
+                upsert=True,
+            )
+            await msg.reply_text(
+                f"User <code>{target_id}</code> is now "
+                f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month."
+            )
+            await _log_event(
+                client,
+                f"Exempt toggled to {new_val} for {target_id} by {user_id}",
+            )
+            STATE.pop(user_id, None)
             return
 
-        note = " ".join(parts[2:]) if len(parts) > 2 else ""
+    # ────────────── Admin-panel buttons ──────────────
 
-        add_manual_spend(target_id, amount, note)
-        await m.reply_text(
-            f"✅ Logged <b>${amount:.2f}</b> manual credit for <code>{target_id}</code>.\nNote: {note or '—'}",
-            quote=True,
+    @app.on_callback_query(filters.regex("^reqpanel:list$"))
+    async def reqpanel_list_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can view the full list.", show_alert=True)
+            return
+
+        docs = list(members_coll.find().sort("user_id", ASCENDING).limit(50))
+        if not docs:
+            text = (
+                "<b>Member Status List</b>\n\n"
+                "No tracked members yet. Try running a scan first."
+            )
+        else:
+            lines = ["<b>Member Status List (first 50)</b>\n"]
+            for d in docs:
+                uid = d["user_id"]
+                total = float(d.get("manual_spend", 0.0))
+                exempt = d.get("is_exempt", False)
+                if exempt:
+                    status = "EXEMPT"
+                elif total >= REQUIRED_MIN_SPEND:
+                    status = "MET"
+                else:
+                    status = "BEHIND"
+                lines.append(
+                    f"• <code>{uid}</code> – {status} (${total:.2f})"
+                )
+            text = "\n".join(lines)
+
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=text,
+            reply_markup=_admin_kb(),
+            disable_web_page_preview=True,
         )
-        _log_to_group(
+
+    @app.on_callback_query(filters.regex("^reqpanel:add_spend$"))
+    async def reqpanel_add_spend_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can add spend.", show_alert=True)
+            return
+
+        STATE[user_id] = {"mode": "add_spend"}
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=(
+                "<b>Add Manual Spend</b>\n\n"
+                "Send me a message in this format:\n"
+                "<code>USER_ID amount [note]</code>\n\n"
+                "Example:\n<code>123456789 15 cashapp game night</code>\n\n"
+                "This adds extra credited dollars on top of Stripe / games "
+                "for this month only."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back to Requirements Menu", callback_data="reqpanel:home")]]
+            ),
+            disable_web_page_preview=True,
+        )
+
+    @app.on_callback_query(filters.regex("^reqpanel:toggle_exempt$"))
+    async def reqpanel_toggle_exempt_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can change exemptions.", show_alert=True)
+            return
+
+        STATE[user_id] = {"mode": "toggle_exempt"}
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=(
+                "<b>Exempt / Un-exempt Member</b>\n\n"
+                "Send me the numeric Telegram user ID for the member.\n\n"
+                "I’ll flip their exempt status for this month."
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back to Requirements Menu", callback_data="reqpanel:home")]]
+            ),
+            disable_web_page_preview=True,
+        )
+
+    @app.on_callback_query(filters.regex("^reqpanel:scan$"))
+    async def reqpanel_scan_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can run scans.", show_alert=True)
+            return
+
+        if not SANCTUARY_GROUP_IDS:
+            await cq.answer("No Sanctuary group IDs configured.", show_alert=True)
+            return
+
+        total_indexed = 0
+        for gid in SANCTUARY_GROUP_IDS:
+            try:
+                async for member in client.get_chat_members(gid):
+                    if member.user.is_bot:
+                        continue
+                    u = member.user
+                    username = (u.username or "").lower() if u.username else None
+                    members_coll.update_one(
+                        {"user_id": u.id},
+                        {
+                            "$set": {
+                                "first_name": u.first_name or "",
+                                "username": username,
+                                "last_updated": datetime.now(timezone.utc),
+                            },
+                        },
+                        upsert=True,
+                    )
+                    total_indexed += 1
+            except Exception as e:
+                log.warning("requirements_panel: failed scanning group %s: %s", gid, e)
+
+        await _log_event(
             client,
-            f"💰 Manual spend added by <code>{uid}</code> → user <code>{target_id}</code> +${amount:.2f}\nNote: {note}",
+            f"Scan complete by {user_id}: indexed or updated {total_indexed} members.",
         )
 
-    # ── PLACEHOLDERS FOR EXEMPT / REMINDERS / FINAL WARNINGS ──
-    # (Buttons already wired; full DM-sending logic can be filled out later.)
+        await cq.answer("Scan complete.", show_alert=False)
+        await _safe_edit_text(
+            cq.message,
+            text=(
+                f"✅ Scan complete.\n"
+                f"Indexed or updated {total_indexed} members from Sanctuary group(s)."
+            ),
+            reply_markup=_admin_kb(),
+            disable_web_page_preview=True,
+        )
 
-    @app.on_callback_query(filters.regex(r"^reqpanel:exempt_menu$"))
-    async def reqpanel_exempt_menu_cb(_, cq: CallbackQuery):
-        if not _is_super(cq.from_user.id):
-            await cq.answer("Only Roni / super admins can change exemptions.", show_alert=True)
+    @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
+    async def reqpanel_reminders_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can send reminders.", show_alert=True)
             return
 
-        await cq.answer("Exempt menu coming soon 💕", show_alert=True)
+        # behind + not exempt + no reminder yet
+        docs = members_coll.find(
+            {
+                "is_exempt": {"$ne": True},
+                "manual_spend": {"$lt": REQUIRED_MIN_SPEND},
+                "reminder_sent": {"$ne": True},
+            }
+        )
 
-    @app.on_callback_query(filters.regex(r"^reqpanel:send_reminders$"))
-    async def reqpanel_send_reminders_cb(_, cq: CallbackQuery):
-        uid = cq.from_user.id
-        role = _role_for(uid)
-        if role == "user":
-            await cq.answer("You don’t have permission to send reminders.", show_alert=True)
+        count = 0
+        for d in docs:
+            uid = d["user_id"]
+            name = d.get("first_name") or "there"
+            msg = random.choice(REMINDER_MSGS).format(name=name)
+            sent = await _safe_send(client, uid, msg)
+            if not sent:
+                continue
+            members_coll.update_one(
+                {"user_id": uid},
+                {"$set": {"reminder_sent": True, "last_updated": datetime.now(timezone.utc)}},
+            )
+            count += 1
+
+        await _log_event(client, f"Reminder sweep sent to {count} members by {user_id}")
+        await cq.answer(f"Sent reminders to {count} member(s).", show_alert=True)
+        await _safe_edit_text(
+            cq.message,
+            text=f"💌 Reminder sweep complete.\nSent to {count} member(s) who are behind.",
+            reply_markup=_admin_kb(),
+            disable_web_page_preview=True,
+        )
+
+    @app.on_callback_query(filters.regex("^reqpanel:final_warnings$"))
+    async def reqpanel_final_warnings_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can send final warnings.", show_alert=True)
             return
 
-        # Real logic later – for now, just acknowledge.
-        await cq.answer("Reminder sending logic will go here 💌", show_alert=True)
+        docs = members_coll.find(
+            {
+                "is_exempt": {"$ne": True},
+                "manual_spend": {"$lt": REQUIRED_MIN_SPEND},
+                "final_warning_sent": {"$ne": True},
+            }
+        )
 
-    @app.on_callback_query(filters.regex(r"^reqpanel:send_final$"))
-    async def reqpanel_send_final_cb(_, cq: CallbackQuery):
-        if not _is_super(cq.from_user.id):
-            await cq.answer("Only Roni / super admins can send final warnings.", show_alert=True)
-            return
+        count = 0
+        for d in docs:
+            uid = d["user_id"]
+            name = d.get("first_name") or "there"
+            msg = random.choice(FINAL_WARNING_MSGS).format(name=name)
+            sent = await _safe_send(client, uid, msg)
+            if not sent:
+                continue
+            members_coll.update_one(
+                {"user_id": uid},
+                {"$set": {"final_warning_sent": True, "last_updated": datetime.now(timezone.utc)}},
+            )
+            count += 1
 
-        await cq.answer("Final-warning logic will go here ⚠️", show_alert=True)
+        await _log_event(client, f"Final warnings sent to {count} members by {user_id}")
+        await cq.answer(f"Sent final warnings to {count} member(s).", show_alert=True)
+        await _safe_edit_text(
+            cq.message,
+            text=f"⚠️ Final-warning sweep complete.\nSent to {count} member(s) still behind.",
+            reply_markup=_admin_kb(),
+            disable_web_page_preview=True,
+        )
