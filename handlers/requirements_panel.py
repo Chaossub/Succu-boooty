@@ -5,11 +5,17 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Dict, Tuple, Optional, Union
 
 from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, Message
+from pyrogram.types import (
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    Message,
+)
+
+from utils.menu_store import store  # Mongo-backed key/value store
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +26,7 @@ try:
     from payments import get_monthly_progress as _real_get_monthly_progress  # type: ignore
 
     def get_monthly_progress(user_id: int, year: int, month: int) -> Tuple[float, int]:
-        # game_dollars, model_count
+        # (game_dollars, model_count)
         return _real_get_monthly_progress(user_id, year, month)
 
 except Exception:
@@ -31,23 +37,44 @@ except Exception:
         return 0.0, 0
 
 
-# Try to use your existing ReqStore (for exemptions)
+# We *try* to use an external ReqStore; if it’s missing, we make a Mongo-backed one
 try:
     from req_store import ReqStore as _RealReqStore  # type: ignore
 
     _store = _RealReqStore()
 except Exception:
-    log.warning("requirements_panel: req_store.ReqStore not available, using in-memory dummy store")
+    log.warning(
+        "requirements_panel: req_store.ReqStore not available, using Mongo-backed fallback store via menu_store"
+    )
 
-    class _DummyStore:
-        def __init__(self):
-            self._exempt: set[int] = set()
+    _EXEMPT_KEY = "ReqExemptV1"  # stored as JSON list of user IDs
 
+    def _load_exempt_ids() -> set[int]:
+        raw = store.get_menu(_EXEMPT_KEY) or "[]"
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return {int(x) for x in data}
+        except Exception:
+            pass
+        return set()
+
+    def _save_exempt_ids(ids: set[int]) -> None:
+        try:
+            store.set_menu(_EXEMPT_KEY, json.dumps(sorted(ids)))
+        except Exception:
+            log.exception("Failed to persist exemption list")
+
+    class _MongoReqStore:
         def has_valid_exemption(self, user_id: int, chat_id: Optional[int] = None) -> bool:
-            return user_id in self._exempt
+            ids = _load_exempt_ids()
+            return user_id in ids
 
         def remove_exemption(self, user_id: int, chat_id: Optional[int] = None) -> None:
-            self._exempt.discard(user_id)
+            ids = _load_exempt_ids()
+            if user_id in ids:
+                ids.remove(user_id)
+                _save_exempt_ids(ids)
 
         def add_exemption(
             self,
@@ -55,16 +82,15 @@ except Exception:
             chat_id: Optional[int] = None,
             until_ts: Optional[float] = None,
         ) -> None:
-            self._exempt.add(user_id)
+            ids = _load_exempt_ids()
+            if user_id not in ids:
+                ids.add(user_id)
+                _save_exempt_ids(ids)
 
-    _store = _DummyStore()
+    _store = _MongoReqStore()
 
 
 # ────────────── ENV / CONSTANTS ──────────────
-
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
-MANUAL_FILE = DATA_DIR / "manual_requirements.json"
 
 OWNER_ID_ENV = os.getenv("OWNER_ID")
 OWNER_ID: Optional[int] = int(OWNER_ID_ENV) if OWNER_ID_ENV else None
@@ -76,11 +102,17 @@ REQ_ADMINS_RAW = os.getenv("REQUIREMENTS_ADMINS", "") or ""
 REQ_MIN_DOLLARS = float(os.getenv("REQ_REQUIRE_DOLLARS", "20"))
 REQ_MIN_MODELS = int(os.getenv("REQ_REQUIRE_MODELS", "2"))
 
+# Mongo menu_store keys for this panel
+MANUAL_KEY = "ReqManualV1"   # per-month extra spend
+MEMBERS_KEY = "ReqMembersV1" # logged members from /req_sync
+
 # user_id -> action code (for admin/model flows)
+# actions:
+#   "add_spend_for:<uid>"
 _pending_actions: Dict[int, str] = {}
 
 
-# ────────────── Manual extra spend storage ──────────────
+# ────────────── Manual extra spend storage (Mongo via menu_store) ──────────────
 
 @dataclass
 class ManualEntry:
@@ -92,27 +124,34 @@ def _ym_key(year: int, month: int) -> str:
     return f"{year:04d}-{month:02d}"
 
 
-def _load_manual() -> Dict[str, Dict[str, Dict[str, object]]]:
-    if not MANUAL_FILE.exists():
-        return {}
+def _load_manual_raw() -> Dict[str, Dict[str, Dict[str, object]]]:
+    """
+    Structure:
+    {
+      "YYYY-MM": {
+         "user_id_str": {"extra_dollars": float, "note": "..." }
+      }
+    }
+    """
+    raw = store.get_menu(MANUAL_KEY) or "{}"
     try:
-        with MANUAL_FILE.open("r", encoding="utf-8") as f:
-            return json.load(f)
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
     except Exception:
-        log.exception("Failed to load manual requirements file")
-        return {}
+        log.exception("Failed to decode manual requirements data")
+    return {}
 
 
-def _save_manual(data: Dict[str, Dict[str, Dict[str, object]]]) -> None:
+def _save_manual_raw(data: Dict[str, Dict[str, Dict[str, object]]]) -> None:
     try:
-        with MANUAL_FILE.open("w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        store.set_menu(MANUAL_KEY, json.dumps(data))
     except Exception:
-        log.exception("Failed to save manual requirements file")
+        log.exception("Failed to save manual requirements data")
 
 
 def _get_manual_entry(user_id: int, year: int, month: int) -> ManualEntry:
-    data = _load_manual()
+    data = _load_manual_raw()
     mk = _ym_key(year, month)
     u = data.get(mk, {}).get(str(user_id))
     if not u:
@@ -124,7 +163,7 @@ def _get_manual_entry(user_id: int, year: int, month: int) -> ManualEntry:
 
 
 def _add_manual_spend(user_id: int, year: int, month: int, amount: float, note: str = "") -> ManualEntry:
-    data = _load_manual()
+    data = _load_manual_raw()
     mk = _ym_key(year, month)
     users = data.setdefault(mk, {})
     rec = users.get(str(user_id)) or {"extra_dollars": 0.0, "note": ""}
@@ -136,8 +175,75 @@ def _add_manual_spend(user_id: int, year: int, month: int, amount: float, note: 
             rec["note"] = note
     users[str(user_id)] = rec
     data[mk] = users
-    _save_manual(data)
+    _save_manual_raw(data)
     return _get_manual_entry(user_id, year, month)
+
+
+# ────────────── Tracked members storage (Mongo via menu_store) ──────────────
+
+def _load_members() -> Dict[str, Dict[str, Dict[str, str]]]:
+    """
+    Format:
+    {
+      "users": {
+         "123": {"display": "@name", "first_name": "...", "last_name": "...", "username": "name"},
+         ...
+      }
+    }
+    """
+    raw = store.get_menu(MEMBERS_KEY) or "{}"
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return {"users": {}}
+        data.setdefault("users", {})
+        return data
+    except Exception:
+        log.exception("Failed to decode req_members data")
+        return {"users": {}}
+
+
+def _save_members(data: Dict[str, Dict[str, Dict[str, str]]]) -> None:
+    try:
+        store.set_menu(MEMBERS_KEY, json.dumps(data))
+    except Exception:
+        log.exception("Failed to save req_members data")
+
+
+async def _sync_group_members(client: Client, chat_id: int) -> Tuple[int, int]:
+    """
+    Iterate group members, log them into Mongo (via menu_store).
+    Returns (seen_count, updated_count).
+    """
+    data = _load_members()
+    users = data.setdefault("users", {})
+    seen = 0
+    updated = 0
+
+    async for member in client.iter_chat_members(chat_id):
+        u = member.user
+        if not u or u.is_bot:
+            continue
+        seen += 1
+        key = str(u.id)
+        if u.username:
+            display = f"@{u.username}"
+        else:
+            display = (u.first_name or "Unknown").strip()
+        rec = users.get(key) or {}
+        old_display = rec.get("display")
+        if old_display != display:
+            users[key] = {
+                "display": display,
+                "first_name": u.first_name or "",
+                "last_name": u.last_name or "",
+                "username": u.username or "",
+            }
+            updated += 1
+
+    data["users"] = users
+    _save_members(data)
+    return seen, updated
 
 
 # ────────────── Role helpers ──────────────
@@ -164,6 +270,10 @@ def _role(user_id: int) -> str:
     if user_id in _req_admin_ids():
         return "model"
     return "member"
+
+
+def _ensure_admin(user_id: int) -> bool:
+    return _role(user_id) in ("owner", "model")
 
 
 # ────────────── Status helpers ──────────────
@@ -261,7 +371,6 @@ def _model_home_kb() -> InlineKeyboardMarkup:
 
 
 def _owner_home_kb() -> InlineKeyboardMarkup:
-    # Owner has same tools as models for now, plus back to main.
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📍 Check My Status", callback_data="reqpanel:check_self")],
@@ -294,7 +403,7 @@ async def _show_home(client: Client, obj: Union[CallbackQuery, Message]):
     elif role == "model":
         text = (
             "📌 <b>Requirements Panel – Model Tools</b>\n\n"
-            "You can check your own status, look up a member by ID, add manual spend for approved games, "
+            "You can check your own status, look up a member, add manual spend for approved games, "
             "and mark members exempt when Roni says it’s okay.\n\n"
             "Be careful – changes here affect whether members get to stay in the Sanctuary."
         )
@@ -317,12 +426,100 @@ async def _show_home(client: Client, obj: Union[CallbackQuery, Message]):
         await obj.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
 
 
+def _build_member_list_kb(action: str, page: int = 0, per_page: int = 8) -> Tuple[str, InlineKeyboardMarkup]:
+    """
+    action: "lookup", "add", "exempt"
+    """
+    data = _load_members()
+    users = data.get("users", {})
+    entries = []
+    for uid_str, rec in users.items():
+        display = rec.get("display") or uid_str
+        entries.append((int(uid_str), display))
+    entries.sort(key=lambda x: x[1].lower())
+
+    if not entries:
+        text = (
+            "👥 <b>No members have been logged yet.</b>\n\n"
+            "Ask Roni or a model to run <code>/req_sync</code> in the Sanctuary group to log members "
+            "before using this list."
+        )
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+        )
+        return text, kb
+
+    total = len(entries)
+    max_page = (total - 1) // per_page if total > 0 else 0
+    page = max(0, min(page, max_page))
+    start = page * per_page
+    end = start + per_page
+    slice_entries = entries[start:end]
+
+    if action == "lookup":
+        header = "🔍 <b>Pick a member to view their status.</b>"
+    elif action == "add":
+        header = "💸 <b>Pick a member to add manual spend for.</b>"
+    else:
+        header = "⏸ <b>Pick a member to exempt / un-exempt.</b>"
+
+    lines = [header, "", f"Page {page + 1} of {max_page + 1}"]
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for uid, display in slice_entries:
+        label = f"{display} ({uid})"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"reqpanel:pick:{action}:{uid}",
+                )
+            ]
+        )
+
+    nav_row: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(
+            InlineKeyboardButton("◀", callback_data=f"reqpanel:page:{action}:{page - 1}")
+        )
+    if page < max_page:
+        nav_row.append(
+            InlineKeyboardButton("▶", callback_data=f"reqpanel:page:{action}:{page + 1}")
+        )
+    if nav_row:
+        rows.append(nav_row)
+
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")])
+
+    kb = InlineKeyboardMarkup(rows)
+    return "\n".join(lines), kb
+
+
 # ────────────── register(app) ──────────────
 
 def register(app: Client) -> None:
-    log.info("✅ handlers.requirements_panel registered (OWNER_ID=%s, admins=%s)", OWNER_ID, _req_admin_ids())
+    log.info(
+        "✅ handlers.requirements_panel registered (OWNER_ID=%s, admins=%s)",
+        OWNER_ID,
+        _req_admin_ids(),
+    )
 
-    # main entry from menu button
+    # ───────── Group sync: /req_sync ─────────
+    @app.on_message(filters.group & filters.command(["req_sync", "reqsync"]))
+    async def req_sync_cmd(client: Client, m: Message):
+        if not m.from_user or not _ensure_admin(m.from_user.id):
+            return
+
+        await m.reply_text("👥 Logging members in this chat… this may take a moment.")
+        seen, updated = await _sync_group_members(client, m.chat.id)
+        await m.reply_text(
+            f"✅ Logged <b>{seen}</b> members from this chat.\n"
+            f"Updated / added records: <b>{updated}</b>.\n\n"
+            "These members will now show up in the Requirements pick-from-list screens.",
+            disable_web_page_preview=True,
+        )
+
+    # ───────── main entry from menu button ─────────
     @app.on_callback_query(filters.regex(r"^reqpanel:home$"))
     async def reqpanel_home_cb(client: Client, cq: CallbackQuery):
         await _show_home(client, cq)
@@ -332,7 +529,7 @@ def register(app: Client) -> None:
     async def reqpanel_cmd(client: Client, m: Message):
         await _show_home(client, m)
 
-    # member: check own status
+    # ───────── member: check own status ─────────
     @app.on_callback_query(filters.regex(r"^reqpanel:check_self$"))
     async def reqpanel_check_self(client: Client, cq: CallbackQuery):
         user = cq.from_user
@@ -353,7 +550,7 @@ def register(app: Client) -> None:
             pass
         await cq.answer()
 
-    # info panel
+    # ───────── member info panel ─────────
     @app.on_callback_query(filters.regex(r"^reqpanel:info$"))
     async def reqpanel_info(client: Client, cq: CallbackQuery):
         text = (
@@ -372,12 +569,8 @@ def register(app: Client) -> None:
             pass
         await cq.answer()
 
-    # ────────────── Admin/model tools ──────────────
+    # ───────── Admin/model tools: prompts ─────────
 
-    def _ensure_admin(user_id: int) -> bool:
-        return _role(user_id) in ("owner", "model")
-
-    # look up member prompt
     @app.on_callback_query(filters.regex(r"^reqpanel:lookup_prompt$"))
     async def reqpanel_lookup_prompt(client: Client, cq: CallbackQuery):
         user = cq.from_user
@@ -385,20 +578,13 @@ def register(app: Client) -> None:
             await cq.answer("Only models / Roni can use that.", show_alert=True)
             return
 
-        _pending_actions[user.id] = "lookup"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]])
-        text = (
-            "🔍 <b>Look Up Member</b>\n\n"
-            "Send me the member’s <b>Telegram numeric ID</b> in one message.\n"
-            "I’ll reply with their current monthly requirements status."
-        )
+        text, kb = _build_member_list_kb("lookup", page=0)
         try:
             await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         except Exception:
             pass
         await cq.answer()
 
-    # add manual spend prompt
     @app.on_callback_query(filters.regex(r"^reqpanel:add_spend_prompt$"))
     async def reqpanel_add_spend_prompt(client: Client, cq: CallbackQuery):
         user = cq.from_user
@@ -406,23 +592,13 @@ def register(app: Client) -> None:
             await cq.answer("Only models / Roni can use that.", show_alert=True)
             return
 
-        _pending_actions[user.id] = "add_spend"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]])
-        text = (
-            "💸 <b>Add Manual Spend</b>\n\n"
-            "Send me a message in this format:\n"
-            "<code>USER_ID amount [note]</code>\n\n"
-            "Example:\n"
-            "<code>123456789 15 from CashApp game night</code>\n\n"
-            "This adds extra credited dollars on top of Stripe games for <b>this month only</b>."
-        )
+        text, kb = _build_member_list_kb("add", page=0)
         try:
             await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         except Exception:
             pass
         await cq.answer()
 
-    # exempt toggle prompt
     @app.on_callback_query(filters.regex(r"^reqpanel:exempt_prompt$"))
     async def reqpanel_exempt_prompt(client: Client, cq: CallbackQuery):
         user = cq.from_user
@@ -430,21 +606,115 @@ def register(app: Client) -> None:
             await cq.answer("Only models / Roni can use that.", show_alert=True)
             return
 
-        _pending_actions[user.id] = "exempt"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]])
-        text = (
-            "⏸ <b>Exempt / Un-exempt Member</b>\n\n"
-            "Send me the member’s <b>Telegram numeric ID</b> in one message.\n\n"
-            "If they are currently exempt, I will remove the exemption.\n"
-            "If they are not exempt, I will mark them exempt for this month and future checks."
-        )
+        text, kb = _build_member_list_kb("exempt", page=0)
         try:
             await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         except Exception:
             pass
         await cq.answer()
 
-    # capture admin text actions
+    # ───────── Member list pagination ─────────
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:page:(lookup|add|exempt):(\d+)$"))
+    async def reqpanel_page_cb(client: Client, cq: CallbackQuery):
+        user = cq.from_user
+        if not user or not _ensure_admin(user.id):
+            await cq.answer()
+            return
+
+        _, action, page_str = cq.data.split(":")
+        page = int(page_str)
+        text, kb = _build_member_list_kb(action, page=page)
+        try:
+            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        except Exception:
+            pass
+        await cq.answer()
+
+    # ───────── Member picked from list ─────────
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:pick:(lookup|add|exempt):(\d+)$"))
+    async def reqpanel_pick_cb(client: Client, cq: CallbackQuery):
+        user = cq.from_user
+        if not user or not _ensure_admin(user.id):
+            await cq.answer()
+            return
+
+        _, action, uid_str = cq.data.split(":")
+        target_id = int(uid_str)
+
+        year, month = _current_year_month()
+
+        if action == "lookup":
+            desc, _data = _status_for_user(target_id, year, month)
+            kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:lookup_prompt")]]
+            )
+            try:
+                await cq.message.edit_text(desc, reply_markup=kb, disable_web_page_preview=True)
+            except Exception:
+                pass
+            await cq.answer()
+            return
+
+        if action == "add":
+            # Next message from this admin will be amount + optional note
+            _pending_actions[user.id] = f"add_spend_for:{target_id}"
+            text = (
+                f"💸 <b>Adding manual spend for user ID {target_id}</b>\n\n"
+                "Send me a message in this chat with the format:\n"
+                "<code>amount [note]</code>\n\n"
+                "Example:\n"
+                "<code>15 from CashApp game night</code>\n\n"
+                "This adds extra credited dollars on top of Stripe games for <b>this month only</b>."
+            )
+            kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:add_spend_prompt")]]
+            )
+            try:
+                await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+            except Exception:
+                pass
+            await cq.answer()
+            return
+
+        if action == "exempt":
+            # toggle exemption immediately
+            try:
+                currently = _store.has_valid_exemption(target_id, chat_id=None)
+            except Exception:
+                currently = False
+
+            try:
+                if currently:
+                    _store.remove_exemption(target_id, chat_id=None)
+                    now_exempt = False
+                else:
+                    _store.add_exemption(target_id, chat_id=None, until_ts=None)
+                    now_exempt = True
+            except Exception as e:
+                log.exception("Failed to toggle exemption: %s", e)
+                await cq.answer("Something went wrong updating the exemption.", show_alert=True)
+                return
+
+            desc, _data = _status_for_user(target_id, year, month)
+            if now_exempt:
+                prefix = f"⏸ Marked user <code>{target_id}</code> as <b>EXEMPT</b>.\n\n"
+            else:
+                prefix = f"▶ Removed exemption for user <code>{target_id}</code>.\n\n"
+
+            kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:exempt_prompt")]]
+            )
+            try:
+                await cq.message.edit_text(prefix + desc, reply_markup=kb, disable_web_page_preview=True)
+            except Exception:
+                pass
+            await cq.answer("Updated exemption.", show_alert=False)
+            return
+
+    # ───────── Capture admin text actions (amount + note) ─────────
+
     @app.on_message(filters.private & filters.text, group=-3)
     async def reqpanel_capture_private(client: Client, m: Message):
         user = m.from_user
@@ -461,83 +731,38 @@ def register(app: Client) -> None:
 
         text = m.text.strip()
 
-        # ----- lookup -----
-        if action == "lookup":
+        # add_spend_for:<uid>
+        if action.startswith("add_spend_for:"):
             _pending_actions.pop(user.id, None)
             try:
-                target_id = int(text.split()[0])
+                target_id = int(action.split(":", 1)[1])
             except Exception:
-                await m.reply_text("I need just a numeric Telegram user ID. Try again from the menu. 💜")
+                await m.reply_text("Something went wrong with that member selection. Try again from the menu. 💜")
                 return
 
-            year, month = _current_year_month()
-            desc, data = _status_for_user(target_id, year, month)
-            await m.reply_text(desc, disable_web_page_preview=True)
-            return
-
-        # ----- add manual spend -----
-        if action == "add_spend":
-            _pending_actions.pop(user.id, None)
-            parts = text.split(maxsplit=2)
-            if len(parts) < 2:
+            parts = text.split(maxsplit=1)
+            if not parts:
                 await m.reply_text(
-                    "Format should be:\n<code>USER_ID amount [note]</code>\n"
-                    "Example:\n<code>123456789 15 from CashApp game night</code>",
+                    "Format should be:\n<code>amount [note]</code>\n"
+                    "Example:\n<code>15 from CashApp game night</code>",
                     disable_web_page_preview=True,
                 )
                 return
+
             try:
-                target_id = int(parts[0])
-                amount = float(parts[1])
+                amount = float(parts[0])
             except Exception:
-                await m.reply_text("USER_ID must be a number and amount must be a number. 💜")
+                await m.reply_text("Amount must be a number, like <code>15</code> or <code>20.5</code>. 💜")
                 return
-            note = parts[2] if len(parts) > 2 else ""
+
+            note = parts[1] if len(parts) > 1 else ""
 
             year, month = _current_year_month()
-            entry = _add_manual_spend(target_id, year, month, amount, note)
-            desc, data = _status_for_user(target_id, year, month)
+            _ = _add_manual_spend(target_id, year, month, amount, note)
+            desc, _data = _status_for_user(target_id, year, month)
 
             await m.reply_text(
                 f"Added <b>${amount:.2f}</b> manual credit for user <code>{target_id}</code>.\n\n{desc}",
                 disable_web_page_preview=True,
             )
-            return
-
-        # ----- exempt toggle -----
-        if action == "exempt":
-            _pending_actions.pop(user.id, None)
-            try:
-                target_id = int(text.split()[0])
-            except Exception:
-                await m.reply_text("I need a numeric Telegram user ID. Try again from the menu. 💜")
-                return
-
-            # toggle exemption (global)
-            try:
-                currently = _store.has_valid_exemption(target_id, chat_id=None)
-            except Exception:
-                currently = False
-
-            try:
-                if currently:
-                    _store.remove_exemption(target_id, chat_id=None)
-                    now_exempt = False
-                else:
-                    _store.add_exemption(target_id, chat_id=None, until_ts=None)
-                    now_exempt = True
-            except Exception as e:
-                log.exception("Failed to toggle exemption: %s", e)
-                await m.reply_text("Something went wrong while updating the exemption. 💜")
-                return
-
-            year, month = _current_year_month()
-            desc, data = _status_for_user(target_id, year, month)
-
-            if now_exempt:
-                prefix = f"⏸ Marked user <code>{target_id}</code> as <b>EXEMPT</b>.\n\n"
-            else:
-                prefix = f"▶ Removed exemption for user <code>{target_id}</code>.\n\n"
-
-            await m.reply_text(prefix + desc, disable_web_page_preview=True)
             return
