@@ -22,6 +22,7 @@ try:
     def get_monthly_progress(user_id: int, year: int, month: int) -> Tuple[float, int]:
         # game_dollars, model_count
         return _real_get_monthly_progress(user_id, year, month)
+
 except Exception:
     log.warning("requirements_panel: payments.get_monthly_progress not available, using dummy 0/0")
 
@@ -242,6 +243,7 @@ def _member_home_kb() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("📍 Check My Status", callback_data="reqpanel:check_self")],
             [InlineKeyboardButton("ℹ️ What Counts as Requirements?", callback_data="reqpanel:info")],
+            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="portal:home")],
         ]
     )
 
@@ -253,18 +255,20 @@ def _model_home_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("👤 Look Up Member", callback_data="reqpanel:lookup_prompt")],
             [InlineKeyboardButton("💸 Add Manual Spend", callback_data="reqpanel:add_spend_prompt")],
             [InlineKeyboardButton("⏸ Exempt / Un-exempt", callback_data="reqpanel:exempt_prompt")],
+            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="portal:home")],
         ]
     )
 
 
 def _owner_home_kb() -> InlineKeyboardMarkup:
-    # For now owner has the same tools as models; we can add sweeps later.
+    # Owner has same tools as models for now, plus back to main.
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📍 Check My Status", callback_data="reqpanel:check_self")],
             [InlineKeyboardButton("👤 Look Up Member", callback_data="reqpanel:lookup_prompt")],
             [InlineKeyboardButton("💸 Add Manual Spend", callback_data="reqpanel:add_spend_prompt")],
             [InlineKeyboardButton("⏸ Exempt / Un-exempt", callback_data="reqpanel:exempt_prompt")],
+            [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="portal:home")],
         ]
     )
 
