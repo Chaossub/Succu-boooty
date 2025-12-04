@@ -377,6 +377,10 @@ def _owner_home_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("👤 Look Up Member", callback_data="reqpanel:lookup_prompt")],
             [InlineKeyboardButton("💸 Add Manual Spend", callback_data="reqpanel:add_spend_prompt")],
             [InlineKeyboardButton("⏸ Exempt / Un-exempt", callback_data="reqpanel:exempt_prompt")],
+            [
+                InlineKeyboardButton("🧾 Exempt Members", callback_data="reqpanel:list_exempt"),
+                InlineKeyboardButton("📒 Manual Credits", callback_data="reqpanel:list_manual"),
+            ],
             [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="panels:root")],
         ]
     )
@@ -396,7 +400,8 @@ async def _show_home(client: Client, obj: Union[CallbackQuery, Message]):
     if role == "owner":
         text = (
             "📌 <b>Requirements Panel – Owner</b>\n\n"
-            "Use these tools to check status, add manual credit for offline games, and mark members exempt.\n\n"
+            "Use these tools to check status, add manual credit for offline games, mark members exempt, "
+            "and review who is currently exempt or has manual credits logged.\n\n"
             "All changes here affect this month’s requirement checks and future sweeps/reminders."
         )
         kb = _owner_home_kb()
@@ -607,6 +612,116 @@ def register(app: Client) -> None:
             return
 
         text, kb = _build_member_list_kb("exempt", page=0)
+        try:
+            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        except Exception:
+            pass
+        await cq.answer()
+
+    # ───────── Admin-only: list exemptions & manual credits ─────────
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:list_exempt$"))
+    async def reqpanel_list_exempt(client: Client, cq: CallbackQuery):
+        user = cq.from_user
+        if not user or _role(user.id) != "owner":
+            await cq.answer()
+            return
+
+        if "_EXEMPT_KEY" not in globals():
+            text = (
+                "🧾 <b>Exempt Members</b>\n\n"
+                "Listing exemptions isn’t available because an external requirements store is in use."
+            )
+            kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+            )
+            try:
+                await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+            except Exception:
+                pass
+            await cq.answer()
+            return
+
+        ids = _load_exempt_ids()
+        if not ids:
+            text = (
+                "🧾 <b>Exempt Members</b>\n\n"
+                "No one is currently marked exempt for requirements."
+            )
+            kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+            )
+            try:
+                await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+            except Exception:
+                pass
+            await cq.answer()
+            return
+
+        members = _load_members().get("users", {})
+        lines = ["🧾 <b>Exempt Members</b>\n"]
+        for uid in sorted(ids):
+            rec = members.get(str(uid)) or {}
+            name = rec.get("display") or f"ID {uid}"
+            lines.append(f"• {name} (<code>{uid}</code>)")
+
+        text = "\n".join(lines)
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+        )
+        try:
+            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        except Exception:
+            pass
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:list_manual$"))
+    async def reqpanel_list_manual(client: Client, cq: CallbackQuery):
+        user = cq.from_user
+        if not user or _role(user.id) != "owner":
+            await cq.answer()
+            return
+
+        year, month = _current_year_month()
+        mk = _ym_key(year, month)
+        data = _load_manual_raw()
+        entries = data.get(mk, {})
+
+        if not entries:
+            text = (
+                f"📒 <b>Manual Credits for {year}-{month:02d}</b>\n\n"
+                "No manual credits have been logged yet this month."
+            )
+            kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+            )
+            try:
+                await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+            except Exception:
+                pass
+            await cq.answer()
+            return
+
+        members = _load_members().get("users", {})
+        lines = [f"📒 <b>Manual Credits for {year}-{month:02d}</b>\n"]
+        for uid_str, rec in entries.items():
+            try:
+                uid = int(uid_str)
+            except ValueError:
+                uid = 0
+            name_rec = members.get(uid_str) or {}
+            name = name_rec.get("display") or f"ID {uid_str}"
+            extra = float(rec.get("extra_dollars", 0.0) or 0.0)
+            note = str(rec.get("note") or "")
+            line = f"• {name} (<code>{uid_str}</code>) — +${extra:.2f}"
+            if note:
+                line += f"\n  Note: {note}"
+            lines.append(line)
+
+        text = "\n".join(lines)
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")]]
+        )
         try:
             await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         except Exception:
