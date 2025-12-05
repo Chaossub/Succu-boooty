@@ -4,7 +4,7 @@ import os
 import logging
 import random
 from datetime import datetime, timezone
-from typing import List, Set, Dict, Any, Optional
+from typing import List, Set, Dict, Any, Optional, Tuple
 
 from pyrogram import Client, filters
 from pyrogram.types import (
@@ -19,7 +19,7 @@ from pymongo import MongoClient, ASCENDING
 
 log = logging.getLogger(__name__)
 
-# ────────────── ENV & CONSTANTS ──────────────
+# ────────────── ENV & DB ──────────────
 
 MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 if not MONGO_URI:
@@ -28,7 +28,6 @@ if not MONGO_URI:
 mongo = MongoClient(MONGO_URI)
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
-
 members_coll.create_index([("user_id", ASCENDING)], unique=True)
 
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
@@ -51,13 +50,14 @@ def _parse_id_list(val: str | None) -> Set[int]:
 SUPER_ADMINS: Set[int] = _parse_id_list(os.getenv("SUPER_ADMINS"))
 MODELS: Set[int] = _parse_id_list(os.getenv("MODELS"))
 
-# Sanctuary group IDs to scan
 _group_ids_str = os.getenv("SANCTUARY_GROUP_IDS")
 if not _group_ids_str:
     _single = os.getenv("SUCCUBUS_SANCTUARY")
     SANCTUARY_GROUP_IDS: List[int] = [int(_single)] if _single else []
 else:
-    SANCTUARY_GROUP_IDS = [int(x) for x in _group_ids_str.replace(" ", "").split(",") if x]
+    SANCTUARY_GROUP_IDS = [
+        int(x) for x in _group_ids_str.replace(" ", "").split(",") if x
+    ]
 
 LOG_GROUP_ID: Optional[int] = None
 for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
@@ -68,45 +68,28 @@ for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
         except ValueError:
             pass
 
-# Minimum requirement total to be "met"
 REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 
-# Simple in-memory state for multi-step flows (only tiny bits like “custom note”)
+# simple in-memory state
 STATE: Dict[int, Dict[str, Any]] = {}
 
-# Preset amounts for add-spend buttons
-AMOUNT_PRESETS: List[float] = [5, 10, 15, 20, 25, 50, 100]
-
-# Preset “who/what was this payment for” choices
-NOTE_CHOICES: Dict[str, str] = {
-    "roni": "Roni",
-    "ruby": "Ruby",
-    "rin": "Rin",
-    "savy": "Savy",
-    "games": "Games",
-    "door": "Door fee",
-    "tip": "Tip",
-    "other": "Other (custom note)",
-}
-
-# ────────────── Helper functions ──────────────
+# ────────────── helper functions ──────────────
 
 
 def _is_owner(user_id: int) -> bool:
     return user_id == OWNER_ID
 
 
+def _is_super_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMINS or _is_owner(user_id)
+
+
 def _is_model(user_id: int) -> bool:
-    # Owner always counts as model+exempt for requirements
     return user_id in MODELS or _is_owner(user_id)
 
 
 def _is_admin_or_model(user_id: int) -> bool:
-    """
-    For the requirements panel, only OWNER + MODELS see admin tools.
-    SUPER_ADMINS can exist for other systems, but here it's just you & models.
-    """
-    return _is_owner(user_id) or user_id in MODELS
+    return _is_super_admin(user_id) or _is_model(user_id)
 
 
 async def _safe_edit_text(msg: Message, **kwargs):
@@ -131,10 +114,6 @@ async def _log_event(app: Client, text: str):
 
 
 def _member_doc(user_id: int) -> Dict[str, Any]:
-    """
-    Load a member doc and apply derived fields:
-    - Owner & models are always effectively exempt from requirements
-    """
     doc = members_coll.find_one({"user_id": user_id}) or {}
     is_owner = user_id == OWNER_ID
     is_model = user_id in MODELS or is_owner
@@ -156,19 +135,28 @@ def _member_doc(user_id: int) -> Dict[str, Any]:
     }
 
 
+def _display_name(doc: Dict[str, Any]) -> str:
+    first_name = doc.get("first_name") or ""
+    username = doc.get("username")
+    if first_name and username:
+        return f"{first_name} (@{username})"
+    if first_name:
+        return first_name
+    if username:
+        return f"@{username}"
+    return "????"
+
+
 def _format_member_status(doc: Dict[str, Any]) -> str:
     total = doc["manual_spend"]
     exempt = doc["is_exempt"]
     is_model = doc.get("is_model", False)
     is_owner = doc.get("is_owner", False)
-    uid = doc["user_id"]
-    username = doc.get("username")
-    fn = doc.get("first_name") or ""
 
     if is_owner:
         status = (
-            "👑 <b>Sanctuary owner</b> – you’re automatically exempt from monthly "
-            "requirements. SuccuBot will never mark you behind or kick you for this."
+            "👑 <b>Sanctuary owner</b> – you’re automatically exempt from requirements. "
+            "SuccuBot will never mark you behind or kick you for this."
         )
     elif exempt and is_model:
         status = (
@@ -185,76 +173,22 @@ def _format_member_status(doc: Dict[str, Any]) -> str:
             f"Logged so far: ${total:.2f} (minimum ${REQUIRED_MIN_SPEND:.2f})."
         )
 
-    header = "<b>Requirement Status</b>"
-    if fn or username:
-        name_bits = []
-        if fn:
-            name_bits.append(fn)
-        if username:
-            name_bits.append(f"@{username}")
-        header += " – " + " ".join(name_bits)
-    header += f"\n<code>ID: {uid}</code>"
-
     lines = [
-        header,
+        "<b>Requirement Status</b>",
+        "",
+        f"<b>Member:</b> {_display_name(doc)} (<code>{doc['user_id']}</code>)",
         "",
         status,
     ]
     if doc.get("last_updated"):
-        dt = doc["last_updated"].astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        dt = doc["last_updated"].astimezone(timezone.utc).strftime(
+            "%Y-%m-%d %H:%M UTC"
+        )
         lines.append(f"\nLast updated: <code>{dt}</code>")
     return "\n".join(lines)
 
 
-def _format_display_name(d: Dict[str, Any]) -> str:
-    uid = d["user_id"]
-    fn = (d.get("first_name") or "").strip()
-    username = d.get("username")
-    if fn and username:
-        return f"{fn} (@{username}) – {uid}"
-    if fn:
-        return f"{fn} – {uid}"
-    if username:
-        return f"@{username} – {uid}"
-    return f"User {uid}"
-
-
-def _query_members_for_list(limit: int = 50) -> List[Dict[str, Any]]:
-    return list(
-        members_coll.find().sort(
-            [("first_name", ASCENDING), ("username", ASCENDING), ("user_id", ASCENDING)]
-        ).limit(limit)
-    )
-
-
-def _query_members_for_reminders() -> List[Dict[str, Any]]:
-    docs = list(
-        members_coll.find(
-            {
-                "is_exempt": {"$ne": True},
-                "manual_spend": {"$lt": REQUIRED_MIN_SPEND},
-                "reminder_sent": {"$ne": True},
-            }
-        )
-    )
-    # filter out owner + models just in case
-    return [d for d in docs if d["user_id"] != OWNER_ID and d["user_id"] not in MODELS]
-
-
-def _query_members_for_final_warnings() -> List[Dict[str, Any]]:
-    docs = list(
-        members_coll.find(
-            {
-                "is_exempt": {"$ne": True},
-                "manual_spend": {"$lt": REQUIRED_MIN_SPEND},
-                "final_warning_sent": {"$ne": True},
-            }
-        )
-    )
-    return [d for d in docs if d["user_id"] != OWNER_ID and d["user_id"] not in MODELS]
-
-
-# ────────────── DM text templates ──────────────
+# ────────────── DM templates ──────────────
 
 REMINDER_MSGS = [
     "Hi {name}! 💋 Just a sweet reminder that Sanctuary requirements are still open this month. "
@@ -275,102 +209,109 @@ FINAL_WARNING_MSGS = [
     "If this isn’t fixed before the sweep, you’ll be removed and will need to re-enter through the door fee.",
 ]
 
-# ────────────── Keyboards ──────────────
+# ────────────── keyboards ──────────────
 
 
 def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = [
         [InlineKeyboardButton("📍 Check My Status", callback_data="reqpanel:self")],
     ]
-
     if is_admin:
         rows.append(
-            [InlineKeyboardButton("🧾 Look Up Member", callback_data="reqpanel:lookup")]
+            [InlineKeyboardButton("🛠 Requirements Panel", callback_data="reqpanel:admin")]
+        )
+    # IMPORTANT: we do NOT jump back to the main portal from here,
+    # so the top-level “Requirements Help” button never gets touched.
+    return InlineKeyboardMarkup(rows)
+
+
+def _admin_kb(user_is_owner: bool) -> InlineKeyboardMarkup:
+    rows: List[List[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                "📋 Member Status List", callback_data="reqpanel:list:0"
+            ),
+            InlineKeyboardButton(
+                "➕ Add Manual Spend", callback_data="reqpanel:addmenu:0"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "✅ Exempt / Un-exempt", callback_data="reqpanel:exemptmenu:0"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "📡 Scan Group Members", callback_data="reqpanel:scan"
+            )
+        ],
+    ]
+    # ONLY you can send reminder/final-warning DMs
+    if user_is_owner:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "💌 Send Reminders (pick)",
+                    callback_data="reqpanel:remindmenu:0",
+                )
+            ]
         )
         rows.append(
-            [InlineKeyboardButton("🛠 Owner / Models Tools", callback_data="reqpanel:admin")]
+            [
+                InlineKeyboardButton(
+                    "⚠️ Send Final Warnings (pick)",
+                    callback_data="reqpanel:finalmenu:0",
+                )
+            ]
         )
-
-    # No back-to-portal here so the portal menu button doesn’t vanish randomly.
-    return InlineKeyboardMarkup(rows)
-
-
-def _admin_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+    rows.append(
         [
-            [
-                InlineKeyboardButton("📋 Member Status List", callback_data="reqpanel:list"),
-            ],
-            [
-                InlineKeyboardButton("➕ Add Manual Spend", callback_data="reqpanel:add_spend"),
-            ],
-            [
-                InlineKeyboardButton("✅ Exempt / Un-exempt", callback_data="reqpanel:toggle_exempt"),
-            ],
-            [
-                InlineKeyboardButton("📡 Scan Group Members", callback_data="reqpanel:scan"),
-            ],
-            [
-                InlineKeyboardButton("💌 Send Reminder (Pick Member)", callback_data="reqpanel:reminders"),
-            ],
-            [
-                InlineKeyboardButton("⚠️ Send Final Warning (Pick Member)", callback_data="reqpanel:final_warnings"),
-            ],
-            [
-                InlineKeyboardButton("⬅ Back to Requirements Menu", callback_data="reqpanel:home"),
-            ],
+            InlineKeyboardButton(
+                "⬅ Back to Requirements Home", callback_data="reqpanel:home"
+            )
         ]
     )
+    return InlineKeyboardMarkup(rows)
 
 
-def _member_pick_kb(
-    docs: List[Dict[str, Any]],
-    action_prefix: str,
-    back_cb: str,
-) -> InlineKeyboardMarkup:
+def _pager_buttons(prefix: str, page: int, more: bool) -> List[InlineKeyboardButton]:
+    btns: List[InlineKeyboardButton] = []
+    if page > 0:
+        btns.append(
+            InlineKeyboardButton(
+                "⬅ Prev", callback_data=f"{prefix}:{page-1}"
+            )
+        )
+    if more:
+        btns.append(
+            InlineKeyboardButton(
+                "Next ➡", callback_data=f"{prefix}:{page+1}"
+            )
+        )
+    return btns
+
+
+def _member_rows_for_page(
+    docs: List[Dict[str, Any]], action_prefix: str, page: int, page_size: int = 8
+) -> Tuple[List[List[InlineKeyboardButton]], bool]:
+    start = page * page_size
+    chunk = docs[start : start + page_size]
+    more = len(docs) > start + page_size
     rows: List[List[InlineKeyboardButton]] = []
-    for d in docs:
-        label = _format_display_name(d)
+    for d in chunk:
+        name = _display_name(d)
         uid = d["user_id"]
-        rows.append([InlineKeyboardButton(label, callback_data=f"{action_prefix}{uid}")])
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data=back_cb)])
-    return InlineKeyboardMarkup(rows)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    name, callback_data=f"{action_prefix}:{uid}:{page}"
+                )
+            ]
+        )
+    return rows, more
 
 
-def _amount_pick_kb(target_id: int, back_cb: str) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-    row: List[InlineKeyboardButton] = []
-    for amt in AMOUNT_PRESETS:
-        text = f"${int(amt) if amt.is_integer() else amt}"
-        cb = f"reqpanel:add_spend_amt:{target_id}:{amt}"
-        row.append(InlineKeyboardButton(text, callback_data=cb))
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    # Custom amount → optional, uses DM if needed
-    rows.append([InlineKeyboardButton("✏️ Custom amount", callback_data=f"reqpanel:add_spend_custom_amt:{target_id}")])
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data=back_cb)])
-    return InlineKeyboardMarkup(rows)
-
-
-def _note_pick_kb(target_id: int, amount: float, back_cb: str) -> InlineKeyboardMarkup:
-    rows: List[List[InlineKeyboardButton]] = []
-    row: List[InlineKeyboardButton] = []
-    for key, label in NOTE_CHOICES.items():
-        cb = f"reqpanel:add_spend_note:{target_id}:{amount}:{key}"
-        row.append(InlineKeyboardButton(label, callback_data=cb))
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data=f"reqpanel:add_spend_user:{target_id}")])
-    return InlineKeyboardMarkup(rows)
-
-
-# ────────────── Core handlers ──────────────
+# ────────────── core handlers ──────────────
 
 
 def register(app: Client):
@@ -383,30 +324,26 @@ def register(app: Client):
         SANCTUARY_GROUP_IDS,
     )
 
-    # Entry point from main menu button
+    # entry from Requirements Help button
     @app.on_callback_query(filters.regex("^reqpanel:home$"))
     async def reqpanel_home_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id
         is_admin = _is_admin_or_model(user_id)
         text_lines = [
-            "<b>Requirements Panel – Sanctuary</b>",
+            "<b>Requirements Help</b>",
             "",
             "Use this panel to check how you’re doing on Sanctuary requirements this month.",
             "",
             "• <b>Check My Status</b> – see if you’re met or behind.",
         ]
         if is_admin:
-            text_lines.extend(
-                [
-                    "• <b>Look Up Member</b> – tap a name to view another member’s status.",
-                    "• <b>Owner / Models Tools</b> – open the full tools panel "
-                    "(scans, manual credits, exemptions, reminders).",
-                ]
+            text_lines.append(
+                "• <b>Requirements Panel</b> – open the owner/models tools "
+                "(lists, manual credit, exemptions, reminders)."
             )
         text_lines.append("")
         text_lines.append(
-            "Only you and approved model admins see the admin tools. "
-            "Regular members just see their own status."
+            "Regular members only see their own status. Owner & models get the full tools."
         )
 
         await _safe_edit_text(
@@ -421,40 +358,32 @@ def register(app: Client):
     async def reqpanel_open_cb(_, cq: CallbackQuery):
         await reqpanel_home_cb(_, cq)
 
-    # Owner / models tools panel
+    # owner / models tools
     @app.on_callback_query(filters.regex("^reqpanel:admin$"))
     async def reqpanel_admin_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and approved models can open this.", show_alert=True)
+            await cq.answer(
+                "Only Roni and approved models can open this.", show_alert=True
+            )
             return
 
         text = (
             "<b>Requirements Panel – Owner / Models</b>\n\n"
-            "Use these tools to manage Sanctuary requirements for the month.\n"
-            "Everything you do here updates what SuccuBot uses when checking "
-            "member status or running sweeps, so double-check before you confirm changes.\n\n"
-            "From here you can:\n"
-            "▪️ View the full member status list\n"
-            "▪️ Add manual spend credit for offline payments\n"
-            "▪️ Exempt / un-exempt members\n"
-            "▪️ Scan groups into the tracker\n"
-            "▪️ Send reminder DMs to selected members\n"
-            "▪️ Send final-warning DMs to selected members\n\n"
-            "All changes here affect this month’s requirement checks and future sweeps/reminders.\n\n"
-            "<i>Only you and approved model admins see this panel. Members just see their own status.</i>"
+            "These tools manage Sanctuary requirements for the month. "
+            "Everything here updates what SuccuBot uses for status checks and sweeps.\n\n"
+            "Pick what you want to do using the buttons below – no commands needed. 💕"
         )
 
         await _safe_edit_text(
             cq.message,
             text=text,
-            reply_markup=_admin_kb(),
+            reply_markup=_admin_kb(_is_owner(user_id)),
             disable_web_page_preview=True,
         )
         await cq.answer()
 
-    # ────────────── Self-status & lookup ──────────────
-
+    # self-status
     @app.on_callback_query(filters.regex("^reqpanel:self$"))
     async def reqpanel_self_cb(_, cq: CallbackQuery):
         user = cq.from_user
@@ -468,47 +397,106 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    @app.on_callback_query(filters.regex("^reqpanel:lookup$"))
-    async def reqpanel_lookup_cb(_, cq: CallbackQuery):
+    # ────────────── Member list / view (button-only) ──────────────
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:list:(\d+)$"))
+    async def reqpanel_list_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can look up other members.", show_alert=True)
+            await cq.answer(
+                "Only Roni and models can view the full list.", show_alert=True
+            )
             return
 
-        docs = _query_members_for_list()
+        page = int(cq.data.split(":")[1])
+        docs = list(members_coll.find().sort("user_id", ASCENDING))
         if not docs:
-            await cq.answer("No tracked members yet. Run a scan first.", show_alert=True)
+            text = (
+                "<b>Member Status List</b>\n\n"
+                "No tracked members yet. Try running a scan first."
+            )
+            await cq.answer()
+            await _safe_edit_text(
+                cq.message,
+                text=text,
+                reply_markup=_admin_kb(_is_owner(user_id)),
+                disable_web_page_preview=True,
+            )
             return
 
-        kb = _member_pick_kb(
-            docs,
-            action_prefix="reqpanel:view:",
-            back_cb="reqpanel:home",
+        lines = [f"<b>Member Status List</b> – page {page + 1}\n"]
+        for d in docs[page * 8 : page * 8 + 8]:
+            uid = d["user_id"]
+            total = float(d.get("manual_spend", 0.0))
+            db_exempt = d.get("is_exempt", False)
+            is_owner = uid == OWNER_ID
+            is_model = uid in MODELS or is_owner
+            effective_exempt = db_exempt or is_model
+
+            if is_owner:
+                status = "OWNER (EXEMPT)"
+            elif is_model:
+                status = "MODEL (EXEMPT)"
+            elif effective_exempt:
+                status = "EXEMPT"
+            elif total >= REQUIRED_MIN_SPEND:
+                status = "MET"
+            else:
+                status = "BEHIND"
+
+            lines.append(
+                f"• {_display_name(d)} (<code>{uid}</code>) – {status} (${total:.2f})"
+            )
+
+        rows, more = _member_rows_for_page(docs, "reqpanel:view", page)
+        pager = _pager_buttons("reqpanel:list", page, more)
+        if pager:
+            rows.append(pager)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "⬅ Back to Panel", callback_data="reqpanel:admin"
+                )
+            ]
         )
+
         await cq.answer()
         await _safe_edit_text(
             cq.message,
-            text="<b>Look Up Member</b>\n\nTap a member below to see their current requirement status.",
-            reply_markup=kb,
+            text="\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(rows),
             disable_web_page_preview=True,
         )
 
-    @app.on_callback_query(filters.regex(r"^reqpanel:view:\d+$"))
+    @app.on_callback_query(filters.regex(r"^reqpanel:view:(-?\d+):(\d+)$"))
     async def reqpanel_view_member_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can view other members.", show_alert=True)
+            await cq.answer("Not for you, babe 💋", show_alert=True)
             return
 
-        target_id = int(cq.data.split(":")[-1])
+        _, _, uid_str, page_str = cq.data.split(":")
+        target_id = int(uid_str)
+        page = int(page_str)
+
         doc = _member_doc(target_id)
         text = _format_member_status(doc)
+
         kb = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("⬅ Back to Member List", callback_data="reqpanel:lookup")],
-                [InlineKeyboardButton("⬅ Back to Requirements Menu", callback_data="reqpanel:home")],
+                [
+                    InlineKeyboardButton(
+                        "⬅ Back to List", callback_data=f"reqpanel:list:{page}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅ Back to Panel", callback_data="reqpanel:admin"
+                    )
+                ],
             ]
         )
+
         await cq.answer()
         await _safe_edit_text(
             cq.message,
@@ -517,8 +505,218 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ────────────── DM state router (only for custom notes / custom amount) ──────────────
+    # ────────────── Add Manual Spend (button flow) ──────────────
 
+    @app.on_callback_query(filters.regex(r"^reqpanel:addmenu:(\d+)$"))
+    async def reqpanel_addmenu_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can add spend.", show_alert=True)
+            return
+
+        page = int(cq.data.split(":")[1])
+        docs = list(members_coll.find().sort("user_id", ASCENDING))
+        if not docs:
+            await cq.answer("No members in the tracker yet.", show_alert=True)
+            return
+
+        lines = [
+            "<b>Add Manual Spend</b>",
+            "",
+            "Pick the member you’re crediting. After that I’ll ask for the amount "
+            "(buttons + custom) and who it was for (Roni / Ruby / etc).",
+            "",
+            f"Page {page + 1}",
+        ]
+
+        rows, more = _member_rows_for_page(docs, "reqpanel:addpick", page)
+        pager = _pager_buttons("reqpanel:addmenu", page, more)
+        if pager:
+            rows.append(pager)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "⬅ Back to Panel", callback_data="reqpanel:admin"
+                )
+            ]
+        )
+
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text="\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(rows),
+            disable_web_page_preview=True,
+        )
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:addpick:(-?\d+):(\d+)$"))
+    async def reqpanel_addpick_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can add spend.", show_alert=True)
+            return
+
+        _, _, uid_str, page_str = cq.data.split(":")
+        target_id = int(uid_str)
+        page = int(page_str)
+
+        doc = _member_doc(target_id)
+        STATE[user_id] = {"mode": "add_amount", "target_id": target_id, "page": page}
+
+        text = (
+            "<b>Add Manual Spend</b>\n\n"
+            f"Member: {_display_name(doc)} (<code>{target_id}</code>)\n\n"
+            "Pick an amount to credit for this month:"
+        )
+
+        rows = [
+            [
+                InlineKeyboardButton("$5", callback_data="reqpanel:addamt:5"),
+                InlineKeyboardButton("$10", callback_data="reqpanel:addamt:10"),
+                InlineKeyboardButton("$20", callback_data="reqpanel:addamt:20"),
+            ],
+            [
+                InlineKeyboardButton("$25", callback_data="reqpanel:addamt:25"),
+                InlineKeyboardButton("$50", callback_data="reqpanel:addamt:50"),
+                InlineKeyboardButton(
+                    "Custom amount", callback_data="reqpanel:addamt:custom"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅ Back to Member List", callback_data=f"reqpanel:addmenu:{page}"
+                )
+            ],
+        ]
+
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(rows),
+            disable_web_page_preview=True,
+        )
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:addamt:(.+)$"))
+    async def reqpanel_addamt_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        state = STATE.get(user_id)
+        if not state or state.get("mode") != "add_amount":
+            await cq.answer("This flow expired, start again from Add Manual Spend.")
+            return
+
+        amt_str = cq.data.split(":")[1]
+        target_id = state["target_id"]
+
+        if amt_str == "custom":
+            STATE[user_id]["mode"] = "add_amount_custom"
+            await cq.answer()
+            await _safe_edit_text(
+                cq.message,
+                text=(
+                    "<b>Add Manual Spend – Custom Amount</b>\n\n"
+                    "Send me just the number for how many dollars to credit.\n\n"
+                    "Example: <code>17.50</code>"
+                ),
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "⬅ Cancel", callback_data="reqpanel:admin"
+                            )
+                        ]
+                    ]
+                ),
+                disable_web_page_preview=True,
+            )
+            return
+
+        amount = float(amt_str)
+        STATE[user_id]["amount"] = amount
+        STATE[user_id]["mode"] = "add_who"
+
+        doc = _member_doc(target_id)
+        text = (
+            "<b>Add Manual Spend</b>\n\n"
+            f"Member: {_display_name(doc)} (<code>{target_id}</code>)\n"
+            f"Amount: ${amount:.2f}\n\n"
+            "Who was this payment for?"
+        )
+
+        who_rows = [
+            [
+                InlineKeyboardButton("Roni", callback_data="reqpanel:addwho:Roni"),
+                InlineKeyboardButton("Ruby", callback_data="reqpanel:addwho:Ruby"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "Peachy", callback_data="reqpanel:addwho:Peachy"
+                ),
+                InlineKeyboardButton("Savy", callback_data="reqpanel:addwho:Savy"),
+            ],
+            [InlineKeyboardButton("Other / mixed", callback_data="reqpanel:addwho:Other")],
+            [InlineKeyboardButton("⬅ Cancel", callback_data="reqpanel:admin")],
+        ]
+
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=text,
+            reply_markup=InlineKeyboardMarkup(who_rows),
+            disable_web_page_preview=True,
+        )
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:addwho:(.+)$"))
+    async def reqpanel_addwho_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        state = STATE.get(user_id)
+        if not state or state.get("mode") not in {"add_who"}:
+            await cq.answer("This flow expired, start again from Add Manual Spend.")
+            return
+
+        who = cq.data.split(":")[1]
+        target_id = state["target_id"]
+        amount = float(state["amount"])
+
+        doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
+        new_total = float(doc.get("manual_spend", 0.0)) + amount
+
+        members_coll.update_one(
+            {"user_id": target_id},
+            {
+                "$set": {
+                    "manual_spend": new_total,
+                    "last_updated": datetime.now(timezone.utc),
+                },
+                "$setOnInsert": {
+                    "first_name": doc.get("first_name", ""),
+                },
+            },
+            upsert=True,
+        )
+
+        STATE.pop(user_id, None)
+
+        await cq.answer("Saved.")
+        await _safe_edit_text(
+            cq.message,
+            text=(
+                "<b>Manual Spend Added</b>\n\n"
+                f"Member: <code>{target_id}</code>\n"
+                f"Amount: ${amount:.2f}\n"
+                f"For: {who}\n\n"
+                f"New manual total for this month: ${new_total:.2f}"
+            ),
+            reply_markup=_admin_kb(_is_owner(user_id)),
+            disable_web_page_preview=True,
+        )
+
+        await _log_event(
+            client,
+            f"Manual spend +${amount:.2f} for {target_id} by {user_id} (for {who})",
+        )
+
+    # custom amount text handler (ONLY numbers)
     @app.on_message(filters.private & filters.text)
     async def requirements_state_router(client: Client, msg: Message):
         user_id = msg.from_user.id
@@ -526,381 +724,152 @@ def register(app: Client):
         if not state:
             return
 
-        mode = state.get("mode")
-
-        # CUSTOM NOTE after buttons picked amount + “other”
-        if mode == "add_spend_custom_note":
-            target_id = state.get("target_id")
-            amount = state.get("amount")
-            if not target_id or amount is None:
-                await msg.reply_text("Something went wrong – no member/amount set. Try again from the panel.")
-                STATE.pop(user_id, None)
-                return
-
-            note = msg.text.strip()
-            doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
-            new_total = float(doc.get("manual_spend", 0.0)) + float(amount)
-
-            update_set: Dict[str, Any] = {
-                "manual_spend": new_total,
-                "last_updated": datetime.now(timezone.utc),
-                "last_note": note,
-            }
-            update_ops: Dict[str, Any] = {
-                "$set": update_set,
-                "$setOnInsert": {"first_name": ""},
-            }
-            if note:
-                update_ops["$push"] = {"notes": note}
-
-            members_coll.update_one(
-                {"user_id": target_id},
-                update_ops,
-                upsert=True,
-            )
-
-            await msg.reply_text(
-                f"Logged ${float(amount):.2f} for <code>{target_id}</code>.\n"
-                f"New manual total: ${new_total:.2f}\n\n"
-                f"Note: {note or '(none)'}"
-            )
-            await _log_event(
-                client,
-                f"Manual spend +${float(amount):.2f} for {target_id} by {user_id}. Note: {note or '(none)'}",
-            )
-            STATE.pop(user_id, None)
-            return
-
-        # OPTIONAL: custom amount typed in DM (still button-picked member)
-        if mode == "add_spend_custom_amount":
-            target_id = state.get("target_id")
-            if not target_id:
-                await msg.reply_text("Something went wrong – no member set. Try again from the panel.")
-                STATE.pop(user_id, None)
-                return
-
+        if state.get("mode") == "add_amount_custom":
             try:
-                parts = msg.text.strip().split()
-                if len(parts) < 1:
-                    raise ValueError
-                amount = float(parts[0])
-                note = " ".join(parts[1:]) if len(parts) > 1 else ""
+                amount = float(msg.text.strip())
             except ValueError:
                 await msg.reply_text(
-                    "Format should be:\n"
-                    "<code>amount [note]</code>\n\n"
-                    "Example:\n<code>15 Ruby cashapp game night</code>"
+                    "That didn’t look like a number. Try again – just the dollars, like <code>15</code> or <code>17.50</code>.",
                 )
                 return
 
-            doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
-            new_total = float(doc.get("manual_spend", 0.0)) + amount
+            STATE[user_id]["amount"] = amount
+            STATE[user_id]["mode"] = "add_who"
 
-            update_set: Dict[str, Any] = {
-                "manual_spend": new_total,
-                "last_updated": datetime.now(timezone.utc),
-                "last_note": note,
-            }
-            update_ops: Dict[str, Any] = {
-                "$set": update_set,
-                "$setOnInsert": {"first_name": ""},
-            }
-            if note:
-                update_ops["$push"] = {"notes": note}
-
-            members_coll.update_one(
-                {"user_id": target_id},
-                update_ops,
-                upsert=True,
-            )
-
-            await msg.reply_text(
-                f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
-                f"New manual total: ${new_total:.2f}\n\n"
-                f"Note: {note or '(none)'}"
-            )
-            await _log_event(
-                client,
-                f"Manual spend +${amount:.2f} for {target_id} by {user_id}. Note: {note or '(none)'}",
-            )
-            STATE.pop(user_id, None)
-            return
-
-    # ────────────── Admin-panel buttons ──────────────
-
-    @app.on_callback_query(filters.regex("^reqpanel:list$"))
-    async def reqpanel_list_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can view the full list.", show_alert=True)
-            return
-
-        docs = list(members_coll.find().sort("user_id", ASCENDING).limit(50))
-        if not docs:
+            target_id = state["target_id"]
+            doc = _member_doc(target_id)
             text = (
-                "<b>Member Status List</b>\n\n"
-                "No tracked members yet. Try running a scan first."
-            )
-        else:
-            lines = ["<b>Member Status List (first 50)</b>\n"]
-            for d in docs:
-                uid = d["user_id"]
-                total = float(d.get("manual_spend", 0.0))
-                db_exempt = d.get("is_exempt", False)
-                is_owner = uid == OWNER_ID
-                is_model = uid in MODELS or is_owner
-                effective_exempt = db_exempt or is_model
-
-                if is_owner:
-                    status = "OWNER (EXEMPT)"
-                elif is_model:
-                    status = "MODEL (EXEMPT)"
-                elif effective_exempt:
-                    status = "EXEMPT"
-                elif total >= REQUIRED_MIN_SPEND:
-                    status = "MET"
-                else:
-                    status = "BEHIND"
-
-                first_name = d.get("first_name") or ""
-                username = d.get("username")
-                display_name = first_name.strip() or (f"@{username}" if username else "Unknown")
-
-                if username and first_name:
-                    display_name = f"{first_name} (@{username})"
-
-                lines.append(
-                    f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})"
-                )
-            text = "\n".join(lines)
-
-        await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text=text,
-            reply_markup=_admin_kb(),
-            disable_web_page_preview=True,
-        )
-
-    # ────────────── Add manual spend: all button-based ──────────────
-
-    @app.on_callback_query(filters.regex("^reqpanel:add_spend$"))
-    async def reqpanel_add_spend_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can add spend.", show_alert=True)
-            return
-
-        docs = _query_members_for_list()
-        if not docs:
-            await cq.answer("No tracked members yet. Run a scan first.", show_alert=True)
-            return
-
-        kb = _member_pick_kb(
-            docs,
-            action_prefix="reqpanel:add_spend_user:",
-            back_cb="reqpanel:admin",
-        )
-        await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text=(
                 "<b>Add Manual Spend</b>\n\n"
-                "First, pick which member you’re crediting."
-            ),
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex(r"^reqpanel:add_spend_user:\d+$"))
-    async def reqpanel_add_spend_user_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can add spend.", show_alert=True)
-            return
-
-        target_id = int(cq.data.split(":")[-1])
-        kb = _amount_pick_kb(target_id, back_cb="reqpanel:add_spend")
-        await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text=(
-                "<b>Add Manual Spend</b>\n\n"
-                f"Member: <code>{target_id}</code>\n\n"
-                "Now tap an amount to credit."
-            ),
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex(r"^reqpanel:add_spend_amt:\d+:[0-9.]+$"))
-    async def reqpanel_add_spend_amt_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can add spend.", show_alert=True)
-            return
-
-        parts = cq.data.split(":")
-        target_id = int(parts[2])
-        amount = float(parts[3])
-
-        kb = _note_pick_kb(target_id, amount, back_cb="reqpanel:add_spend")
-        await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text=(
-                "<b>Add Manual Spend</b>\n\n"
-                f"Member: <code>{target_id}</code>\n"
+                f"Member: {_display_name(doc)} (<code>{target_id}</code>)\n"
                 f"Amount: ${amount:.2f}\n\n"
-                "What was this payment for? Tap one below."
-            ),
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex(r"^reqpanel:add_spend_custom_amt:\d+$"))
-    async def reqpanel_add_spend_custom_amt_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can add spend.", show_alert=True)
-            return
-
-        target_id = int(cq.data.split(":")[-1])
-        STATE[user_id] = {"mode": "add_spend_custom_amount", "target_id": target_id}
-        await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text=(
-                "<b>Add Manual Spend – Custom Amount</b>\n\n"
-                f"Member: <code>{target_id}</code>\n\n"
-                "Now send me a DM message (here in our chat) with:\n"
-                "<code>amount [note]</code>\n\n"
-                "Example:\n"
-                "<code>37 Ruby custom bundle</code>"
-            ),
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("⬅ Back to Admin Tools", callback_data="reqpanel:admin")]]
-            ),
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex(r"^reqpanel:add_spend_note:\d+:[0-9.]+:[a-z_]+$"))
-    async def reqpanel_add_spend_note_cb(client: Client, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can add spend.", show_alert=True)
-            return
-
-        parts = cq.data.split(":")
-        target_id = int(parts[2])
-        amount = float(parts[3])
-        note_key = parts[4]
-        note_text = NOTE_CHOICES.get(note_key, "")
-
-        # If they picked "other", we go to DM for custom note
-        if note_key == "other":
-            STATE[user_id] = {
-                "mode": "add_spend_custom_note",
-                "target_id": target_id,
-                "amount": amount,
-            }
-            await cq.answer("Now send the custom note in DM ♥", show_alert=False)
-            await _safe_edit_text(
-                cq.message,
-                text=(
-                    "<b>Add Manual Spend – Custom Note</b>\n\n"
-                    f"Member: <code>{target_id}</code>\n"
-                    f"Amount: ${amount:.2f}\n\n"
-                    "Now send me a DM message (here in our chat) with what this was for.\n"
-                    "Example:\n"
-                    "<code>Private bundle + extra pics</code>"
-                ),
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("⬅ Back to Admin Tools", callback_data="reqpanel:admin")]]
-                ),
+                "Who was this payment for?"
+            )
+            who_rows = [
+                [
+                    InlineKeyboardButton(
+                        "Roni", callback_data="reqpanel:addwho:Roni"
+                    ),
+                    InlineKeyboardButton(
+                        "Ruby", callback_data="reqpanel:addwho:Ruby"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "Peachy", callback_data="reqpanel:addwho:Peachy"
+                    ),
+                    InlineKeyboardButton(
+                        "Savy", callback_data="reqpanel:addwho:Savy"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "Other / mixed", callback_data="reqpanel:addwho:Other"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅ Cancel", callback_data="reqpanel:admin"
+                    )
+                ],
+            ]
+            await msg.reply_text(
+                text,
+                reply_markup=InlineKeyboardMarkup(who_rows),
                 disable_web_page_preview=True,
             )
             return
 
-        # Otherwise fully button-based: apply update now
-        doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
-        new_total = float(doc.get("manual_spend", 0.0)) + amount
+    # ────────────── Exempt / un-exempt (button-only) ──────────────
 
-        update_set: Dict[str, Any] = {
-            "manual_spend": new_total,
-            "last_updated": datetime.now(timezone.utc),
-            "last_note": note_text,
-        }
-        update_ops: Dict[str, Any] = {
-            "$set": update_set,
-            "$setOnInsert": {"first_name": ""},
-        }
-        if note_text:
-            update_ops["$push"] = {"notes": note_text}
+    def _render_exempt_page(user_id: int, page: int) -> Tuple[str, InlineKeyboardMarkup]:
+        docs = list(members_coll.find().sort("user_id", ASCENDING))
+        lines = [
+            "<b>Exempt / Un-exempt Member</b>",
+            "",
+            "Tap a member to flip their exempt flag for this month.",
+            "<i>Owner and models are always effectively exempt even if you toggle them.</i>",
+            "",
+            f"Page {page + 1}",
+        ]
 
-        members_coll.update_one(
-            {"user_id": target_id},
-            update_ops,
-            upsert=True,
+        start = page * 8
+        chunk = docs[start : start + 8]
+        more = len(docs) > start + 8
+
+        rows: List[List[InlineKeyboardButton]] = []
+        for d in chunk:
+            uid = d["user_id"]
+            is_owner = uid == OWNER_ID
+            is_model = uid in MODELS or is_owner
+            db_exempt = bool(d.get("is_exempt", False))
+            effective_exempt = db_exempt or is_model
+
+            if is_owner:
+                label = f"👑 {_display_name(d)} (OWNER – always exempt)"
+            elif is_model:
+                label = f"😈 {_display_name(d)} (MODEL – always exempt)"
+            else:
+                label = f"{'✅' if effective_exempt else '❌'} {_display_name(d)}"
+
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        label,
+                        callback_data=f"reqpanel:exempttoggle:{uid}:{page}",
+                    )
+                ]
+            )
+
+        pager = _pager_buttons("reqpanel:exemptmenu", page, more)
+        if pager:
+            rows.append(pager)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "⬅ Back to Panel", callback_data="reqpanel:admin"
+                )
+            ]
         )
 
-        await _log_event(
-            client,
-            f"Manual spend +${amount:.2f} for {target_id} by {user_id}. Note: {note_text or '(none)'}",
-        )
-        await cq.answer("Manual spend logged.", show_alert=True)
-        await _safe_edit_text(
-            cq.message,
-            text=(
-                "<b>Add Manual Spend</b>\n\n"
-                f"Member: <code>{target_id}</code>\n"
-                f"Amount: ${amount:.2f}\n"
-                f"Note: {note_text or '(none)'}\n\n"
-                "You can use the admin tools below for more actions."
-            ),
-            reply_markup=_admin_kb(),
-            disable_web_page_preview=True,
-        )
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
 
-    # ────────────── Exempt toggle via buttons ──────────────
-
-    @app.on_callback_query(filters.regex("^reqpanel:toggle_exempt$"))
-    async def reqpanel_toggle_exempt_cb(_, cq: CallbackQuery):
+    @app.on_callback_query(filters.regex(r"^reqpanel:exemptmenu:(\d+)$"))
+    async def reqpanel_exemptmenu_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can change exemptions.", show_alert=True)
+            await cq.answer(
+                "Only Roni and models can change exemptions.", show_alert=True
+            )
             return
 
-        docs = _query_members_for_list()
-        if not docs:
-            await cq.answer("No tracked members yet. Run a scan first.", show_alert=True)
+        page = int(cq.data.split(":")[1])
+        docs_count = members_coll.count_documents({})
+        if docs_count == 0:
+            await cq.answer("No members in the tracker yet.", show_alert=True)
             return
 
-        kb = _member_pick_kb(
-            docs,
-            action_prefix="reqpanel:toggle_exempt_user:",
-            back_cb="reqpanel:admin",
-        )
+        text, kb = _render_exempt_page(user_id, page)
         await cq.answer()
         await _safe_edit_text(
             cq.message,
-            text=(
-                "<b>Exempt / Un-exempt Member</b>\n\n"
-                "Tap a member below to flip their exempt status for this month.\n\n"
-                "<i>Owner and models stay effectively exempt even if you uncheck them here.</i>"
-            ),
+            text=text,
             reply_markup=kb,
             disable_web_page_preview=True,
         )
 
-    @app.on_callback_query(filters.regex(r"^reqpanel:toggle_exempt_user:\d+$"))
-    async def reqpanel_toggle_exempt_user_cb(_, cq: CallbackQuery):
+    @app.on_callback_query(filters.regex(r"^reqpanel:exempttoggle:(-?\d+):(\d+)$"))
+    async def reqpanel_exempttoggle_cb(client: Client, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can change exemptions.", show_alert=True)
+            await cq.answer(
+                "Only Roni and models can change exemptions.", show_alert=True
+            )
             return
 
-        target_id = int(cq.data.split(":")[-1])
+        _, _, uid_str, page_str = cq.data.split(":")
+        target_id = int(uid_str)
+        page = int(page_str)
+
         doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
         new_val = not bool(doc.get("is_exempt", False))
         members_coll.update_one(
@@ -909,31 +878,28 @@ def register(app: Client):
                 "$set": {
                     "is_exempt": new_val,
                     "last_updated": datetime.now(timezone.utc),
-                },
-                "$setOnInsert": {"first_name": ""},
+                }
             },
             upsert=True,
         )
-        model_note = ""
-        if target_id == OWNER_ID:
-            model_note = " (OWNER – still exempt overall)"
-        elif target_id in MODELS:
-            model_note = " (MODEL – still exempt overall)"
 
-        await cq.answer("Updated.", show_alert=False)
+        await _log_event(
+            client,
+            f"Exempt toggled to {new_val} for {target_id} by {user_id}",
+        )
+
+        text, kb = _render_exempt_page(user_id, page)
+        await cq.answer("Toggled.")
         await _safe_edit_text(
             cq.message,
-            text=(
-                f"User <code>{target_id}</code> is now "
-                f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month.{model_note}"
-            ),
-            reply_markup=_admin_kb(),
+            text=text,
+            reply_markup=kb,
             disable_web_page_preview=True,
         )
 
-    # ────────────── Scan groups ──────────────
+    # ────────────── Scan ──────────────
 
-    @app.on_callback_query(filters.regex("^reqpanel:scan$"))
+    @app.on_callback_query(filters.regex(r"^reqpanel:scan$"))
     async def reqpanel_scan_cb(client: Client, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
@@ -979,183 +945,222 @@ def register(app: Client):
                 f"✅ Scan complete.\n"
                 f"Indexed or updated {total_indexed} members from Sanctuary group(s)."
             ),
-            reply_markup=_admin_kb(),
+            reply_markup=_admin_kb(_is_owner(user_id)),
             disable_web_page_preview=True,
         )
 
-    # ────────────── Reminder / final-warning: pick member from list ──────────────
+    # ────────────── Reminder & final-warning menus (button-only) ──────────────
 
-    @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
-    async def reqpanel_reminders_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        # Only you can send DMs so members don't get spammed
-        if not _is_owner(user_id):
-            await cq.answer("Only Roni can send reminder messages.", show_alert=True)
-            return
-
-        docs = _query_members_for_reminders()
-        if not docs:
-            await cq.answer("No members currently behind that need reminders.", show_alert=True)
-            return
-
-        kb = _member_pick_kb(
-            docs,
-            action_prefix="reqpanel:send_reminder_user:",
-            back_cb="reqpanel:admin",
+    def _eligible_reminder_docs(final: bool) -> List[Dict[str, Any]]:
+        flag_field = "final_warning_sent" if final else "reminder_sent"
+        docs = list(
+            members_coll.find(
+                {
+                    "manual_spend": {"$lt": REQUIRED_MIN_SPEND},
+                    flag_field: {"$ne": True},
+                }
+            )
         )
+        docs = [d for d in docs if d["user_id"] != OWNER_ID and d["user_id"] not in MODELS]
+        return docs
+
+    async def _show_dm_menu(
+        cq: CallbackQuery, final: bool, page: int
+    ):
+        user_id = cq.from_user.id
+        if not _is_owner(user_id):
+            await cq.answer("Only Roni can send these DMs.", show_alert=True)
+            return
+
+        docs = _eligible_reminder_docs(final)
+        kind = "Final Warnings" if final else "Reminders"
+
+        if not docs:
+            await cq.answer(f"No members are eligible for {kind.lower()} right now.", show_alert=True)
+            await _safe_edit_text(
+                cq.message,
+                text=f"Nobody is currently behind and eligible for {kind.lower()}.",
+                reply_markup=_admin_kb(True),
+                disable_web_page_preview=True,
+            )
+            return
+
+        start = page * 8
+        chunk = docs[start : start + 8]
+        more = len(docs) > start + 8
+
+        lines = [
+            f"<b>Send {kind} – Pick by Button</b>",
+            "",
+            "Tap a member’s name to send just to them.",
+            "If you really want to blast everyone, there’s a button at the bottom. 😈",
+            "",
+            f"Page {page + 1}",
+        ]
+        for d in chunk:
+            total = float(d.get("manual_spend", 0.0))
+            lines.append(
+                f"• {_display_name(d)} (<code>{d['user_id']}</code>) – BEHIND (${total:.2f})"
+            )
+
+        rows: List[List[InlineKeyboardButton]] = []
+        prefix = "reqpanel:finalsendone" if final else "reqpanel:remindsendone"
+        for d in chunk:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        _display_name(d),
+                        callback_data=f"{prefix}:{d['user_id']}:{page}",
+                    )
+                ]
+            )
+
+        all_prefix = "reqpanel:finalsendall" if final else "reqpanel:remindsendall"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"Send {kind} to EVERYONE on this list",
+                    callback_data=all_prefix,
+                )
+            ]
+        )
+
+        pager_prefix = "reqpanel:finalmenu" if final else "reqpanel:remindmenu"
+        pager = _pager_buttons(pager_prefix, page, more)
+        if pager:
+            rows.append(pager)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "⬅ Back to Panel", callback_data="reqpanel:admin"
+                )
+            ]
+        )
+
         await cq.answer()
         await _safe_edit_text(
             cq.message,
-            text=(
-                "<b>Send Reminder – Pick Member</b>\n\n"
-                "Tap a member below to send them a reminder DM.\n"
-                "Only people who are behind & not exempt will show here."
-            ),
-            reply_markup=kb,
+            text="\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(rows),
             disable_web_page_preview=True,
         )
 
-    @app.on_callback_query(filters.regex(r"^reqpanel:send_reminder_user:\d+$"))
-    async def reqpanel_send_reminder_user_cb(client: Client, cq: CallbackQuery):
+    @app.on_callback_query(filters.regex(r"^reqpanel:remindmenu:(\d+)$"))
+    async def reqpanel_remindmenu_cb(_, cq: CallbackQuery):
+        page = int(cq.data.split(":")[1])
+        await _show_dm_menu(cq, final=False, page=page)
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:finalmenu:(\d+)$"))
+    async def reqpanel_finalmenu_cb(_, cq: CallbackQuery):
+        page = int(cq.data.split(":")[1])
+        await _show_dm_menu(cq, final=True, page=page)
+
+    async def _send_one_dm(
+        client: Client, cq: CallbackQuery, target_id: int, final: bool, page: int
+    ):
         user_id = cq.from_user.id
         if not _is_owner(user_id):
-            await cq.answer("Only Roni can send reminder messages.", show_alert=True)
+            await cq.answer("Only Roni can send these DMs.", show_alert=True)
             return
 
-        target_id = int(cq.data.split(":")[-1])
-        d = members_coll.find_one({"user_id": target_id})
-        if not d:
-            await cq.answer("Member not found in tracker.", show_alert=True)
+        doc = members_coll.find_one({"user_id": target_id})
+        if not doc:
+            await cq.answer("They’re not in the tracker anymore.", show_alert=True)
             return
 
-        # respect owner/models exempt
-        if target_id == OWNER_ID or target_id in MODELS:
-            await cq.answer("Models and owner are always exempt.", show_alert=True)
-            return
+        flag_field = "final_warning_sent" if final else "reminder_sent"
 
-        name = d.get("first_name") or "there"
-        msg = random.choice(REMINDER_MSGS).format(name=name)
-        sent = await _safe_send(client, target_id, msg)
-        if not sent:
-            await cq.answer("Couldn’t DM that member.", show_alert=True)
-            return
-
-        members_coll.update_one(
-            {"user_id": target_id},
-            {"$set": {"reminder_sent": True, "last_updated": datetime.now(timezone.utc)}},
-        )
-
-        await _log_event(client, f"Reminder sent to {target_id} by {user_id}")
-        await cq.answer("Reminder sent.", show_alert=True)
-
-        # Refresh list after sending so they drop out
-        docs = _query_members_for_reminders()
-        if not docs:
-            await _safe_edit_text(
-                cq.message,
-                text="💌 Reminder list is now empty – everyone behind has been pinged.",
-                reply_markup=_admin_kb(),
-                disable_web_page_preview=True,
-            )
+        name = doc.get("first_name") or "there"
+        if final:
+            msg = random.choice(FINAL_WARNING_MSGS).format(name=name)
         else:
-            kb = _member_pick_kb(
-                docs,
-                action_prefix="reqpanel:send_reminder_user:",
-                back_cb="reqpanel:admin",
-            )
-            await _safe_edit_text(
-                cq.message,
-                text=(
-                    "<b>Send Reminder – Pick Member</b>\n\n"
-                    "Tap another member below to send a reminder DM.\n"
-                    "Only people who are behind & not exempt will show here."
-                ),
-                reply_markup=kb,
-                disable_web_page_preview=True,
-            )
+            msg = random.choice(REMINDER_MSGS).format(name=name)
 
-    @app.on_callback_query(filters.regex("^reqpanel:final_warnings$"))
-    async def reqpanel_final_warnings_cb(_, cq: CallbackQuery):
+        sent = await _safe_send(client, target_id, msg)
+        if sent:
+            members_coll.update_one(
+                {"user_id": target_id},
+                {
+                    "$set": {
+                        flag_field: True,
+                        "last_updated": datetime.now(timezone.utc),
+                    }
+                },
+            )
+            await _log_event(
+                client,
+                f"{'Final warning' if final else 'Reminder'} sent to {target_id} by {user_id}",
+            )
+            await cq.answer("Sent.", show_alert=False)
+        else:
+            await cq.answer("Couldn’t send DM (maybe they blocked the bot).", show_alert=True)
+
+        await _show_dm_menu(cq, final=final, page=page)
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:remindsendone:(-?\d+):(\d+)$"))
+    async def reqpanel_remindsendone_cb(client: Client, cq: CallbackQuery):
+        _, _, uid_str, page_str = cq.data.split(":")
+        await _send_one_dm(client, cq, int(uid_str), final=False, page=int(page_str))
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:finalsendone:(-?\d+):(\d+)$"))
+    async def reqpanel_finalsendone_cb(client: Client, cq: CallbackQuery):
+        _, _, uid_str, page_str = cq.data.split(":")
+        await _send_one_dm(client, cq, int(uid_str), final=True, page=int(page_str))
+
+    async def _send_all_dm(client: Client, cq: CallbackQuery, final: bool):
         user_id = cq.from_user.id
         if not _is_owner(user_id):
-            await cq.answer("Only Roni can send final warnings.", show_alert=True)
+            await cq.answer("Only Roni can send these DMs.", show_alert=True)
             return
 
-        docs = _query_members_for_final_warnings()
+        docs = _eligible_reminder_docs(final)
         if not docs:
-            await cq.answer("No members currently behind that need final warnings.", show_alert=True)
+            await cq.answer("Nobody left on the list.", show_alert=True)
             return
 
-        kb = _member_pick_kb(
-            docs,
-            action_prefix="reqpanel:send_final_user:",
-            back_cb="reqpanel:admin",
+        flag_field = "final_warning_sent" if final else "reminder_sent"
+        count = 0
+        for d in docs:
+            uid = d["user_id"]
+            name = d.get("first_name") or "there"
+            if final:
+                msg = random.choice(FINAL_WARNING_MSGS).format(name=name)
+            else:
+                msg = random.choice(REMINDER_MSGS).format(name=name)
+
+            sent = await _safe_send(client, uid, msg)
+            if not sent:
+                continue
+            members_coll.update_one(
+                {"user_id": uid},
+                {
+                    "$set": {
+                        flag_field: True,
+                        "last_updated": datetime.now(timezone.utc),
+                    }
+                },
+            )
+            count += 1
+
+        await _log_event(
+            client,
+            f"{'Final warnings' if final else 'Reminders'} sweep sent to {count} members by {user_id}",
         )
-        await cq.answer()
+        await cq.answer(f"Sent to {count} member(s).", show_alert=True)
         await _safe_edit_text(
             cq.message,
             text=(
-                "<b>Send Final Warning – Pick Member</b>\n\n"
-                "Tap a member below to send them a final-warning DM.\n"
-                "Only people who are behind & not exempt will show here."
+                f"{'⚠️ Final-warning' if final else '💌 Reminder'} sweep complete.\n"
+                f"Sent to {count} member(s) currently behind."
             ),
-            reply_markup=kb,
+            reply_markup=_admin_kb(True),
             disable_web_page_preview=True,
         )
 
-    @app.on_callback_query(filters.regex(r"^reqpanel:send_final_user:\d+$"))
-    async def reqpanel_send_final_user_cb(client: Client, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_owner(user_id):
-            await cq.answer("Only Roni can send final warnings.", show_alert=True)
-            return
+    @app.on_callback_query(filters.regex(r"^reqpanel:remindsendall$"))
+    async def reqpanel_remindsendall_cb(client: Client, cq: CallbackQuery):
+        await _send_all_dm(client, cq, final=False)
 
-        target_id = int(cq.data.split(":")[-1])
-        d = members_coll.find_one({"user_id": target_id})
-        if not d:
-            await cq.answer("Member not found in tracker.", show_alert=True)
-            return
-
-        if target_id == OWNER_ID or target_id in MODELS:
-            await cq.answer("Models and owner are always exempt.", show_alert=True)
-            return
-
-        name = d.get("first_name") or "there"
-        msg = random.choice(FINAL_WARNING_MSGS).format(name=name)
-        sent = await _safe_send(client, target_id, msg)
-        if not sent:
-            await cq.answer("Couldn’t DM that member.", show_alert=True)
-            return
-
-        members_coll.update_one(
-            {"user_id": target_id},
-            {"$set": {"final_warning_sent": True, "last_updated": datetime.now(timezone.utc)}},
-        )
-
-        await _log_event(client, f"Final warning sent to {target_id} by {user_id}")
-        await cq.answer("Final warning sent.", show_alert=True)
-
-        docs = _query_members_for_final_warnings()
-        if not docs:
-            await _safe_edit_text(
-                cq.message,
-                text="⚠️ Final-warning list is now empty – everyone behind has been warned.",
-                reply_markup=_admin_kb(),
-                disable_web_page_preview=True,
-            )
-        else:
-            kb = _member_pick_kb(
-                docs,
-                action_prefix="reqpanel:send_final_user:",
-                back_cb="reqpanel:admin",
-            )
-            await _safe_edit_text(
-                cq.message,
-                text=(
-                    "<b>Send Final Warning – Pick Member</b>\n\n"
-                    "Tap another member below to send a final-warning DM.\n"
-                    "Only people who are behind & not exempt will show here."
-                ),
-                reply_markup=kb,
-                disable_web_page_preview=True,
-            )
+    @app.on_callback_query(filters.regex(r"^reqpanel:finalsendall$"))
+    async def reqpanel_finalsendall_cb(client: Client, cq: CallbackQuery):
+        await _send_all_dm(client, cq, final=True)
