@@ -123,6 +123,7 @@ def _member_doc(user_id: int) -> Dict[str, Any]:
     """
     Load a member doc and apply derived fields:
     - Owner & models are always effectively exempt from requirements
+    - No automatic month-clearing here; that is handled by explicit reset tools
     """
     doc = members_coll.find_one({"user_id": user_id}) or {}
     is_owner = user_id == OWNER_ID
@@ -275,6 +276,12 @@ def _admin_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    "🧹 New Month – Clear All Totals",
+                    callback_data="reqpanel:clear_all_totals",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     "⬅ Back to Requirements Menu", callback_data="reqpanel:home"
                 ),
             ],
@@ -359,15 +366,15 @@ def register(app: Client):
         text_lines = [
             "<b>Requirements Help</b>",
             "",
-            "Use this panel to check how you’re doing on Sanctuary requirements this month.",
+            "Use this panel to check how you’re doing on Sanctuary requirements for the current cycle.",
             "",
             "• <b>Check My Status</b> – see if you’re met or behind.",
         ]
         if is_admin:
             text_lines.extend(
                 [
-                    "• <b>Requirements Panel</b> – open the owner/models tools panel "
-                    "(lists, manual credit, exemptions, reminders).",
+                    "• <b>Requirements Panel</b> – owner/model tools for lists, manual credit, "
+                    "exemptions, reminders, and monthly resets.",
                 ]
             )
         text_lines.append("")
@@ -400,7 +407,7 @@ def register(app: Client):
 
         text = (
             "<b>Requirements Panel – Owner / Models</b>\n\n"
-            "Use these tools to manage Sanctuary requirements for the month.\n"
+            "Use these tools to manage Sanctuary requirements for the month/cycle.\n"
             "Everything you do here updates what SuccuBot uses when checking "
             "member status or running sweeps, so double-check before you confirm changes.\n\n"
             "From here you can:\n"
@@ -409,8 +416,8 @@ def register(app: Client):
             "▪️ Exempt / un-exempt members\n"
             "▪️ Scan groups into the tracker\n"
             "▪️ Send reminder DMs to members who are behind\n"
-            "▪️ Send final-warning DMs to those still not meeting minimums\n\n"
-            "All changes here affect this month’s requirement checks and future sweeps/reminders.\n\n"
+            "▪️ Send final-warning DMs\n"
+            "▪️ Clear all manual totals when you start a new month after your sweep\n\n"
             "<i>Only you and approved model admins see this panel. Members just see their own status.</i>"
         )
 
@@ -461,7 +468,7 @@ def register(app: Client):
             reply_markup=_back_to_admin_kb(),
         )
 
-    # ────────────── Text router (for lookup / exempt only) ──────────────
+    # ────────────── Text router (lookup / exempt only) ──────────────
 
     @app.on_message(filters.text & filters.private)
     async def requirements_state_router(client: Client, msg: Message):
@@ -665,8 +672,8 @@ def register(app: Client):
             cq.message,
             text=(
                 "<b>Add Manual Spend</b>\n\n"
-                "Tap a member below to credit offline payments for this month.\n"
-                "This adds extra credited dollars on top of Stripe / games for this month only."
+                "Tap a member below to credit offline payments for this month/cycle.\n"
+                "This adds extra credited dollars on top of Stripe / games."
             ),
             reply_markup=kb,
             disable_web_page_preview=True,
@@ -693,7 +700,7 @@ def register(app: Client):
             "<b>Add Manual Spend</b>\n\n"
             f"Member: {name} (<code>{target_id}</code>)\n"
             f"Current manual total: ${doc['manual_spend']:.2f}\n\n"
-            "Pick an amount to credit for this month:"
+            "Pick an amount to credit for this cycle:"
         )
 
         kb = InlineKeyboardMarkup(
@@ -719,6 +726,12 @@ def register(app: Client):
                     InlineKeyboardButton(
                         "Custom amount",
                         callback_data=f"reqpanel:spend_custom:{target_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🧹 Clear Manual Total",
+                        callback_data=f"reqpanel:clear_total:{target_id}",
                     ),
                 ],
                 [
@@ -749,7 +762,8 @@ def register(app: Client):
         amount = float(parts[3])
 
         doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
-        new_total = float(doc.get("manual_spend", 0.0) or 0.0) + amount
+        base = float(doc.get("manual_spend", 0.0) or 0.0)
+        new_total = base + amount
 
         members_coll.update_one(
             {"user_id": target_id},
@@ -773,6 +787,83 @@ def register(app: Client):
             f"Added ${amount:.2f}. New total: ${new_total:.2f}", show_alert=True
         )
         await reqpanel_spend_member_cb(client, cq)
+
+    # ────────────── Clear manual total button (per member) ──────────────
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:clear_total:(\d+)$"))
+    async def reqpanel_clear_total_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can clear totals.", show_alert=True)
+            return
+
+        target_id = int(cq.data.split(":")[-1])
+        doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
+
+        members_coll.update_one(
+            {"user_id": target_id},
+            {
+                "$set": {
+                    "manual_spend": 0.0,
+                    "last_updated": datetime.now(timezone.utc),
+                    "first_name": doc.get("first_name", ""),
+                    "username": doc.get("username"),
+                }
+            },
+            upsert=True,
+        )
+
+        await _log_event(
+            client,
+            f"Manual spend CLEARED to $0.00 for {target_id} by {user_id}.",
+        )
+
+        await cq.answer(
+            "Manual total cleared to $0 for this member.", show_alert=True
+        )
+        await reqpanel_spend_member_cb(client, cq)
+
+    # ────────────── Global clear-all-totals button ──────────────
+
+    @app.on_callback_query(filters.regex("^reqpanel:clear_all_totals$"))
+    async def reqpanel_clear_all_totals_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can clear all totals.", show_alert=True)
+            return
+
+        result = members_coll.update_many(
+            {},
+            {
+                "$set": {
+                    "manual_spend": 0.0,
+                    "reminder_sent": False,
+                    "final_warning_sent": False,
+                    "last_updated": datetime.now(timezone.utc),
+                }
+            },
+        )
+
+        modified = result.modified_count if result else 0
+        await _log_event(
+            client,
+            f"GLOBAL reset: manual_totals cleared for {modified} member docs by {user_id}.",
+        )
+
+        await cq.answer(
+            f"Cleared manual totals for {modified} member(s). New month started.",
+            show_alert=True,
+        )
+        await _safe_edit_text(
+            cq.message,
+            text=(
+                f"🧹 New month reset complete.\n"
+                f"Manual totals cleared for {modified} member(s). "
+                "You can now start logging this month’s requirements fresh."
+            ),
+            reply_markup=_admin_kb(),
+            disable_web_page_preview=True,
+        )
 
     # ────────────── Custom amount via keypad (callbacks only) ──────────────
 
@@ -800,7 +891,7 @@ def register(app: Client):
         text = (
             "<b>Add Manual Spend – Custom Amount</b>\n\n"
             f"Target member ID: <code>{target_id}</code>\n\n"
-            "Use the buttons below to adjust the custom amount for this month.\n"
+            "Use the buttons below to adjust the custom amount for this cycle.\n"
             "When you’re happy with the number, tap <b>✅ Confirm</b> to apply it."
             "\n\nCurrent pending amount: <b>$0</b>"
         )
@@ -854,7 +945,7 @@ def register(app: Client):
         text = (
             "<b>Add Manual Spend – Custom Amount</b>\n\n"
             f"Target member ID: <code>{target_id}</code>\n\n"
-            "Use the buttons below to adjust the custom amount for this month.\n"
+            "Use the buttons below to adjust the custom amount for this cycle.\n"
             "When you’re happy with the number, tap <b>✅ Confirm</b> to apply it."
             f"\n\nCurrent pending amount: <b>${amount}</b>"
         )
@@ -895,7 +986,8 @@ def register(app: Client):
         member_doc = members_coll.find_one({"user_id": target_id}) or {
             "user_id": target_id
         }
-        new_total = float(member_doc.get("manual_spend", 0.0) or 0.0) + float(amount)
+        base = float(member_doc.get("manual_spend", 0.0) or 0.0)
+        new_total = base + float(amount)
 
         members_coll.update_one(
             {"user_id": target_id},
@@ -951,7 +1043,7 @@ def register(app: Client):
             text=(
                 "<b>Exempt / Un-exempt Member</b>\n\n"
                 "Send me the numeric Telegram user ID for the member.\n\n"
-                "I’ll flip their exempt status for this month.\n\n"
+                "I’ll flip their exempt status for this cycle.\n\n"
                 "<i>Owner and models stay effectively exempt even if you uncheck them here.</i>"
             ),
             reply_markup=_back_to_admin_kb(),
