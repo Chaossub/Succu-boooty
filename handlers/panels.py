@@ -41,12 +41,29 @@ MODEL_TIP_LINKS: Dict[str, str] = {
 
 # ────────────── KEYBOARDS ──────────────
 def _main_keyboard() -> InlineKeyboardMarkup:
+    """
+    Canonical main menu for SuccuBot.
+    Anything that says 'Back to Main' should end up using this layout.
+    """
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("💞 Menus", callback_data="panels:menus")],
-            [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
-            [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
-            [InlineKeyboardButton("📌 Requirements Help", callback_data="reqpanel:home")],  # NEW
+            [
+                InlineKeyboardButton(
+                    "🔐 Contact Admins", callback_data="contact_admins:open"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🍑 Find Our Models Elsewhere",
+                    callback_data="models_elsewhere:open",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📌 Requirements Help", callback_data="reqpanel:home"
+                )
+            ],  # <- Requirements Help stays here
             [InlineKeyboardButton("❓ Help", callback_data="help:open")],
         ]
     )
@@ -77,14 +94,18 @@ def _model_keyboard(slug: str) -> InlineKeyboardMarkup:
     if username:
         book_button = InlineKeyboardButton("📩 Book", url=f"https://t.me/{username}")
     else:
-        book_button = InlineKeyboardButton("📩 Book", callback_data="panels:nodm")
+        book_button = InlineKeyboardButton(
+            "📩 Book", callback_data="panels:nodm"
+        )
 
     # Tip button
     tip_link = MODEL_TIP_LINKS.get(slug) or ""
     if tip_link:
         tip_button = InlineKeyboardButton("💸 Tip", url=tip_link)
     else:
-        tip_button = InlineKeyboardButton("💸 Tip (coming soon)", callback_data="panels:tip_coming")
+        tip_button = InlineKeyboardButton(
+            "💸 Tip (coming soon)", callback_data="panels:tip_coming"
+        )
 
     return InlineKeyboardMarkup(
         [
@@ -156,6 +177,24 @@ def register(app: Client):
             pass
         await cq.answer()
 
+    # -------- Alias: portal:home → same main menu --------
+    # This makes ANY "Back to Main" that uses portal:home show the SAME UI
+    # as panels:root, including 📌 Requirements Help.
+    @app.on_callback_query(filters.regex(r"^portal:home$"))
+    async def portal_home_alias_cb(_, cq: CallbackQuery):
+        kb = _main_keyboard()
+        try:
+            await cq.message.edit_text(
+                "🔥 Welcome back to SuccuBot\n"
+                "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+                "✨ Use the menu below to navigate!",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+        await cq.answer()
+
     # -------- Single model page --------
     @app.on_callback_query(filters.regex(r"^panels:model:(.+)$"))
     async def model_page_cb(_, cq: CallbackQuery):
@@ -197,4 +236,7 @@ def register(app: Client):
     # -------- No DM username set --------
     @app.on_callback_query(filters.regex(r"^panels:nodm$"))
     async def nodm_cb(_, cq: CallbackQuery):
-        await cq.answer("No DM link set for this model yet. Please contact an admin.", show_alert=True)
+        await cq.answer(
+            "No DM link set for this model yet. Please contact an admin.",
+            show_alert=True,
+        )
