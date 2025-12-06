@@ -1,17 +1,25 @@
-# handlers/summon.py
-
+# main.py 
 import os
 import logging
 from typing import Set, List
 
 from pyrogram import Client, filters
-from pyrogram.types import Message
-from pyrogram.enums import ChatType
+from pyrogram.enums import ParseMode, ChatType
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
-log = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("main")
 
-# ────────────── ENV & HELPERS ──────────────
+# ────────────── ENV ──────────────
+API_ID   = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+if not all([API_ID, API_HASH, BOT_TOKEN]):
+    raise ValueError("Missing API_ID / API_HASH / BOT_TOKEN")
 
+FIND_MODELS_TEXT = os.getenv("FIND_MODELS_TEXT", "Nothing here yet 💕")
+
+# Owner / admins / models for summon permissions
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
 
@@ -25,21 +33,21 @@ def _parse_id_list(val: str | None) -> Set[int]:
         try:
             out.add(int(part))
         except ValueError:
-            log.warning("summon: bad ID in list: %r", part)
+            log.warning("main: bad ID in list: %r", part)
     return out
 
 
-SUPER_ADMINS: Set[int] = _parse_id_list(os.getenv("SUPER_ADMINS", ""))
-MODELS: Set[int] = _parse_id_list(os.getenv("MODELS", ""))
+SUPER_ADMINS: Set[int] = _parse_id_list(os.getenv("SUPER_ADMINS"))
+MODELS: Set[int] = _parse_id_list(os.getenv("MODELS"))
 
 
 def _can_use_summon(user_id: int) -> bool:
     """
     Only:
-    - Owner
+    - OWNER_ID
     - MODELS
     - SUPER_ADMINS
-    can use /summon.
+    can use /summonall /summon.
     """
     if user_id == OWNER_ID:
         return True
@@ -54,71 +62,167 @@ def _chunk_list(items: List[str], chunk_size: int) -> List[List[str]]:
     return [items[i: i + chunk_size] for i in range(0, len(items), chunk_size)]
 
 
-# ────────────── REGISTER ──────────────
+# ────────────── BOT INIT ──────────────
+app = Client(
+    "SuccuBot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+    parse_mode=ParseMode.HTML
+)
 
 
-def register(app: Client):
+def _try_register(module_path: str, name: str | None = None):
+    mod_name = f"handlers.{module_path}"
+    label = name or module_path
+    try:
+        mod = __import__(mod_name, fromlist=["register"])
+        if hasattr(mod, "register"):
+            mod.register(app)
+            log.info("✅ Registered %s", mod_name)
+        else:
+            log.warning("%s has no register()", mod_name)
+    except Exception as e:
+        log.warning("Skipping %s (import/register failed): %s", mod_name, e)
+
+
+def main():
+    log.info("💋 Starting SuccuBot…")
     log.info(
-        "✅ handlers.summon registered (OWNER_ID=%s, SUPER_ADMINS=%s, MODELS=%s)",
+        "Summon permissions: OWNER_ID=%s SUPER_ADMINS=%s MODELS=%s",
         OWNER_ID,
         SUPER_ADMINS,
         MODELS,
     )
 
+    # Warm-up / optional
+    _try_register("hi")                      # /hi (warm-up)
+
+    # Core panels & menus (this contains /start; DON'T add another /start here)
+    _try_register("panels")                  # Menus picker + home
+
+    # Contact Admins & DM helpers
+    _try_register("contact_admins")          # contact_admins:open + anon flow
+    _try_register("dm_admin")
+    _try_register("dm_ready")
+    _try_register("dm_ready_admin")
+    _try_register("dm_portal")               # legacy shim (+ optional /dmnow)
+    _try_register("portal_cmd")              # /portal → DM button
+
+    # ⭐ Roni personal assistant portal (/roni_portal + /start roni_assistant)
+    _try_register("roni_portal")             # core portal UI + text blocks
+    _try_register("roni_portal_age")         # age verification + AV admin
+
+    # Help panel (buttons -> env text)
+    _try_register("help_panel")              # help:open + pages
+
+    # Menus persistence/creation
+    _try_register("menu")                    # (mongo or json)
+    _try_register("createmenu")
+
+    # Moderation / warnings
+    _try_register("moderation")
+    _try_register("warnings")
+
+    # Message scheduler
+    _try_register("schedulemsg")
+
+    # Flyers (ad-hoc send + CRUD)
+    _try_register("flyer")                   # /addflyer /flyer /listflyers /deleteflyer /textflyer
+
+    # Flyer scheduler (date/time -> post)
+    _try_register("flyer_scheduler")
+
+    # ⭐ Requirements panel (Requirements Help UI)
+    _try_register("requirements_panel")
+
+    # 🔻 Give both schedulers the running loop so they can post from their threads
+    try:
+        from handlers import flyer_scheduler as _fs
+        _fs.set_main_loop(app.loop)
+        log.info("✅ Set main loop for flyer_scheduler")
+    except Exception as e:
+        log.warning("Could not set main loop for flyer_scheduler: %s", e)
+
+    try:
+        from handlers import schedulemsg as _sm
+        _sm.set_main_loop(app.loop)
+        log.info("✅ Set main loop for schedulemsg")
+    except Exception as e:
+        log.warning("Could not set main loop for schedulemsg: %s", e)
+
+    # -------- Central “Back to Main” handler (portal:home) --------
+    @app.on_callback_query(filters.regex("^portal:home$"))
+    async def _portal_home_cb(_, cq: CallbackQuery):
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("💞 Menus", callback_data="panels:root")],
+            [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
+            [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
+            [InlineKeyboardButton("📌 Requirements Help", callback_data="reqpanel:home")],
+            [InlineKeyboardButton("❓ Help", callback_data="help:open")],
+        ])
+        try:
+            await cq.message.edit_text(
+                "🔥 Welcome back to SuccuBot\n"
+                "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+                "✨ Use the menu below to navigate!",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        finally:
+            await cq.answer()
+
+    # Safety: if panels didn’t provide the “models_elsewhere:open” page, handle it here.
+    @app.on_callback_query(filters.regex("^models_elsewhere:open$"))
+    async def _models_elsewhere_cb(_, cq: CallbackQuery):
+        text = FIND_MODELS_TEXT or "Nothing here yet 💕"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back to Main", callback_data="portal:home")]])
+        try:
+            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        finally:
+            await cq.answer()
+
+    # -------- /summonall handler (MentionMembers-style) --------
     @app.on_message(
-        filters.command(["summon", "summonall", "all"], prefixes=["/", "!"])
+        filters.command(["summonall", "summon"], prefixes=["/", "!"])
         & (filters.group | filters.supergroup)
     )
     async def summon_cmd(client: Client, msg: Message):
-        # Just to prove it’s firing in logs
-        log.info(
-            "summon: command received in chat %s from user %s",
-            msg.chat.id if msg.chat else "?", msg.from_user.id if msg.from_user else "?"
-        )
-
-        from_user = msg.from_user
-        if not from_user:
+        if not msg.from_user or not msg.chat:
             return
 
+        user_id = msg.from_user.id
         chat = msg.chat
-        if not chat or chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
-            return
-
-        user_id = from_user.id
         chat_id = chat.id
 
-        # ── Permission check: only Roni + models + super_admins ──
+        log.info("summon: command in chat %s from user %s text=%r", chat_id, user_id, msg.text)
+
+        # Only you + models + super_admins
         if not _can_use_summon(user_id):
-            await msg.reply_text(
-                "Only Roni and approved models can use /summon here."
-            )
+            await msg.reply_text("Only Roni and approved models can use /summonall here.")
             return
 
-        # Optional extra text after the command
-        extra_text = ""
+        # Text after the command becomes the message header
+        # /summonall Game night is starting! -> "Game night is starting!"
+        header_text = ""
         if msg.text:
             parts = msg.text.split(maxsplit=1)
             if len(parts) > 1:
-                extra_text = parts[1].strip()
+                header_text = parts[1].strip()
 
-        # ── Collect members ─────────────
+        # Collect all human members
         mentions: List[str] = []
         try:
             async for member in client.get_chat_members(chat_id):
-                user = member.user
-                if not user:
+                u = member.user
+                if not u or u.is_bot:
                     continue
-                if user.is_bot:
-                    continue
-
-                name = (user.first_name or user.last_name or "Member").strip()
-                mention = f'<a href="tg://user?id={user.id}">{name}</a>'
-                mentions.append(mention)
+                name = (u.first_name or u.last_name or "Member").strip()
+                mentions.append(f'<a href="tg://user?id={u.id}">{name}</a>')
         except Exception as e:
-            log.exception("summon: error while iterating chat members: %s", e)
+            log.exception("summon: get_chat_members failed: %s", e)
             await msg.reply_text(
-                "I couldn’t fetch the member list for this chat. "
-                "Make sure I have permission to see members."
+                "I couldn’t read the member list. Make sure I can see members."
             )
             return
 
@@ -126,13 +230,21 @@ def register(app: Client):
             await msg.reply_text("I don’t see any members to tag (besides bots).")
             return
 
-        chunks = _chunk_list(mentions, 20)
-        base_text = extra_text or "Summoning everyone 💋"
+        total = len(mentions)
+        chunks = _chunk_list(mentions, 20)   # 20 mentions per message
         reply_to_id = msg.reply_to_message_id or msg.id
 
-        sent_count = 0
+        num_batches = len(chunks)
+        batch_num = 1
+
         for chunk in chunks:
-            text = base_text + "\n\n" + " ".join(chunk)
+            # Very obvious what happened, like MentionMembers
+            header_lines = [f"Summoning {total} member(s) – batch {batch_num}/{num_batches}"]
+            if header_text:
+                header_lines.append(header_text)
+
+            text = "\n".join(header_lines) + "\n\n" + " ".join(chunk)
+
             try:
                 await client.send_message(
                     chat_id=chat_id,
@@ -140,21 +252,20 @@ def register(app: Client):
                     reply_to_message_id=reply_to_id,
                     disable_web_page_preview=True,
                 )
-                sent_count += 1
             except Exception as e:
-                log.warning("summon: failed to send summon chunk: %s", e)
+                log.warning("summon: failed to send batch %s: %s", batch_num, e)
 
+            batch_num += 1
+
+        # Hide the raw /summonall command if possible
         try:
             await msg.delete()
         except Exception:
             pass
 
-        if sent_count == 0:
-            await client.send_message(
-                chat_id=chat_id,
-                text=(
-                    "Something went wrong trying to tag everyone. "
-                    "I couldn’t send the mentions."
-                ),
-                reply_to_message_id=reply_to_id,
-            )
+    # IMPORTANT: no /start fallback here (to avoid duplicates).
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
