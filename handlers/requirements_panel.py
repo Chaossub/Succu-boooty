@@ -29,11 +29,9 @@ mongo = MongoClient(MONGO_URI)
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
 pending_custom_coll = db["requirements_pending_custom_spend"]
-spend_log_coll = db["requirements_manual_spend_log"]  # NEW: per-model spend breakdown
 
 members_coll.create_index([("user_id", ASCENDING)], unique=True)
 pending_custom_coll.create_index([("owner_id", ASCENDING)], unique=True)
-spend_log_coll.create_index([("created_at", ASCENDING)])
 
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
@@ -79,17 +77,6 @@ REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 
 # Simple in-memory state for some flows
 STATE: Dict[int, Dict[str, Any]] = {}
-
-# Model recipient choices for manual spend logging
-MODEL_RECIPIENT_CHOICES: List[str] = ["roni", "ruby", "rin", "savy", "other", "skip"]
-MODEL_RECIPIENT_LABELS: Dict[str, str] = {
-    "roni": "Roni",
-    "ruby": "Ruby",
-    "rin": "Rin",
-    "savy": "Savy",
-    "other": "Other / Split / Tip jar",
-    "skip": "No specific model",
-}
 
 # ────────────── Helper functions ──────────────
 
@@ -238,7 +225,7 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🛠 Requirements Help", callback_data="reqpanel:admin"
+                    "🛠 Requirements Panel", callback_data="reqpanel:admin"
                 )
             ]
         )
@@ -288,7 +275,7 @@ def _admin_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    "⬅ Back to Requirements Help", callback_data="reqpanel:home"
+                    "⬅ Back to Requirements Menu", callback_data="reqpanel:home"
                 ),
             ],
         ]
@@ -300,7 +287,20 @@ def _back_to_admin_kb() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
-                    "⬅ Back to Requirements Help", callback_data="reqpanel:home"
+                    "⬅ Back to Requirements Menu", callback_data="reqpanel:home"
+                )
+            ]
+        ]
+    )
+
+
+def _back_to_member_list_kb() -> InlineKeyboardMarkup:
+    """Used after custom amount so you still see a Back button."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "⬅ Back to Member List", callback_data="reqpanel:add_spend"
                 )
             ]
         ]
@@ -333,53 +333,10 @@ def _member_select_keyboard() -> InlineKeyboardMarkup:
     rows.append(
         [
             InlineKeyboardButton(
-                "⬅ Back to Requirements Help", callback_data="reqpanel:home"
+                "⬅ Back to Requirements Menu", callback_data="reqpanel:home"
             )
         ]
     )
-    return InlineKeyboardMarkup(rows)
-
-
-def _model_recipient_keyboard(target_id: int, amount: float) -> InlineKeyboardMarkup:
-    """
-    Inline keyboard to pick which model received this manual payment.
-    This is ONLY for your end-of-month model totals; it does NOT change requirement math.
-    """
-    rows: List[List[InlineKeyboardButton]] = []
-
-    # Main model buttons
-    model_row: List[InlineKeyboardButton] = []
-    for slug in ["roni", "ruby", "rin", "savy"]:
-        label = MODEL_RECIPIENT_LABELS.get(slug, slug.title())
-        model_row.append(
-            InlineKeyboardButton(
-                label,
-                callback_data=f"reqpanel:spend_model:{target_id}:{amount}:{slug}",
-            )
-        )
-    rows.append(model_row)
-
-    # Other / skip row
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "Other / Split", callback_data=f"reqpanel:spend_model:{target_id}:{amount}:other"
-            ),
-            InlineKeyboardButton(
-                "Skip", callback_data=f"reqpanel:spend_model:{target_id}:{amount}:skip"
-            ),
-        ]
-    )
-
-    # Back row
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "⬅ Back to Member List", callback_data="reqpanel:add_spend"
-            )
-        ]
-    )
-
     return InlineKeyboardMarkup(rows)
 
 
@@ -410,7 +367,7 @@ def register(app: Client):
         if is_admin:
             text_lines.extend(
                 [
-                    "• <b>Requirements Help</b> – open the owner/models tools panel "
+                    "• <b>Requirements Panel</b> – open the owner/models tools panel "
                     "(lists, manual credit, exemptions, reminders).",
                 ]
             )
@@ -443,13 +400,13 @@ def register(app: Client):
             return
 
         text = (
-            "<b>Requirements Help – Owner / Models</b>\n\n"
+            "<b>Requirements Panel – Owner / Models</b>\n\n"
             "Use these tools to manage Sanctuary requirements for the month.\n"
             "Everything you do here updates what SuccuBot uses when checking "
             "member status or running sweeps, so double-check before you confirm changes.\n\n"
             "From here you can:\n"
             "▪️ View the full member status list\n"
-            "▪️ Add manual spend credit for offline payments (with model breakdown)\n"
+            "▪️ Add manual spend credit for offline payments\n"
             "▪️ Exempt / un-exempt members\n"
             "▪️ Scan groups into the tracker\n"
             "▪️ Send reminder DMs to members who are behind\n"
@@ -506,8 +463,6 @@ def register(app: Client):
         )
 
     # ────────────── Text router for multi-step flows ──────────────
-    # NOTE: we listen to *all* text now, and then no-op unless a
-    # custom-amount is actually pending for you.
 
     @app.on_message(filters.text)
     async def requirements_state_router(client: Client, msg: Message):
@@ -521,7 +476,8 @@ def register(app: Client):
                 pending_custom_coll.delete_one({"owner_id": user_id})
                 await msg.reply_text(
                     "Something went wrong remembering who this was for. "
-                    "Please pick them again from the buttons."
+                    "Please pick them again from the buttons.",
+                    reply_markup=_back_to_member_list_kb(),
                 )
                 return
 
@@ -532,7 +488,8 @@ def register(app: Client):
             except ValueError:
                 await msg.reply_text(
                     "Please send just a positive number for how many dollars to credit.\n\n"
-                    "Example: <code>17.50</code>"
+                    "Example: <code>17.50</code>",
+                    reply_markup=_back_to_member_list_kb(),
                 )
                 return
 
@@ -556,15 +513,11 @@ def register(app: Client):
 
             pending_custom_coll.delete_one({"owner_id": user_id})
 
-            kb = _model_recipient_keyboard(target_id, amount)
-
+            # 👇 NEW: confirmation message includes Back to Member List button
             await msg.reply_text(
-                "<b>Manual Spend Logged</b>\n\n"
-                f"Member: <code>{target_id}</code>\n"
-                f"Amount: ${amount:.2f}\n"
-                f"New manual total: ${new_total:.2f}\n\n"
-                "Who received this payment? This is only for your end-of-month model totals.",
-                reply_markup=kb,
+                f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
+                f"New manual total: ${new_total:.2f}",
+                reply_markup=_back_to_member_list_kb(),
                 disable_web_page_preview=True,
             )
             await _log_event(
@@ -601,13 +554,14 @@ def register(app: Client):
                 if not target_id:
                     await msg.reply_text(
                         "I couldn’t figure out who you meant. Try again with a forwarded message, "
-                        "@username, or numeric ID."
+                        "@username, or numeric ID.",
+                        reply_markup=_back_to_admin_kb(),
                     )
                     return
 
                 doc = _member_doc(target_id)
                 text = _format_member_status(doc)
-                await msg.reply_text(text)
+                await msg.reply_text(text, reply_markup=_back_to_admin_kb())
                 STATE.pop(user_id, None)
                 return
 
@@ -616,7 +570,10 @@ def register(app: Client):
                 try:
                     target_id = int(msg.text.strip())
                 except ValueError:
-                    await msg.reply_text("Please send just the numeric Telegram user ID.")
+                    await msg.reply_text(
+                        "Please send just the numeric Telegram user ID.",
+                        reply_markup=_back_to_admin_kb(),
+                    )
                     return
 
                 doc = members_coll.find_one({"user_id": target_id}) or {
@@ -643,7 +600,8 @@ def register(app: Client):
 
                 await msg.reply_text(
                     f"User <code>{target_id}</code> is now "
-                    f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month.{model_note}"
+                    f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month.{model_note}",
+                    reply_markup=_back_to_admin_kb(),
                 )
                 await _log_event(
                     client,
@@ -657,7 +615,8 @@ def register(app: Client):
             STATE.pop(user_id, None)
             await msg.reply_text(
                 "Sorry, something went wrong saving that. "
-                "Please tap the buttons again and retry."
+                "Please tap the buttons again and retry.",
+                reply_markup=_back_to_admin_kb(),
             )
 
     # ────────────── Admin-panel buttons ──────────────
@@ -737,8 +696,7 @@ def register(app: Client):
             text=(
                 "<b>Add Manual Spend</b>\n\n"
                 "Tap a member below to credit offline payments for this month.\n"
-                "This adds extra credited dollars on top of Stripe / games for this month only.\n\n"
-                "After you pick an amount, you’ll also choose which model received it so you can see model totals later."
+                "This adds extra credited dollars on top of Stripe / games for this month only."
             ),
             reply_markup=kb,
             disable_web_page_preview=True,
@@ -841,23 +799,10 @@ def register(app: Client):
             f"Manual spend +${amount:.2f} for {target_id} by {user_id}.",
         )
 
-        kb = _model_recipient_keyboard(target_id, amount)
-
         await cq.answer(
             f"Added ${amount:.2f}. New total: ${new_total:.2f}", show_alert=True
         )
-        await _safe_edit_text(
-            cq.message,
-            text=(
-                "<b>Manual Spend Logged</b>\n\n"
-                f"Member: <code>{target_id}</code>\n"
-                f"Amount: ${amount:.2f}\n"
-                f"New manual total: ${new_total:.2f}\n\n"
-                "Who received this payment? This is only for your end-of-month model totals."
-            ),
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
+        await reqpanel_spend_member_cb(client, cq)
 
     @app.on_callback_query(filters.regex(r"^reqpanel:spend_custom:(\d+)$"))
     async def reqpanel_spend_custom_cb(_, cq: CallbackQuery):
@@ -878,15 +823,7 @@ def register(app: Client):
             upsert=True,
         )
 
-        kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "⬅ Back to Member List", callback_data="reqpanel:add_spend"
-                    )
-                ]
-            ]
-        )
+        kb = _back_to_member_list_kb()
 
         await cq.answer()
         await _safe_edit_text(
@@ -899,57 +836,6 @@ def register(app: Client):
             reply_markup=kb,
             disable_web_page_preview=True,
         )
-
-    # NEW: record which model received a manual payment
-    @app.on_callback_query(filters.regex(r"^reqpanel:spend_model:(\d+):([0-9.]+):([a-z_]+)$"))
-    async def reqpanel_spend_model_cb(client: Client, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can tag recipients.", show_alert=True)
-            return
-
-        parts = cq.data.split(":")
-        target_id = int(parts[2])
-        try:
-            amount = float(parts[3])
-        except ValueError:
-            amount = 0.0
-        slug = parts[4]
-
-        label = MODEL_RECIPIENT_LABELS.get(slug, slug.title())
-
-        if slug == "skip":
-            await cq.answer("Saved without a specific model recipient.", show_alert=False)
-            # Go back to member page
-            await reqpanel_spend_member_cb(client, cq)
-            return
-
-        # Log per-model breakdown (does NOT change member totals)
-        try:
-            spend_log_coll.insert_one(
-                {
-                    "member_id": target_id,
-                    "amount": amount,
-                    "model_slug": slug,
-                    "model_label": label,
-                    "added_by": user_id,
-                    "created_at": datetime.now(timezone.utc),
-                }
-            )
-        except Exception as e:
-            log.warning("requirements_panel: failed to insert spend_log: %s", e)
-
-        await _log_event(
-            client,
-            f"Manual spend recipient recorded: ${amount:.2f} for member {target_id} → {label} (by {user_id}).",
-        )
-
-        await cq.answer(
-            f"Recorded {label} as the recipient for ${amount:.2f}.",
-            show_alert=True,
-        )
-        # Return to member spend page
-        await reqpanel_spend_member_cb(client, cq)
 
     # ────────────── Toggle Exempt ──────────────
 
