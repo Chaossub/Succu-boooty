@@ -28,8 +28,10 @@ if not MONGO_URI:
 mongo = MongoClient(MONGO_URI)
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
+pending_custom_coll = db["requirements_pending_custom_spend"]
 
 members_coll.create_index([("user_id", ASCENDING)], unique=True)
+pending_custom_coll.create_index([("owner_id", ASCENDING)], unique=True)
 
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
@@ -73,7 +75,7 @@ for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
 # Minimum requirement total to be "met"
 REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 
-# Simple in-memory state for multi-step flows
+# Simple in-memory state for the non-critical flows
 STATE: Dict[int, Dict[str, Any]] = {}
 
 # ────────────── Helper functions ──────────────
@@ -420,6 +422,61 @@ def register(app: Client):
     @app.on_message(filters.private & filters.text)
     async def requirements_state_router(client: Client, msg: Message):
         user_id = msg.from_user.id
+
+        # 1) Check for a pending custom amount flow in Mongo
+        pending = pending_custom_coll.find_one({"owner_id": user_id})
+        if pending:
+            target_id = pending.get("target_id")
+            if not target_id:
+                pending_custom_coll.delete_one({"owner_id": user_id})
+                await msg.reply_text(
+                    "Something went wrong remembering who this was for. "
+                    "Please pick them again from the buttons."
+                )
+                return
+
+            try:
+                amount = float(msg.text.strip())
+                if amount <= 0:
+                    raise ValueError
+            except ValueError:
+                await msg.reply_text(
+                    "Please send just a positive number for how many dollars to credit.\n\n"
+                    "Example: <code>17.50</code>"
+                )
+                return
+
+            doc = members_coll.find_one({"user_id": target_id}) or {
+                "user_id": target_id
+            }
+            new_total = float(doc.get("manual_spend", 0.0)) + amount
+
+            members_coll.update_one(
+                {"user_id": target_id},
+                {
+                    "$set": {
+                        "manual_spend": new_total,
+                        "last_updated": datetime.now(timezone.utc),
+                        "first_name": doc.get("first_name", ""),
+                        "username": doc.get("username"),
+                    }
+                },
+                upsert=True,
+            )
+
+            pending_custom_coll.delete_one({"owner_id": user_id})
+
+            await msg.reply_text(
+                f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
+                f"New manual total: ${new_total:.2f}"
+            )
+            await _log_event(
+                client,
+                f"Manual spend +${amount:.2f} (custom via Mongo) for {target_id} by {user_id}.",
+            )
+            return
+
+        # 2) Legacy STATE flows (lookup / toggle_exempt)
         state = STATE.get(user_id)
         if not state:
             return
@@ -457,59 +514,6 @@ def register(app: Client):
                 STATE.pop(user_id, None)
                 return
 
-            # CUSTOM AMOUNT FLOW
-            if mode == "add_spend_custom":
-                target_id = state.get("target_id")
-                if not target_id:
-                    STATE.pop(user_id, None)
-                    await msg.reply_text(
-                        "Something went wrong remembering who this was for. "
-                        "Please pick them again from the buttons."
-                    )
-                    return
-
-                try:
-                    amount = float(msg.text.strip())
-                    if amount <= 0:
-                        raise ValueError
-                except ValueError:
-                    await msg.reply_text(
-                        "Please send just a positive number for how many dollars to credit.\n\n"
-                        "Example: <code>17.50</code>"
-                    )
-                    return
-
-                doc = members_coll.find_one({"user_id": target_id}) or {
-                    "user_id": target_id
-                }
-                new_total = float(doc.get("manual_spend", 0.0)) + amount
-
-                members_coll.update_one(
-                    {"user_id": target_id},
-                    {
-                        "$set": {
-                            "manual_spend": new_total,
-                            "last_updated": datetime.now(timezone.utc),
-                        },
-                        "$setOnInsert": {
-                            "first_name": doc.get("first_name", ""),
-                            "username": doc.get("username"),
-                        },
-                    },
-                    upsert=True,
-                )
-
-                await msg.reply_text(
-                    f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
-                    f"New manual total: ${new_total:.2f}"
-                )
-                await _log_event(
-                    client,
-                    f"Manual spend +${amount:.2f} (custom) for {target_id} by {user_id}.",
-                )
-                STATE.pop(user_id, None)
-                return
-
             # TOGGLE EXEMPT FLOW
             if mode == "toggle_exempt":
                 try:
@@ -521,7 +525,6 @@ def register(app: Client):
                 doc = members_coll.find_one({"user_id": target_id}) or {
                     "user_id": target_id
                 }
-                # flip ONLY the DB flag; model/owner auto-exempt still applies on read
                 new_val = not bool(doc.get("is_exempt", False))
                 members_coll.update_one(
                     {"user_id": target_id},
@@ -529,8 +532,9 @@ def register(app: Client):
                         "$set": {
                             "is_exempt": new_val,
                             "last_updated": datetime.now(timezone.utc),
-                        },
-                        "$setOnInsert": {"first_name": ""},
+                            "first_name": doc.get("first_name", ""),
+                            "username": doc.get("username"),
+                        }
                     },
                     upsert=True,
                 )
@@ -759,11 +763,9 @@ def register(app: Client):
                 "$set": {
                     "manual_spend": new_total,
                     "last_updated": datetime.now(timezone.utc),
-                },
-                "$setOnInsert": {
                     "first_name": doc.get("first_name", ""),
                     "username": doc.get("username"),
-                },
+                }
             },
             upsert=True,
         )
@@ -787,7 +789,17 @@ def register(app: Client):
             return
 
         target_id = int(cq.data.split(":")[-1])
-        STATE[user_id] = {"mode": "add_spend_custom", "target_id": target_id}
+
+        # Store this in Mongo so it survives restarts
+        pending_custom_coll.replace_one(
+            {"owner_id": user_id},
+            {
+                "owner_id": user_id,
+                "target_id": target_id,
+                "created_at": datetime.utcnow(),
+            },
+            upsert=True,
+        )
 
         kb = InlineKeyboardMarkup(
             [
