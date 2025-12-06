@@ -428,7 +428,10 @@ def register(app: Client):
         user_id = msg.from_user.id
         text = (msg.text or "").strip()
 
-        # 1) Check in-memory STATE first for custom spend
+        # DEBUG: log every text we see
+        log.info("requirements_panel: state_router got text from %s: %r", user_id, text)
+
+        # 1) In-memory custom-spend state
         state = STATE.get(user_id)
         if state and state.get("mode") == "custom_spend":
             target_id = state.get("target_id")
@@ -484,7 +487,7 @@ def register(app: Client):
             )
             return
 
-        # 2) Check Mongo fallback for custom spend (in case of restart/multi-instance)
+        # 2) Mongo fallback for custom-spend (if bot restarted)
         try:
             pending = pending_custom_coll.find_one({"owner_id": user_id})
         except Exception as e:
@@ -547,8 +550,16 @@ def register(app: Client):
             )
             return
 
-        # 3) Legacy STATE flows (lookup / toggle_exempt)
+        # 3) Other stateful flows (lookup / toggle_exempt)
         if not state:
+            # DEBUG helper so you know router actually fired
+            if _is_admin_or_model(user_id):
+                # Don't spam *everything*, just give a gentle hint
+                if text and not text.startswith("/"):
+                    await msg.reply_text(
+                        "I see your message, but there is no active requirements flow.\n\n"
+                        "If you just tapped “Custom amount”, please tap it again first and then send the number."
+                    )
             return
 
         mode = state.get("mode")
@@ -1068,4 +1079,69 @@ def register(app: Client):
             text=f"⚠️ Final-warning sweep complete.\nSent to {count} member(s) still behind.",
             reply_markup=_admin_kb(),
             disable_web_page_preview=True,
+        )
+
+    # ────────────── Fallback admin command: /addspend ──────────────
+
+    @app.on_message(filters.command("addspend") & filters.private)
+    async def addspend_cmd(client: Client, msg: Message):
+        if not msg.from_user:
+            return
+
+        user_id = msg.from_user.id
+        if not _is_admin_or_model(user_id):
+            await msg.reply_text("Only Roni and approved models can use this.")
+            return
+
+        parts = (msg.text or "").split()
+        if len(parts) != 3:
+            await msg.reply_text(
+                "Usage:\n"
+                "<code>/addspend USER_ID AMOUNT</code>\n\n"
+                "Example:\n"
+                "<code>/addspend 123456789 65.00</code>"
+            )
+            return
+
+        try:
+            target_id = int(parts[1])
+        except ValueError:
+            await msg.reply_text("The first value must be a numeric Telegram user ID.")
+            return
+
+        cleaned = parts[2].replace("$", "").replace(",", "").strip()
+        try:
+            amount = float(cleaned)
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await msg.reply_text(
+                "The second value must be a positive dollar amount.\n\n"
+                "Example: <code>/addspend 123456789 17.50</code>"
+            )
+            return
+
+        doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
+        new_total = float(doc.get("manual_spend", 0.0) or 0.0) + amount
+
+        members_coll.update_one(
+            {"user_id": target_id},
+            {
+                "$set": {
+                    "manual_spend": new_total,
+                    "last_updated": datetime.now(timezone.utc),
+                    "first_name": doc.get("first_name", ""),
+                    "username": doc.get("username"),
+                }
+            },
+            upsert=True,
+        )
+
+        await msg.reply_text(
+            f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
+            f"New manual total: ${new_total:.2f}"
+        )
+        await _log_event(
+            client,
+            f"Manual spend +${amount:.2f} via /addspend for {target_id} by {user_id}.",
         )
