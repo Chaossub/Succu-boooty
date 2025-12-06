@@ -420,9 +420,7 @@ def register(app: Client):
     # NOTE: we listen to *all* text now, and then no-op unless a
     # custom-amount or other state is actually pending for you.
 
-    @app.on_message(
-        filters.text & ~filters.via_bot & ~filters.service, group=-1
-    )
+    @app.on_message(filters.text & ~filters.via_bot & ~filters.service, group=-1)
     async def requirements_state_router(client: Client, msg: Message):
         if not msg.from_user:
             return
@@ -430,7 +428,63 @@ def register(app: Client):
         user_id = msg.from_user.id
         text = (msg.text or "").strip()
 
-        # 1) Check for a pending custom amount flow in Mongo
+        # 1) Check in-memory STATE first for custom spend
+        state = STATE.get(user_id)
+        if state and state.get("mode") == "custom_spend":
+            target_id = state.get("target_id")
+            if not target_id:
+                STATE.pop(user_id, None)
+                pending_custom_coll.delete_one({"owner_id": user_id})
+                await msg.reply_text(
+                    "Something went wrong remembering who this was for. "
+                    "Please pick them again from the buttons."
+                )
+                return
+
+            cleaned = text.replace("$", "").replace(",", "").strip()
+            try:
+                amount = float(cleaned)
+                if amount <= 0:
+                    raise ValueError
+            except ValueError:
+                await msg.reply_text(
+                    "Please send just a positive number for how many dollars to credit.\n\n"
+                    "Example: <code>17.50</code>"
+                )
+                return
+
+            doc = members_coll.find_one({"user_id": target_id}) or {
+                "user_id": target_id
+            }
+            new_total = float(doc.get("manual_spend", 0.0) or 0.0) + amount
+
+            members_coll.update_one(
+                {"user_id": target_id},
+                {
+                    "$set": {
+                        "manual_spend": new_total,
+                        "last_updated": datetime.now(timezone.utc),
+                        "first_name": doc.get("first_name", ""),
+                        "username": doc.get("username"),
+                    }
+                },
+                upsert=True,
+            )
+
+            STATE.pop(user_id, None)
+            pending_custom_coll.delete_one({"owner_id": user_id})
+
+            await msg.reply_text(
+                f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
+                f"New manual total: ${new_total:.2f}"
+            )
+            await _log_event(
+                client,
+                f"Manual spend +${amount:.2f} (custom via STATE) for {target_id} by {user_id}.",
+            )
+            return
+
+        # 2) Check Mongo fallback for custom spend (in case of restart/multi-instance)
         try:
             pending = pending_custom_coll.find_one({"owner_id": user_id})
         except Exception as e:
@@ -451,7 +505,6 @@ def register(app: Client):
                 )
                 return
 
-            # parse number (allow e.g. '$65.00', '65,00', etc.)
             cleaned = text.replace("$", "").replace(",", "").strip()
             try:
                 amount = float(cleaned)
@@ -494,8 +547,7 @@ def register(app: Client):
             )
             return
 
-        # 2) Legacy STATE flows (lookup / toggle_exempt)
-        state = STATE.get(user_id)
+        # 3) Legacy STATE flows (lookup / toggle_exempt)
         if not state:
             return
 
@@ -807,6 +859,8 @@ def register(app: Client):
 
         target_id = int(cq.data.split(":")[-1])
 
+        # Track both in-memory and in Mongo for safety
+        STATE[user_id] = {"mode": "custom_spend", "target_id": target_id}
         pending_custom_coll.replace_one(
             {"owner_id": user_id},
             {
