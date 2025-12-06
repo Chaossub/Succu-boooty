@@ -28,11 +28,25 @@ if not MONGO_URI:
 mongo = MongoClient(MONGO_URI)
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
+pending_custom_coll = db["requirements_pending_custom_spend"]  # legacy, now unused for buttons-only
 
 members_coll.create_index([("user_id", ASCENDING)], unique=True)
+pending_custom_coll.create_index([("owner_id", ASCENDING)], unique=True)
 
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
+# Model names for attribution buttons
+RONI_NAME = os.getenv("RONI_NAME", "Roni")
+RUBY_NAME = os.getenv("RUBY_NAME", "Ruby")
+RIN_NAME = os.getenv("RIN_NAME", "Rin")
+SAVY_NAME = os.getenv("SAVY_NAME", "Savy")
+
+MODEL_NAME_MAP: Dict[str, str] = {
+    "roni": RONI_NAME,
+    "ruby": RUBY_NAME,
+    "rin": RIN_NAME,
+    "savy": SAVY_NAME,
+}
 
 def _parse_id_list(val: str | None) -> Set[int]:
     if not val:
@@ -73,8 +87,12 @@ for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
 # Minimum requirement total to be "met"
 REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 
-# Simple in-memory state for some flows (lookup / toggle_exempt)
+# Simple in-memory state for some flows
 STATE: Dict[int, Dict[str, Any]] = {}
+
+# NEW: pending manual-spend edits (buttons-only) per admin
+PENDING_SPEND: Dict[int, Dict[str, Any]] = {}
+PENDING_ATTRIB: Dict[int, Dict[str, Any]] = {}
 
 # ────────────── Helper functions ──────────────
 
@@ -133,6 +151,7 @@ def _member_doc(user_id: int) -> Dict[str, Any]:
         "first_name": doc.get("first_name", ""),
         "username": doc.get("username"),
         "manual_spend": float(doc.get("manual_spend", 0.0)),
+        "manual_spend_models": dict(doc.get("manual_spend_models", {})),
         "is_exempt": effective_exempt,
         "db_exempt": db_exempt,
         "is_model": is_model,
@@ -223,7 +242,7 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🛠 Requirements Panel", callback_data="reqpanel:admin"
+                    "🛠 Requirements Help", callback_data="reqpanel:admin"
                 )
             ]
         )
@@ -292,103 +311,6 @@ def _back_to_admin_kb() -> InlineKeyboardMarkup:
     )
 
 
-def _member_select_keyboard() -> InlineKeyboardMarkup:
-    docs = list(members_coll.find().sort("first_name", ASCENDING).limit(50))
-    rows: List[List[InlineKeyboardButton]] = []
-
-    if not docs:
-        return _back_to_admin_kb()
-
-    for d in docs:
-        uid = d["user_id"]
-        name = d.get("first_name") or "Unknown"
-        username = d.get("username")
-        label_parts = [name]
-        if username:
-            label_parts.append(f"@{username}")
-        label = " ".join(label_parts)
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    label, callback_data=f"reqpanel:spend_member:{uid}"
-                )
-            ]
-        )
-
-    rows.append(
-        [
-            InlineKeyboardButton(
-                "⬅ Back to Requirements Menu", callback_data="reqpanel:home"
-            )
-        ]
-    )
-    return InlineKeyboardMarkup(rows)
-
-
-def _member_adjust_keyboard(target_id: int, current_total: float) -> InlineKeyboardMarkup:
-    """
-    Buttons ONLY:
-      - rows of + and - fixed amounts
-      - clear total
-      - back to member list
-    """
-    return InlineKeyboardMarkup(
-        [
-            # Add money
-            [
-                InlineKeyboardButton(
-                    "+$5", callback_data=f"reqpanel:spend_delta:{target_id}:5"
-                ),
-                InlineKeyboardButton(
-                    "+$10", callback_data=f"reqpanel:spend_delta:{target_id}:10"
-                ),
-                InlineKeyboardButton(
-                    "+$20", callback_data=f"reqpanel:spend_delta:{target_id}:20"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "+$25", callback_data=f"reqpanel:spend_delta:{target_id}:25"
-                ),
-                InlineKeyboardButton(
-                    "+$50", callback_data=f"reqpanel:spend_delta:{target_id}:50"
-                ),
-            ],
-            # Subtract money
-            [
-                InlineKeyboardButton(
-                    "−$5", callback_data=f"reqpanel:spend_delta:{target_id}:-5"
-                ),
-                InlineKeyboardButton(
-                    "−$10", callback_data=f"reqpanel:spend_delta:{target_id}:-10"
-                ),
-                InlineKeyboardButton(
-                    "−$20", callback_data=f"reqpanel:spend_delta:{target_id}:-20"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "−$25", callback_data=f"reqpanel:spend_delta:{target_id}:-25"
-                ),
-                InlineKeyboardButton(
-                    "−$50", callback_data=f"reqpanel:spend_delta:{target_id}:-50"
-                ),
-            ],
-            # Clear + back
-            [
-                InlineKeyboardButton(
-                    "🧹 Clear Total", callback_data=f"reqpanel:spend_clear:{target_id}"
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    "⬅ Back to Member List", callback_data="reqpanel:add_spend"
-                )
-            ],
-        ]
-    )
-
-
 # ────────────── Core handlers ──────────────
 
 
@@ -416,7 +338,7 @@ def register(app: Client):
         if is_admin:
             text_lines.extend(
                 [
-                    "• <b>Requirements Panel</b> – open the owner/models tools panel "
+                    "• <b>Requirements Help</b> – open the owner/models tools panel "
                     "(lists, manual credit, exemptions, reminders).",
                 ]
             )
@@ -449,7 +371,7 @@ def register(app: Client):
             return
 
         text = (
-            "<b>Requirements Panel – Owner / Models</b>\n\n"
+            "<b>Requirements Help – Owner / Models</b>\n\n"
             "Use these tools to manage Sanctuary requirements for the month.\n"
             "Everything you do here updates what SuccuBot uses when checking "
             "member status or running sweeps, so double-check before you confirm changes.\n\n"
@@ -511,11 +433,26 @@ def register(app: Client):
             reply_markup=_back_to_admin_kb(),
         )
 
-    # ────────────── Text router (ONLY for lookup / toggle_exempt now) ──────────────
+    # ────────────── Text router for multi-step flows (lookup / toggle exempt) ──────────────
+    # NOTE: Manual spend is NOW BUTTONS ONLY. We no longer create pending_custom_coll
+    # entries, so this will effectively skip that branch.
 
     @app.on_message(filters.text)
     async def requirements_state_router(client: Client, msg: Message):
         user_id = msg.from_user.id
+
+        # 1) Legacy custom-amount flow in Mongo (no longer used, kept for safety)
+        pending = pending_custom_coll.find_one({"owner_id": user_id})
+        if pending:
+            # Should never be hit anymore, but keep a friendly message just in case.
+            pending_custom_coll.delete_one({"owner_id": user_id})
+            await msg.reply_text(
+                "This custom-amount flow has been replaced with buttons. "
+                "Please use the Add Manual Spend buttons again."
+            )
+            return
+
+        # 2) Legacy STATE flows (lookup / toggle_exempt)
         state = STATE.get(user_id)
         if not state:
             return
@@ -543,14 +480,13 @@ def register(app: Client):
                 if not target_id:
                     await msg.reply_text(
                         "I couldn’t figure out who you meant. Try again with a forwarded message, "
-                        "@username, or numeric ID.",
-                        reply_markup=_back_to_admin_kb(),
+                        "@username, or numeric ID."
                     )
                     return
 
                 doc = _member_doc(target_id)
                 text = _format_member_status(doc)
-                await msg.reply_text(text, reply_markup=_back_to_admin_kb())
+                await msg.reply_text(text)
                 STATE.pop(user_id, None)
                 return
 
@@ -559,10 +495,7 @@ def register(app: Client):
                 try:
                     target_id = int(msg.text.strip())
                 except ValueError:
-                    await msg.reply_text(
-                        "Please send just the numeric Telegram user ID.",
-                        reply_markup=_back_to_admin_kb(),
-                    )
+                    await msg.reply_text("Please send just the numeric Telegram user ID.")
                     return
 
                 doc = members_coll.find_one({"user_id": target_id}) or {
@@ -589,8 +522,7 @@ def register(app: Client):
 
                 await msg.reply_text(
                     f"User <code>{target_id}</code> is now "
-                    f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month.{model_note}",
-                    reply_markup=_back_to_admin_kb(),
+                    f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month.{model_note}"
                 )
                 await _log_event(
                     client,
@@ -604,8 +536,7 @@ def register(app: Client):
             STATE.pop(user_id, None)
             await msg.reply_text(
                 "Sorry, something went wrong saving that. "
-                "Please tap the buttons again and retry.",
-                reply_markup=_back_to_admin_kb(),
+                "Please tap the buttons again and retry."
             )
 
     # ────────────── Admin-panel buttons ──────────────
@@ -669,7 +600,128 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ────────────── Add Manual Spend (buttons only) ──────────────
+    # ────────────── Add Manual Spend (BUTTONS ONLY) ──────────────
+
+    def _member_select_keyboard() -> InlineKeyboardMarkup:
+        docs = list(members_coll.find().sort("first_name", ASCENDING).limit(50))
+        rows: List[List[InlineKeyboardButton]] = []
+
+        if not docs:
+            return _back_to_admin_kb()
+
+        for d in docs:
+            uid = d["user_id"]
+            name = d.get("first_name") or "Unknown"
+            username = d.get("username")
+            label_parts = [name]
+            if username:
+                label_parts.append(f"@{username}")
+            label = " ".join(label_parts)
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        label, callback_data=f"reqpanel:spend_member:{uid}"
+                    )
+                ]
+            )
+
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    "⬅ Back to Requirements Menu", callback_data="reqpanel:home"
+                )
+            ]
+        )
+        return InlineKeyboardMarkup(rows)
+
+    def _spend_keyboard(target_id: int) -> InlineKeyboardMarkup:
+        """
+        Plus/minus buttons, clear, confirm, back. Everything via buttons only.
+        """
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "+$5", callback_data=f"reqpanel:spend_delta:{target_id}:5"
+                    ),
+                    InlineKeyboardButton(
+                        "+$10", callback_data=f"reqpanel:spend_delta:{target_id}:10"
+                    ),
+                    InlineKeyboardButton(
+                        "+$20", callback_data=f"reqpanel:spend_delta:{target_id}:20"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "+$25", callback_data=f"reqpanel:spend_delta:{target_id}:25"
+                    ),
+                    InlineKeyboardButton(
+                        "+$50", callback_data=f"reqpanel:spend_delta:{target_id}:50"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "-$5", callback_data=f"reqpanel:spend_delta:{target_id}:-5"
+                    ),
+                    InlineKeyboardButton(
+                        "-$10", callback_data=f"reqpanel:spend_delta:{target_id}:-10"
+                    ),
+                    InlineKeyboardButton(
+                        "-$20", callback_data=f"reqpanel:spend_delta:{target_id}:-20"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "-$25", callback_data=f"reqpanel:spend_delta:{target_id}:-25"
+                    ),
+                    InlineKeyboardButton(
+                        "-$50", callback_data=f"reqpanel:spend_delta:{target_id}:-50"
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🧹 Clear Total",
+                        callback_data=f"reqpanel:spend_clear:{target_id}",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        "✅ Confirm & Pick Model",
+                        callback_data=f"reqpanel:spend_confirm:{target_id}",
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "⬅ Back to Member List", callback_data="reqpanel:add_spend"
+                    )
+                ],
+            ]
+        )
+
+    async def _render_spend_panel(message: Message, target_id: int, display_total: float):
+        doc = _member_doc(target_id)
+
+        name_parts = []
+        if doc.get("first_name"):
+            name_parts.append(doc["first_name"])
+        if doc.get("username"):
+            name_parts.append(f"(@{doc['username']})")
+        name = " ".join(name_parts) or "Unknown"
+
+        text = (
+            "<b>Add Manual Spend</b>\n\n"
+            f"Member: {name} (<code>{target_id}</code>)\n"
+            f"Current manual total: <b>${display_total:.2f}</b>\n\n"
+            "Use the buttons below to add, subtract, or clear their total for this month.\n"
+            "Totals will be included in the end-of-month requirement logs."
+        )
+
+        await _safe_edit_text(
+            message,
+            text=text,
+            reply_markup=_spend_keyboard(target_id),
+            disable_web_page_preview=True,
+        )
 
     @app.on_callback_query(filters.regex("^reqpanel:add_spend$"))
     async def reqpanel_add_spend_cb(_, cq: CallbackQuery):
@@ -684,8 +736,8 @@ def register(app: Client):
             cq.message,
             text=(
                 "<b>Add Manual Spend</b>\n\n"
-                "Tap a member below to adjust offline payments for this month.\n"
-                "Use the buttons on their page to add, subtract, or clear their total."
+                "Tap a member below to credit offline payments for this month.\n"
+                "This adds extra credited dollars on top of Stripe / games for this month only."
             ),
             reply_markup=kb,
             disable_web_page_preview=True,
@@ -700,34 +752,20 @@ def register(app: Client):
 
         target_id = int(cq.data.split(":")[-1])
         doc = _member_doc(target_id)
+        current_total = doc["manual_spend"]
 
-        name_parts = []
-        if doc.get("first_name"):
-            name_parts.append(doc["first_name"])
-        if doc.get("username"):
-            name_parts.append(f"(@{doc['username']})")
-        name = " ".join(name_parts) or "Unknown"
-
-        text = (
-            "<b>Add Manual Spend</b>\n\n"
-            f"Member: {name} (<code>{target_id}</code>)\n"
-            f"Current manual total: <b>${doc['manual_spend']:.2f}</b>\n\n"
-            "Use the buttons below to add, subtract, or clear their total for this month.\n"
-            "Totals will be included in the end-of-month requirement logs."
-        )
-
-        kb = _member_adjust_keyboard(target_id, doc["manual_spend"])
+        # Start a fresh pending-edit session for this admin
+        PENDING_SPEND[user_id] = {
+            "target_id": target_id,
+            "original_total": current_total,
+            "working_total": current_total,
+        }
 
         await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text=text,
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
+        await _render_spend_panel(cq.message, target_id, current_total)
 
     @app.on_callback_query(filters.regex(r"^reqpanel:spend_delta:(\d+):(-?\d+)$"))
-    async def reqpanel_spend_delta_cb(client: Client, cq: CallbackQuery):
+    async def reqpanel_spend_delta_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
             await cq.answer("Only Roni and models can add spend.", show_alert=True)
@@ -737,14 +775,73 @@ def register(app: Client):
         target_id = int(parts[2])
         delta = float(parts[3])
 
+        state = PENDING_SPEND.get(user_id)
+        if not state or state.get("target_id") != target_id:
+            # If somehow state was lost, re-seed from DB
+            doc = _member_doc(target_id)
+            state = {
+                "target_id": target_id,
+                "original_total": doc["manual_spend"],
+                "working_total": doc["manual_spend"],
+            }
+            PENDING_SPEND[user_id] = state
+
+        working = state.get("working_total", 0.0) + delta
+        if working < 0:
+            working = 0.0  # no negative totals
+
+        state["working_total"] = working
+
+        await cq.answer()
+        await _render_spend_panel(cq.message, target_id, working)
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:spend_clear:(\d+)$"))
+    async def reqpanel_spend_clear_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can add spend.", show_alert=True)
+            return
+
+        target_id = int(cq.data.split(":")[-1])
+
+        state = PENDING_SPEND.get(user_id)
+        if not state or state.get("target_id") != target_id:
+            doc = _member_doc(target_id)
+            state = {
+                "target_id": target_id,
+                "original_total": doc["manual_spend"],
+                "working_total": 0.0,
+            }
+            PENDING_SPEND[user_id] = state
+        else:
+            state["working_total"] = 0.0
+
+        await cq.answer("Manual total cleared (preview). Don't forget to Confirm.", show_alert=False)
+        await _render_spend_panel(cq.message, target_id, 0.0)
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:spend_confirm:(\d+)$"))
+    async def reqpanel_spend_confirm_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can add spend.", show_alert=True)
+            return
+
+        target_id = int(cq.data.split(":")[-1])
+        state = PENDING_SPEND.get(user_id)
+        if not state or state.get("target_id") != target_id:
+            await cq.answer("No pending changes for this member. Use the +/- buttons first.", show_alert=True)
+            return
+
+        original = float(state.get("original_total", 0.0))
+        new_total = float(state.get("working_total", original))
+        delta = new_total - original
+
+        if abs(delta) < 0.0001:
+            await cq.answer("No changes to save for this member.", show_alert=True)
+            return
+
+        # Update main manual_spend total in Mongo
         doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
-        current = float(doc.get("manual_spend", 0.0))
-        new_total = current + delta
-
-        # Don't go below zero
-        if new_total < 0:
-            new_total = 0.0
-
         members_coll.update_one(
             {"user_id": target_id},
             {
@@ -758,52 +855,159 @@ def register(app: Client):
             upsert=True,
         )
 
-        sign = "+" if delta >= 0 else "-"
         await _log_event(
             client,
-            f"Manual spend {sign}${abs(delta):.2f} for {target_id} by {user_id}. "
-            f"New total: ${new_total:.2f}",
+            f"Manual spend change {delta:+.2f} for {target_id} by {user_id}. New total: ${new_total:.2f}",
         )
 
-        await cq.answer(
-            f"{'Added' if delta >= 0 else 'Removed'} ${abs(delta):.2f}. "
-            f"New total: ${new_total:.2f}",
-            show_alert=True,
+        # Store pending attribution (which model got this delta)
+        PENDING_ATTRIB[user_id] = {
+            "target_id": target_id,
+            "delta": delta,
+            "new_total": new_total,
+        }
+
+        # Build model-name buttons (NO tagging)
+        model_buttons: List[List[InlineKeyboardButton]] = []
+        row: List[InlineKeyboardButton] = []
+        for slug, label in MODEL_NAME_MAP.items():
+            if not label:
+                continue
+            row.append(
+                InlineKeyboardButton(
+                    label,
+                    callback_data=f"reqpanel:spend_model:{target_id}:{slug}",
+                )
+            )
+            if len(row) == 2:
+                model_buttons.append(row)
+                row = []
+        if row:
+            model_buttons.append(row)
+
+        # Extra options
+        model_buttons.append(
+            [
+                InlineKeyboardButton(
+                    "Split / Other",
+                    callback_data=f"reqpanel:spend_model:{target_id}:other",
+                )
+            ]
+        )
+        model_buttons.append(
+            [
+                InlineKeyboardButton(
+                    "Skip attribution",
+                    callback_data=f"reqpanel:spend_model:{target_id}:skip",
+                )
+            ]
         )
 
-        # Refresh the member page
-        await reqpanel_spend_member_cb(client, cq)
+        kb = InlineKeyboardMarkup(model_buttons)
 
-    @app.on_callback_query(filters.regex(r"^reqpanel:spend_clear:(\d+)$"))
-    async def reqpanel_spend_clear_cb(client: Client, cq: CallbackQuery):
+        doc_view = _member_doc(target_id)
+        name_parts = []
+        if doc_view.get("first_name"):
+            name_parts.append(doc_view["first_name"])
+        if doc_view.get("username"):
+            name_parts.append(f"(@{doc_view['username']})")
+        name = " ".join(name_parts) or "Unknown"
+
+        text = (
+            "<b>Confirm Manual Spend</b>\n\n"
+            f"Saved change of <b>{delta:+.2f}</b> for {name} (<code>{target_id}</code>).\n"
+            f"New manual total for this month: <b>${new_total:.2f}</b>.\n\n"
+            "Who received this payment? Choose a model below.\n"
+            "If it was split between multiple models, use <b>Split / Other</b>."
+        )
+
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=text,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:spend_model:(\d+):([a-z]+)$"))
+    async def reqpanel_spend_model_cb(client: Client, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
             await cq.answer("Only Roni and models can add spend.", show_alert=True)
             return
 
-        target_id = int(cq.data.split(":")[-1])
-        doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
+        parts = cq.data.split(":")
+        target_id = int(parts[2])
+        slug = parts[3]
 
+        attrib = PENDING_ATTRIB.get(user_id)
+        if not attrib or attrib.get("target_id") != target_id:
+            await cq.answer("This edit was already finished or expired.", show_alert=True)
+            return
+
+        delta = float(attrib.get("delta", 0.0))
+        new_total = float(attrib.get("new_total", 0.0))
+
+        model_label = "Unattributed"
+        if slug == "skip":
+            model_field = "manual_spend_models.untracked"
+            model_label = "Skipped attribution"
+        elif slug == "other":
+            model_field = "manual_spend_models.other"
+            model_label = "Split / Other"
+        else:
+            model_field = f"manual_spend_models.{slug}"
+            model_label = MODEL_NAME_MAP.get(slug, slug.capitalize())
+
+        # Only increment if we actually have a field
         members_coll.update_one(
             {"user_id": target_id},
-            {
-                "$set": {
-                    "manual_spend": 0.0,
-                    "last_updated": datetime.now(timezone.utc),
-                    "first_name": doc.get("first_name", ""),
-                    "username": doc.get("username"),
-                }
-            },
+            {"$inc": {model_field: delta}},
             upsert=True,
         )
 
         await _log_event(
             client,
-            f"Manual spend CLEARED for {target_id} by {user_id}.",
+            f"Manual spend attribution {delta:+.2f} for {target_id} marked as {model_label} by {user_id}.",
         )
 
-        await cq.answer("Manual total cleared for this member.", show_alert=True)
-        await reqpanel_spend_member_cb(client, cq)
+        # Clean up pending state
+        PENDING_ATTRIB.pop(user_id, None)
+        PENDING_SPEND.pop(user_id, None)
+
+        doc_view = _member_doc(target_id)
+        name_parts = []
+        if doc_view.get("first_name"):
+            name_parts.append(doc_view["first_name"])
+        if doc_view.get("username"):
+            name_parts.append(f"(@{doc_view['username']})")
+        name = " ".join(name_parts) or "Unknown"
+
+        text = (
+            "✅ <b>Manual Spend Saved</b>\n\n"
+            f"Member: {name} (<code>{target_id}</code>)\n"
+            f"Change this edit: <b>{delta:+.2f}</b> credited to <b>{model_label}</b>.\n"
+            f"New manual total for this month: <b>${new_total:.2f}</b>.\n\n"
+            "You can pick another member from the list to continue."
+        )
+
+        kb = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "⬅ Back to Member List", callback_data="reqpanel:add_spend"
+                    )
+                ]
+            ]
+        )
+
+        await cq.answer("Saved.", show_alert=False)
+        await _safe_edit_text(
+            cq.message,
+            text=text,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
 
     # ────────────── Toggle Exempt ──────────────
 
