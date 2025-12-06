@@ -182,7 +182,7 @@ def main():
         finally:
             await cq.answer()
 
-    # -------- /summonall handler (MentionMembers-style) --------
+    # -------- /summonall + /summon handler (MentionMembers-style) --------
     @app.on_message(filters.command(["summonall", "summon"], prefixes=["/", "!"]))
     async def summon_cmd(client: Client, msg: Message):
         # Basic sanity
@@ -198,7 +198,22 @@ def main():
             log.info("summon: ignoring in non-group chat %s type=%s", chat_id, chat.type)
             return
 
-        log.info("summon: command in chat %s from user %s text=%r", chat_id, user_id, msg.text)
+        # Which command? (summonall vs summon)
+        cmd_name = ""
+        try:
+            if getattr(msg, "command", None):
+                raw = msg.command[0]  # like 'summonall'
+                cmd_name = raw.lstrip("/!").lower()
+        except Exception:
+            cmd_name = ""
+
+        log.info(
+            "summon: command=%s chat=%s from user=%s text=%r",
+            cmd_name,
+            chat_id,
+            user_id,
+            msg.text,
+        )
 
         # Only you + models + super_admins
         if not _can_use_summon(user_id):
@@ -260,7 +275,7 @@ def main():
 
             batch_num += 1
 
-        # Hide the raw /summonall command if possible
+        # Delete original command for BOTH /summonall and /summon
         try:
             await msg.delete()
         except Exception:
