@@ -218,10 +218,20 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
     ]
     if is_admin:
         rows.append(
-            [InlineKeyboardButton("🛠 Requirements Panel", callback_data="reqpanel:admin")]
+            [
+                InlineKeyboardButton(
+                    "🛠 Admin / Model Controls", callback_data="reqpanel:admin"
+                )
+            ]
         )
-    # IMPORTANT: we do NOT jump back to the main portal from here,
-    # so the top-level “Requirements Help” button never gets touched.
+    # back to main sanctuary menu (your portal handler)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "⬅ Back to Sanctuary Menu", callback_data="portal:home"
+            )
+        ]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -338,7 +348,7 @@ def register(app: Client):
         ]
         if is_admin:
             text_lines.append(
-                "• <b>Requirements Panel</b> – open the owner/models tools "
+                "• <b>Admin / Model Controls</b> – owner & model tools for requirements "
                 "(lists, manual credit, exemptions, reminders)."
             )
         text_lines.append("")
@@ -369,7 +379,7 @@ def register(app: Client):
             return
 
         text = (
-            "<b>Requirements Panel – Owner / Models</b>\n\n"
+            "<b>Admin / Model Controls – Requirements</b>\n\n"
             "These tools manage Sanctuary requirements for the month. "
             "Everything here updates what SuccuBot uses for status checks and sweeps.\n\n"
             "Pick what you want to do using the buttons below – no commands needed. 💕"
@@ -408,7 +418,8 @@ def register(app: Client):
             )
             return
 
-        page = int(cq.data.split(":")[1])
+        # data = "reqpanel:list:0"
+        page = int(cq.data.split(":")[2])
         docs = list(members_coll.find().sort("user_id", ASCENDING))
         if not docs:
             text = (
@@ -455,7 +466,7 @@ def register(app: Client):
         rows.append(
             [
                 InlineKeyboardButton(
-                    "⬅ Back to Panel", callback_data="reqpanel:admin"
+                    "⬅ Back to Admin / Model Controls", callback_data="reqpanel:admin"
                 )
             ]
         )
@@ -486,12 +497,13 @@ def register(app: Client):
             [
                 [
                     InlineKeyboardButton(
-                        "⬅ Back to List", callback_data=f"reqpanel:list:{page}"
+                        "⬅ Back to Member List", callback_data=f"reqpanel:list:{page}"
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        "⬅ Back to Panel", callback_data="reqpanel:admin"
+                        "⬅ Back to Admin / Model Controls",
+                        callback_data="reqpanel:admin",
                     )
                 ],
             ]
@@ -514,7 +526,7 @@ def register(app: Client):
             await cq.answer("Only Roni and models can add spend.", show_alert=True)
             return
 
-        page = int(cq.data.split(":")[1])
+        page = int(cq.data.split(":")[2])
         docs = list(members_coll.find().sort("user_id", ASCENDING))
         if not docs:
             await cq.answer("No members in the tracker yet.", show_alert=True)
@@ -536,7 +548,7 @@ def register(app: Client):
         rows.append(
             [
                 InlineKeyboardButton(
-                    "⬅ Back to Panel", callback_data="reqpanel:admin"
+                    "⬅ Back to Admin / Model Controls", callback_data="reqpanel:admin"
                 )
             ]
         )
@@ -584,7 +596,8 @@ def register(app: Client):
             ],
             [
                 InlineKeyboardButton(
-                    "⬅ Back to Member List", callback_data=f"reqpanel:addmenu:{page}"
+                    "⬅ Back to Member List",
+                    callback_data=f"reqpanel:addmenu:{page}",
                 )
             ],
         ]
@@ -826,7 +839,8 @@ def register(app: Client):
         rows.append(
             [
                 InlineKeyboardButton(
-                    "⬅ Back to Panel", callback_data="reqpanel:admin"
+                    "⬅ Back to Admin / Model Controls",
+                    callback_data="reqpanel:admin",
                 )
             ]
         )
@@ -842,7 +856,7 @@ def register(app: Client):
             )
             return
 
-        page = int(cq.data.split(":")[1])
+        page = int(cq.data.split(":")[2])
         docs_count = members_coll.count_documents({})
         if docs_count == 0:
             await cq.answer("No members in the tracker yet.", show_alert=True)
@@ -1032,7 +1046,8 @@ def register(app: Client):
         rows.append(
             [
                 InlineKeyboardButton(
-                    "⬅ Back to Panel", callback_data="reqpanel:admin"
+                    "⬅ Back to Admin / Model Controls",
+                    callback_data="reqpanel:admin",
                 )
             ]
         )
@@ -1047,12 +1062,12 @@ def register(app: Client):
 
     @app.on_callback_query(filters.regex(r"^reqpanel:remindmenu:(\d+)$"))
     async def reqpanel_remindmenu_cb(_, cq: CallbackQuery):
-        page = int(cq.data.split(":")[1])
+        page = int(cq.data.split(":")[2])
         await _show_dm_menu(cq, final=False, page=page)
 
     @app.on_callback_query(filters.regex(r"^reqpanel:finalmenu:(\d+)$"))
     async def reqpanel_finalmenu_cb(_, cq: CallbackQuery):
-        page = int(cq.data.split(":")[1])
+        page = int(cq.data.split(":")[2])
         await _show_dm_menu(cq, final=True, page=page)
 
     async def _send_one_dm(
