@@ -418,15 +418,29 @@ def register(app: Client):
 
     # ────────────── Text router for multi-step flows ──────────────
     # NOTE: we listen to *all* text now, and then no-op unless a
-    # custom-amount is actually pending for you. That fixes the
-    # '65.00 is ignored' issue.
+    # custom-amount or other state is actually pending for you.
 
-    @app.on_message(filters.text)
+    @app.on_message(
+        filters.text & ~filters.via_bot & ~filters.service, group=-1
+    )
     async def requirements_state_router(client: Client, msg: Message):
+        if not msg.from_user:
+            return
+
         user_id = msg.from_user.id
+        text = (msg.text or "").strip()
 
         # 1) Check for a pending custom amount flow in Mongo
-        pending = pending_custom_coll.find_one({"owner_id": user_id})
+        try:
+            pending = pending_custom_coll.find_one({"owner_id": user_id})
+        except Exception as e:
+            log.exception(
+                "requirements_panel: error reading pending_custom_coll for %s: %s",
+                user_id,
+                e,
+            )
+            pending = None
+
         if pending:
             target_id = pending.get("target_id")
             if not target_id:
@@ -437,8 +451,10 @@ def register(app: Client):
                 )
                 return
 
+            # parse number (allow e.g. '$65.00', '65,00', etc.)
+            cleaned = text.replace("$", "").replace(",", "").strip()
             try:
-                amount = float(msg.text.strip())
+                amount = float(cleaned)
                 if amount <= 0:
                     raise ValueError
             except ValueError:
@@ -451,7 +467,7 @@ def register(app: Client):
             doc = members_coll.find_one({"user_id": target_id}) or {
                 "user_id": target_id
             }
-            new_total = float(doc.get("manual_spend", 0.0)) + amount
+            new_total = float(doc.get("manual_spend", 0.0) or 0.0) + amount
 
             members_coll.update_one(
                 {"user_id": target_id},
@@ -492,14 +508,14 @@ def register(app: Client):
 
                 if msg.forward_from:
                     target_id = msg.forward_from.id
-                elif msg.text.startswith("@"):
-                    username = msg.text[1:].strip().lower()
+                elif text.startswith("@"):
+                    username = text[1:].strip().lower()
                     doc = members_coll.find_one({"username": username})
                     if doc:
                         target_id = doc["user_id"]
                 else:
                     try:
-                        target_id = int(msg.text.strip())
+                        target_id = int(text)
                     except ValueError:
                         pass
 
@@ -511,15 +527,15 @@ def register(app: Client):
                     return
 
                 doc = _member_doc(target_id)
-                text = _format_member_status(doc)
-                await msg.reply_text(text)
+                resp_text = _format_member_status(doc)
+                await msg.reply_text(resp_text)
                 STATE.pop(user_id, None)
                 return
 
             # TOGGLE EXEMPT FLOW
             if mode == "toggle_exempt":
                 try:
-                    target_id = int(msg.text.strip())
+                    target_id = int(text)
                 except ValueError:
                     await msg.reply_text("Please send just the numeric Telegram user ID.")
                     return
@@ -757,7 +773,7 @@ def register(app: Client):
         amount = float(parts[3])
 
         doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
-        new_total = float(doc.get("manual_spend", 0.0)) + amount
+        new_total = float(doc.get("manual_spend", 0.0) or 0.0) + amount
 
         members_coll.update_one(
             {"user_id": target_id},
@@ -935,7 +951,7 @@ def register(app: Client):
                 {
                     "$set": {
                         "reminder_sent": True,
-                            "last_updated": datetime.now(timezone.utc),
+                        "last_updated": datetime.now(timezone.utc),
                     }
                 },
             )
