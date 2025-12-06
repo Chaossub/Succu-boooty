@@ -426,126 +426,138 @@ def register(app: Client):
 
         mode = state.get("mode")
 
-        # LOOKUP FLOW
-        if mode == "lookup":
-            target_id: Optional[int] = None
+        try:
+            # LOOKUP FLOW
+            if mode == "lookup":
+                target_id: Optional[int] = None
 
-            if msg.forward_from:
-                target_id = msg.forward_from.id
-            elif msg.text.startswith("@"):
-                username = msg.text[1:].strip().lower()
-                doc = members_coll.find_one({"username": username})
-                if doc:
-                    target_id = doc["user_id"]
-            else:
+                if msg.forward_from:
+                    target_id = msg.forward_from.id
+                elif msg.text.startswith("@"):
+                    username = msg.text[1:].strip().lower()
+                    doc = members_coll.find_one({"username": username})
+                    if doc:
+                        target_id = doc["user_id"]
+                else:
+                    try:
+                        target_id = int(msg.text.strip())
+                    except ValueError:
+                        pass
+
+                if not target_id:
+                    await msg.reply_text(
+                        "I couldn’t figure out who you meant. Try again with a forwarded message, "
+                        "@username, or numeric ID."
+                    )
+                    return
+
+                doc = _member_doc(target_id)
+                text = _format_member_status(doc)
+                await msg.reply_text(text)
+                STATE.pop(user_id, None)
+                return
+
+            # CUSTOM AMOUNT FLOW
+            if mode == "add_spend_custom":
+                target_id = state.get("target_id")
+                if not target_id:
+                    STATE.pop(user_id, None)
+                    await msg.reply_text(
+                        "Something went wrong remembering who this was for. "
+                        "Please pick them again from the buttons."
+                    )
+                    return
+
+                try:
+                    amount = float(msg.text.strip())
+                    if amount <= 0:
+                        raise ValueError
+                except ValueError:
+                    await msg.reply_text(
+                        "Please send just a positive number for how many dollars to credit.\n\n"
+                        "Example: <code>17.50</code>"
+                    )
+                    return
+
+                doc = members_coll.find_one({"user_id": target_id}) or {
+                    "user_id": target_id
+                }
+                new_total = float(doc.get("manual_spend", 0.0)) + amount
+
+                members_coll.update_one(
+                    {"user_id": target_id},
+                    {
+                        "$set": {
+                            "manual_spend": new_total,
+                            "last_updated": datetime.now(timezone.utc),
+                        },
+                        "$setOnInsert": {
+                            "first_name": doc.get("first_name", ""),
+                            "username": doc.get("username"),
+                        },
+                    },
+                    upsert=True,
+                )
+
+                await msg.reply_text(
+                    f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
+                    f"New manual total: ${new_total:.2f}"
+                )
+                await _log_event(
+                    client,
+                    f"Manual spend +${amount:.2f} (custom) for {target_id} by {user_id}.",
+                )
+                STATE.pop(user_id, None)
+                return
+
+            # TOGGLE EXEMPT FLOW
+            if mode == "toggle_exempt":
                 try:
                     target_id = int(msg.text.strip())
                 except ValueError:
-                    pass
+                    await msg.reply_text("Please send just the numeric Telegram user ID.")
+                    return
 
-            if not target_id:
-                await msg.reply_text(
-                    "I couldn’t figure out who you meant. Try again with a forwarded message, "
-                    "@username, or numeric ID."
+                doc = members_coll.find_one({"user_id": target_id}) or {
+                    "user_id": target_id
+                }
+                # flip ONLY the DB flag; model/owner auto-exempt still applies on read
+                new_val = not bool(doc.get("is_exempt", False))
+                members_coll.update_one(
+                    {"user_id": target_id},
+                    {
+                        "$set": {
+                            "is_exempt": new_val,
+                            "last_updated": datetime.now(timezone.utc),
+                        },
+                        "$setOnInsert": {"first_name": ""},
+                    },
+                    upsert=True,
                 )
-                return
+                model_note = ""
+                if target_id == OWNER_ID:
+                    model_note = " (OWNER – still exempt overall)"
+                elif target_id in MODELS:
+                    model_note = " (MODEL – still exempt overall)"
 
-            doc = _member_doc(target_id)
-            text = _format_member_status(doc)
-            await msg.reply_text(text)
-            STATE.pop(user_id, None)
-            return
-
-        # CUSTOM AMOUNT FLOW
-        if mode == "add_spend_custom":
-            target_id = state.get("target_id")
-            if not target_id:
+                await msg.reply_text(
+                    f"User <code>{target_id}</code> is now "
+                    f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month.{model_note}"
+                )
+                await _log_event(
+                    client,
+                    f"Exempt toggled to {new_val} for {target_id} by {user_id}",
+                )
                 STATE.pop(user_id, None)
-                await msg.reply_text("Something went wrong. Please try again.")
                 return
 
-            try:
-                amount = float(msg.text.strip())
-                if amount <= 0:
-                    raise ValueError
-            except ValueError:
-                await msg.reply_text(
-                    "Please send just a positive number for how many dollars to credit.\n\n"
-                    "Example: <code>17.50</code>"
-                )
-                return
-
-            doc = members_coll.find_one({"user_id": target_id}) or {
-                "user_id": target_id
-            }
-            new_total = float(doc.get("manual_spend", 0.0)) + amount
-
-            members_coll.update_one(
-                {"user_id": target_id},
-                {
-                    "$set": {
-                        "manual_spend": new_total,
-                        "last_updated": datetime.now(timezone.utc),
-                    },
-                    "$setOnInsert": {
-                        "first_name": doc.get("first_name", ""),
-                        "username": doc.get("username"),
-                    },
-                },
-                upsert=True,
-            )
-
-            await msg.reply_text(
-                f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
-                f"New manual total: ${new_total:.2f}"
-            )
-            await _log_event(
-                client,
-                f"Manual spend +${amount:.2f} (custom) for {target_id} by {user_id}.",
-            )
+        except Exception as e:
+            log.exception("requirements_panel: state router failed: %s", e)
             STATE.pop(user_id, None)
-            return
-
-        # TOGGLE EXEMPT FLOW
-        if mode == "toggle_exempt":
-            try:
-                target_id = int(msg.text.strip())
-            except ValueError:
-                await msg.reply_text("Please send just the numeric Telegram user ID.")
-                return
-
-            doc = members_coll.find_one({"user_id": target_id}) or {
-                "user_id": target_id
-            }
-            # flip ONLY the DB flag; model/owner auto-exempt still applies on read
-            new_val = not bool(doc.get("is_exempt", False))
-            members_coll.update_one(
-                {"user_id": target_id},
-                {
-                    "$set": {
-                        "is_exempt": new_val,
-                        "last_updated": datetime.now(timezone.utc),
-                    },
-                    "$setOnInsert": {"first_name": ""},
-                },
-                upsert=True,
-            )
-            model_note = ""
-            if target_id == OWNER_ID:
-                model_note = " (OWNER – still exempt overall)"
-            elif target_id in MODELS:
-                model_note = " (MODEL – still exempt overall)"
-
             await msg.reply_text(
-                f"User <code>{target_id}</code> is now "
-                f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month.{model_note}"
+                "Sorry, something went wrong saving that. "
+                "Please tap the buttons again and retry."
             )
-            await _log_event(
-                client,
-                f"Exempt toggled to {new_val} for {target_id} by {user_id}",
-            )
-            STATE.pop(user_id, None)
-            return
 
     # ────────────── Admin-panel buttons ──────────────
 
@@ -761,7 +773,9 @@ def register(app: Client):
             f"Manual spend +${amount:.2f} for {target_id} by {user_id}.",
         )
 
-        await cq.answer(f"Added ${amount:.2f}. New total: ${new_total:.2f}", show_alert=True)
+        await cq.answer(
+            f"Added ${amount:.2f}. New total: ${new_total:.2f}", show_alert=True
+        )
         # Re-open the same member menu so you can add more or go back
         await reqpanel_spend_member_cb(client, cq)
 
