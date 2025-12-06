@@ -242,7 +242,7 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🛠 Requirements Help", callback_data="reqpanel:admin"
+                    "🛠 Admin / Model Controls", callback_data="reqpanel:admin"
                 )
             ]
         )
@@ -338,7 +338,7 @@ def register(app: Client):
         if is_admin:
             text_lines.extend(
                 [
-                    "• <b>Requirements Help</b> – open the owner/models tools panel "
+                    "• <b>Admin / Model Controls</b> – open the owner/models tools panel "
                     "(lists, manual credit, exemptions, reminders).",
                 ]
             )
@@ -371,7 +371,7 @@ def register(app: Client):
             return
 
         text = (
-            "<b>Requirements Help – Owner / Models</b>\n\n"
+            "<b>Admin / Model Controls</b>\n\n"
             "Use these tools to manage Sanctuary requirements for the month.\n"
             "Everything you do here updates what SuccuBot uses when checking "
             "member status or running sweeps, so double-check before you confirm changes.\n\n"
