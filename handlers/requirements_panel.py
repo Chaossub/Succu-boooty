@@ -417,10 +417,11 @@ def register(app: Client):
         )
 
     # ────────────── Text router for multi-step flows ──────────────
-    # NOTE: we listen to *all* text now, and then no-op unless a
-    # custom-amount or other state is actually pending for you.
+    # NOTE: only private text messages are routed here.
 
-    @app.on_message(filters.text & ~filters.via_bot & ~filters.service, group=-1)
+    log.info("requirements_panel: installing requirements_state_router")
+
+    @app.on_message(filters.text & filters.private)
     async def requirements_state_router(client: Client, msg: Message):
         if not msg.from_user:
             return
@@ -428,8 +429,8 @@ def register(app: Client):
         user_id = msg.from_user.id
         text = (msg.text or "").strip()
 
-        # DEBUG: log every text we see
-        log.info("requirements_panel: state_router got text from %s: %r", user_id, text)
+        # DEBUG: log every private text we see
+        log.info("requirements_panel: router saw text from %s: %r", user_id, text)
 
         # 1) In-memory custom-spend state
         state = STATE.get(user_id)
@@ -552,14 +553,6 @@ def register(app: Client):
 
         # 3) Other stateful flows (lookup / toggle_exempt)
         if not state:
-            # DEBUG helper so you know router actually fired
-            if _is_admin_or_model(user_id):
-                # Don't spam *everything*, just give a gentle hint
-                if text and not text.startswith("/"):
-                    await msg.reply_text(
-                        "I see your message, but there is no active requirements flow.\n\n"
-                        "If you just tapped “Custom amount”, please tap it again first and then send the number."
-                    )
             return
 
         mode = state.get("mode")
