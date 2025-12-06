@@ -72,10 +72,8 @@ for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
         except ValueError:
             pass
 
-# Minimum requirement total to be "met"
 REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 
-# Simple in-memory state for some flows
 STATE: Dict[int, Dict[str, Any]] = {}
 
 # ────────────── Helper functions ──────────────
@@ -90,7 +88,6 @@ def _is_super_admin(user_id: int) -> bool:
 
 
 def _is_model(user_id: int) -> bool:
-    # Owner always counts as model+exempt for requirements
     return user_id in MODELS or _is_owner(user_id)
 
 
@@ -120,10 +117,6 @@ async def _log_event(app: Client, text: str):
 
 
 def _member_doc(user_id: int) -> Dict[str, Any]:
-    """
-    Load a member doc and apply derived fields:
-    - Owner & models are always effectively exempt from requirements
-    """
     doc = members_coll.find_one({"user_id": user_id}) or {}
     is_owner = user_id == OWNER_ID
     is_model = user_id in MODELS or is_owner
@@ -192,8 +185,6 @@ def _format_member_status(doc: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# ────────────── DM text templates ──────────────
-
 REMINDER_MSGS = [
     "Hi {name}! 💋 Just a sweet reminder that Sanctuary requirements are still open this month. "
     "If you’d like to stay in the Sanctuary, make sure you’ve hit your minimum by the deadline. 💞",
@@ -220,7 +211,6 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
     rows: List[List[InlineKeyboardButton]] = [
         [InlineKeyboardButton("📍 Check My Status", callback_data="reqpanel:self")],
     ]
-
     if is_admin:
         rows.append(
             [
@@ -229,13 +219,8 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
                 )
             ]
         )
-
     rows.append(
-        [
-            InlineKeyboardButton(
-                "⬅ Back to Sanctuary Menu", callback_data="panels:root"
-            )
-        ]
+        [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="panels:root")]
     )
     return InlineKeyboardMarkup(rows)
 
@@ -290,20 +275,12 @@ def _admin_kb() -> InlineKeyboardMarkup:
 
 def _back_to_admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "⬅ Back to Requirements Menu", callback_data="reqpanel:home"
-                )
-            ]
-        ]
+        [[InlineKeyboardButton("⬅ Back to Requirements Menu", callback_data="reqpanel:home")]]
     )
 
 
-def _custom_amount_kb(target_id: int, amount: int) -> InlineKeyboardMarkup:
-    """
-    Inline keypad for adjusting a custom amount (integer dollars).
-    """
+def _custom_amount_kb(target_id: int) -> InlineKeyboardMarkup:
+    """Inline keypad for adjusting a custom amount (integer dollars)."""
     return InlineKeyboardMarkup(
         [
             [
@@ -357,7 +334,8 @@ def register(app: Client):
         SANCTUARY_GROUP_IDS,
     )
 
-    # Entry point from main menu button
+    # Home
+
     @app.on_callback_query(filters.regex("^reqpanel:home$"))
     async def reqpanel_home_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id
@@ -370,16 +348,13 @@ def register(app: Client):
             "• <b>Check My Status</b> – see if you’re met or behind.",
         ]
         if is_admin:
-            text_lines.extend(
-                [
-                    "• <b>Requirements Panel</b> – owner/model tools for lists, manual credit, "
-                    "exemptions, reminders, and monthly resets.",
-                ]
+            text_lines.append(
+                "• <b>Requirements Panel</b> – owner/model tools for lists, manual credit, "
+                "exemptions, reminders, and monthly resets."
             )
         text_lines.append("")
         text_lines.append(
-            "Regular members only see their own status. "
-            "Owner & models get the full tools."
+            "Regular members only see their own status. Owner & models get the full tools."
         )
 
         await _safe_edit_text(
@@ -394,7 +369,8 @@ def register(app: Client):
     async def reqpanel_open_cb(_, cq: CallbackQuery):
         await reqpanel_home_cb(_, cq)
 
-    # Owner / models tools panel
+    # Admin panel
+
     @app.on_callback_query(filters.regex("^reqpanel:admin$"))
     async def reqpanel_admin_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id
@@ -428,7 +404,7 @@ def register(app: Client):
         )
         await cq.answer()
 
-    # ────────────── Self-status & lookup ──────────────
+    # Self status
 
     @app.on_callback_query(filters.regex("^reqpanel:self$"))
     async def reqpanel_self_cb(_, cq: CallbackQuery):
@@ -442,6 +418,8 @@ def register(app: Client):
             reply_markup=_root_kb(_is_admin_or_model(user.id)),
             disable_web_page_preview=True,
         )
+
+    # Lookup / exempt text flow (DM only, still using text)
 
     @app.on_callback_query(filters.regex("^reqpanel:lookup$"))
     async def reqpanel_lookup_cb(_, cq: CallbackQuery):
@@ -458,7 +436,7 @@ def register(app: Client):
             cq.message,
             text=(
                 "<b>Look Up Member</b>\n\n"
-                "Send me either:\n"
+                "Send me either in DM:\n"
                 "• A forwarded message from the member\n"
                 "• Their @username\n"
                 "• Or their numeric Telegram ID\n\n"
@@ -467,27 +445,43 @@ def register(app: Client):
             reply_markup=_back_to_admin_kb(),
         )
 
-    # ────────────── Text router for lookup / exempt only ──────────────
+    @app.on_callback_query(filters.regex("^reqpanel:toggle_exempt$"))
+    async def reqpanel_toggle_exempt_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer(
+                "Only Roni and models can change exemptions.", show_alert=True
+            )
+            return
+
+        STATE[user_id] = {"mode": "toggle_exempt"}
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=(
+                "<b>Exempt / Un-exempt Member</b>\n\n"
+                "Send me the numeric Telegram user ID for the member in DM.\n\n"
+                "I’ll flip their exempt status for this cycle.\n\n"
+                "<i>Owner and models stay effectively exempt even if you uncheck them here.</i>"
+            ),
+            reply_markup=_back_to_admin_kb(),
+            disable_web_page_preview=True,
+        )
 
     @app.on_message(filters.text & filters.private)
     async def requirements_state_router(client: Client, msg: Message):
         if not msg.from_user:
             return
-
         user_id = msg.from_user.id
         text = (msg.text or "").strip()
-
         state = STATE.get(user_id)
         if not state:
             return
 
         mode = state.get("mode")
-
         try:
-            # LOOKUP FLOW
             if mode == "lookup":
                 target_id: Optional[int] = None
-
                 if msg.forward_from:
                     target_id = msg.forward_from.id
                 elif text.startswith("@"):
@@ -509,12 +503,10 @@ def register(app: Client):
                     return
 
                 doc = _member_doc(target_id)
-                resp_text = _format_member_status(doc)
-                await msg.reply_text(resp_text)
+                await msg.reply_text(_format_member_status(doc))
                 STATE.pop(user_id, None)
                 return
 
-            # TOGGLE EXEMPT FLOW
             if mode == "toggle_exempt":
                 try:
                     target_id = int(text)
@@ -538,6 +530,7 @@ def register(app: Client):
                     },
                     upsert=True,
                 )
+
                 model_note = ""
                 if target_id == OWNER_ID:
                     model_note = " (OWNER – still exempt overall)"
@@ -553,17 +546,14 @@ def register(app: Client):
                     f"Exempt toggled to {new_val} for {target_id} by {user_id}",
                 )
                 STATE.pop(user_id, None)
-                return
-
         except Exception as e:
             log.exception("requirements_panel: state router failed: %s", e)
             STATE.pop(user_id, None)
             await msg.reply_text(
-                "Sorry, something went wrong saving that. "
-                "Please tap the buttons again and retry."
+                "Sorry, something went wrong saving that. Please tap the buttons again and retry."
             )
 
-    # ────────────── Admin-panel buttons ──────────────
+    # ────────────── Member list ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:list$"))
     async def reqpanel_list_cb(_, cq: CallbackQuery):
@@ -607,7 +597,6 @@ def register(app: Client):
                     first_name.strip()
                     or (f"@{username}" if username else "Unknown")
                 )
-
                 if username and first_name:
                     display_name = f"{first_name} (@{username})"
 
@@ -624,12 +613,11 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ────────────── Add Manual Spend (buttons) ──────────────
+    # ────────────── Add Manual Spend ──────────────
 
     def _member_select_keyboard() -> InlineKeyboardMarkup:
         docs = list(members_coll.find().sort("first_name", ASCENDING).limit(50))
         rows: List[List[InlineKeyboardButton]] = []
-
         if not docs:
             return _back_to_admin_kb()
 
@@ -642,19 +630,11 @@ def register(app: Client):
                 label_parts.append(f"@{username}")
             label = " ".join(label_parts)
             rows.append(
-                [
-                    InlineKeyboardButton(
-                        label, callback_data=f"reqpanel:spend_member:{uid}"
-                    )
-                ]
+                [InlineKeyboardButton(label, callback_data=f"reqpanel:spend_member:{uid}")]
             )
 
         rows.append(
-            [
-                InlineKeyboardButton(
-                    "⬅ Back to Requirements Menu", callback_data="reqpanel:home"
-                )
-            ]
+            [InlineKeyboardButton("⬅ Back to Requirements Menu", callback_data="reqpanel:home")]
         )
         return InlineKeyboardMarkup(rows)
 
@@ -786,7 +766,7 @@ def register(app: Client):
         )
         await reqpanel_spend_member_cb(client, cq)
 
-    # ────────────── Clear manual total button (per member) ──────────────
+    # ────────────── Per-member clear total ──────────────
 
     @app.on_callback_query(filters.regex(r"^reqpanel:clear_total:(\d+)$"))
     async def reqpanel_clear_total_cb(client: Client, cq: CallbackQuery):
@@ -816,12 +796,10 @@ def register(app: Client):
             f"Manual spend CLEARED to $0.00 for {target_id} by {user_id}.",
         )
 
-        await cq.answer(
-            "Manual total cleared to $0 for this member.", show_alert=True
-        )
+        await cq.answer("Manual total cleared to $0 for this member.", show_alert=True)
         await reqpanel_spend_member_cb(client, cq)
 
-    # ────────────── Global clear-all-totals button ──────────────
+    # ────────────── Global clear-all ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:clear_all_totals$"))
     async def reqpanel_clear_all_totals_cb(client: Client, cq: CallbackQuery):
@@ -863,7 +841,7 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ────────────── Custom amount via keypad (callbacks only) ──────────────
+    # ────────────── Custom amount keypad (ALL BUTTONS, NO TEXT INPUT) ──────────────
 
     @app.on_callback_query(filters.regex(r"^reqpanel:spend_custom:(\d+)$"))
     async def reqpanel_spend_custom_cb(_, cq: CallbackQuery):
@@ -874,13 +852,12 @@ def register(app: Client):
 
         target_id = int(cq.data.split(":")[-1])
 
-        # Initialize pending custom amount at $0 for this owner & target
         pending_custom_coll.replace_one(
             {"owner_id": user_id},
             {
                 "owner_id": user_id,
                 "target_id": target_id,
-                "amount": 0,  # integer dollars
+                "amount": 0,
                 "created_at": datetime.utcnow(),
             },
             upsert=True,
@@ -890,12 +867,11 @@ def register(app: Client):
             "<b>Add Manual Spend – Custom Amount</b>\n\n"
             f"Target member ID: <code>{target_id}</code>\n\n"
             "Use the buttons below to adjust the custom amount for this cycle.\n"
-            "When you’re happy with the number, tap <b>✅ Confirm</b> to apply it."
-            "\n\nCurrent pending amount: <b>$0</b>"
+            "When you’re happy with the number, tap <b>✅ Confirm</b> to apply it.\n\n"
+            "Current pending amount: <b>$0</b>"
         )
 
-        kb = _custom_amount_kb(target_id, 0)
-
+        kb = _custom_amount_kb(target_id)
         await cq.answer()
         await _safe_edit_text(
             cq.message,
@@ -917,11 +893,7 @@ def register(app: Client):
 
         doc = pending_custom_coll.find_one(
             {"owner_id": user_id, "target_id": target_id}
-        ) or {
-            "owner_id": user_id,
-            "target_id": target_id,
-            "amount": 0,
-        }
+        ) or {"owner_id": user_id, "target_id": target_id, "amount": 0}
 
         amount = int(doc.get("amount", 0)) + delta
         if amount < 0:
@@ -944,12 +916,11 @@ def register(app: Client):
             "<b>Add Manual Spend – Custom Amount</b>\n\n"
             f"Target member ID: <code>{target_id}</code>\n\n"
             "Use the buttons below to adjust the custom amount for this cycle.\n"
-            "When you’re happy with the number, tap <b>✅ Confirm</b> to apply it."
-            f"\n\nCurrent pending amount: <b>${amount}</b>"
+            "When you’re happy with the number, tap <b>✅ Confirm</b> to apply it.\n\n"
+            f"Current pending amount: <b>${amount}</b>"
         )
 
-        kb = _custom_amount_kb(target_id, amount)
-
+        kb = _custom_amount_kb(target_id)
         await cq.answer()
         await _safe_edit_text(
             cq.message,
@@ -966,7 +937,6 @@ def register(app: Client):
             return
 
         target_id = int(cq.data.split(":")[-1])
-
         doc = pending_custom_coll.find_one(
             {"owner_id": user_id, "target_id": target_id}
         )
@@ -1008,8 +978,6 @@ def register(app: Client):
         await cq.answer(
             f"Added ${amount:.2f}. New total: ${new_total:.2f}", show_alert=True
         )
-
-        # Return to the member view
         await reqpanel_spend_member_cb(client, cq)
 
     @app.on_callback_query(filters.regex(r"^reqpanel:custom_cancel:(\d+)$"))
@@ -1023,32 +991,7 @@ def register(app: Client):
         await cq.answer("Custom amount cancelled.", show_alert=False)
         await reqpanel_add_spend_cb(_, cq)
 
-    # ────────────── Toggle Exempt ──────────────
-
-    @app.on_callback_query(filters.regex("^reqpanel:toggle_exempt$"))
-    async def reqpanel_toggle_exempt_cb(_, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer(
-                "Only Roni and models can change exemptions.", show_alert=True
-            )
-            return
-
-        STATE[user_id] = {"mode": "toggle_exempt"}
-        await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text=(
-                "<b>Exempt / Un-exempt Member</b>\n\n"
-                "Send me the numeric Telegram user ID for the member.\n\n"
-                "I’ll flip their exempt status for this cycle.\n\n"
-                "<i>Owner and models stay effectively exempt even if you uncheck them here.</i>"
-            ),
-            reply_markup=_back_to_admin_kb(),
-            disable_web_page_preview=True,
-        )
-
-    # ────────────── Scan members ──────────────
+    # ────────────── Scan & sweeps (unchanged) ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:scan$"))
     async def reqpanel_scan_cb(client: Client, cq: CallbackQuery):
@@ -1101,8 +1044,6 @@ def register(app: Client):
             reply_markup=_admin_kb(),
             disable_web_page_preview=True,
         )
-
-    # ────────────── Reminder sweeps ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
     async def reqpanel_reminders_cb(client: Client, cq: CallbackQuery):
