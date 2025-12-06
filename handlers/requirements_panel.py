@@ -75,7 +75,7 @@ for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
 # Minimum requirement total to be "met"
 REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 
-# Simple in-memory state for the non-critical flows
+# Simple in-memory state for some flows
 STATE: Dict[int, Dict[str, Any]] = {}
 
 # ────────────── Helper functions ──────────────
@@ -230,7 +230,6 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
             ]
         )
 
-    # Always go back to your main portal menu
     rows.append(
         [
             InlineKeyboardButton(
@@ -418,8 +417,11 @@ def register(app: Client):
         )
 
     # ────────────── Text router for multi-step flows ──────────────
+    # NOTE: we listen to *all* text now, and then no-op unless a
+    # custom-amount is actually pending for you. That fixes the
+    # '65.00 is ignored' issue.
 
-    @app.on_message(filters.private & filters.text)
+    @app.on_message(filters.text)
     async def requirements_state_router(client: Client, msg: Message):
         user_id = msg.from_user.id
 
@@ -778,7 +780,6 @@ def register(app: Client):
         await cq.answer(
             f"Added ${amount:.2f}. New total: ${new_total:.2f}", show_alert=True
         )
-        # Re-open the same member menu so you can add more or go back
         await reqpanel_spend_member_cb(client, cq)
 
     @app.on_callback_query(filters.regex(r"^reqpanel:spend_custom:(\d+)$"))
@@ -790,7 +791,6 @@ def register(app: Client):
 
         target_id = int(cq.data.split(":")[-1])
 
-        # Store this in Mongo so it survives restarts
         pending_custom_coll.replace_one(
             {"owner_id": user_id},
             {
@@ -922,7 +922,6 @@ def register(app: Client):
         count = 0
         for d in docs:
             uid = d["user_id"]
-            # Owner & models are always treated as exempt for sweeps
             if uid == OWNER_ID or uid in MODELS:
                 continue
 
@@ -936,7 +935,7 @@ def register(app: Client):
                 {
                     "$set": {
                         "reminder_sent": True,
-                        "last_updated": datetime.now(timezone.utc),
+                            "last_updated": datetime.now(timezone.utc),
                     }
                 },
             )
@@ -971,7 +970,6 @@ def register(app: Client):
         count = 0
         for d in docs:
             uid = d["user_id"]
-            # Owner & models are always protected from requirement kicks
             if uid == OWNER_ID or uid in MODELS:
                 continue
 
