@@ -51,7 +51,7 @@ def _can_use_summon(user_id: int) -> bool:
 
 
 def _chunk_list(items: List[str], chunk_size: int) -> List[List[str]]:
-    return [items[i : i + chunk_size] for i in range(0, len(items), chunk_size)]
+    return [items[i: i + chunk_size] for i in range(0, len(items), chunk_size)]
 
 
 # ────────────── REGISTER ──────────────
@@ -70,12 +70,18 @@ def register(app: Client):
         & (filters.group | filters.supergroup)
     )
     async def summon_cmd(client: Client, msg: Message):
+        # Just to prove it’s firing in logs
+        log.info(
+            "summon: command received in chat %s from user %s",
+            msg.chat.id if msg.chat else "?", msg.from_user.id if msg.from_user else "?"
+        )
+
         from_user = msg.from_user
         if not from_user:
             return
 
         chat = msg.chat
-        if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if not chat or chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
             return
 
         user_id = from_user.id
@@ -89,7 +95,6 @@ def register(app: Client):
             return
 
         # Optional extra text after the command
-        # e.g. "/summon Game night is starting!" → "Game night is starting!"
         extra_text = ""
         if msg.text:
             parts = msg.text.split(maxsplit=1)
@@ -106,7 +111,6 @@ def register(app: Client):
                 if user.is_bot:
                     continue
 
-                # Build an inline mention link
                 name = (user.first_name or user.last_name or "Member").strip()
                 mention = f'<a href="tg://user?id={user.id}">{name}</a>'
                 mentions.append(mention)
@@ -122,13 +126,8 @@ def register(app: Client):
             await msg.reply_text("I don’t see any members to tag (besides bots).")
             return
 
-        # ── Send in chunks to avoid limits ─────────────
-        # Roughly 20 mentions per message keeps things safe.
         chunks = _chunk_list(mentions, 20)
-
         base_text = extra_text or "Summoning everyone 💋"
-
-        # If used as a reply, keep everything threaded
         reply_to_id = msg.reply_to_message_id or msg.id
 
         sent_count = 0
@@ -145,7 +144,6 @@ def register(app: Client):
             except Exception as e:
                 log.warning("summon: failed to send summon chunk: %s", e)
 
-        # Try to clean up the command message if possible
         try:
             await msg.delete()
         except Exception:
@@ -154,6 +152,9 @@ def register(app: Client):
         if sent_count == 0:
             await client.send_message(
                 chat_id=chat_id,
-                text="Something went wrong trying to tag everyone. I couldn’t send the mentions.",
+                text=(
+                    "Something went wrong trying to tag everyone. "
+                    "I couldn’t send the mentions."
+                ),
                 reply_to_message_id=reply_to_id,
             )
