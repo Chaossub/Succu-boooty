@@ -72,8 +72,10 @@ for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
         except ValueError:
             pass
 
+# Minimum requirement total to be "met"
 REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 
+# Simple in-memory state for some flows (DM lookup / exempt)
 STATE: Dict[int, Dict[str, Any]] = {}
 
 # ────────────── Helper functions ──────────────
@@ -88,6 +90,7 @@ def _is_super_admin(user_id: int) -> bool:
 
 
 def _is_model(user_id: int) -> bool:
+    # Owner is considered a model but has special privileges
     return user_id in MODELS or _is_owner(user_id)
 
 
@@ -117,6 +120,10 @@ async def _log_event(app: Client, text: str):
 
 
 def _member_doc(user_id: int) -> Dict[str, Any]:
+    """
+    Load a member doc and apply derived fields:
+    - Owner & models are always effectively exempt from requirements.
+    """
     doc = members_coll.find_one({"user_id": user_id}) or {}
     is_owner = user_id == OWNER_ID
     is_model = user_id in MODELS or is_owner
@@ -138,8 +145,28 @@ def _member_doc(user_id: int) -> Dict[str, Any]:
     }
 
 
-def _format_member_status(doc: Dict[str, Any]) -> str:
+def _format_member_status(doc: Dict[str, Any], viewer_id: int) -> str:
+    """
+    Format requirement status for a given member, but cap visible amounts
+    for model admins so only the owner sees true totals.
+
+    Rules:
+    - OWNER_ID sees full real amounts for everyone.
+    - Models (non-owner) see totals capped at REQUIRED_MIN_SPEND.
+    - Regular members see real amounts for themselves.
+    """
     total = doc["manual_spend"]
+    target_id = doc["user_id"]
+
+    viewer_is_owner = viewer_id == OWNER_ID
+    viewer_is_model = _is_model(viewer_id) and not viewer_is_owner
+
+    # Clamp visible total for any model viewer (owner sees full)
+    if viewer_is_model:
+        display_total = min(total, REQUIRED_MIN_SPEND)
+    else:
+        display_total = total
+
     exempt = doc["is_exempt"]
     is_model = doc.get("is_model", False)
     is_owner = doc.get("is_owner", False)
@@ -153,7 +180,7 @@ def _format_member_status(doc: Dict[str, Any]) -> str:
 
     header = (
         "<b>Requirement Status</b>\n\n"
-        f"<b>Member:</b> {name} (<code>{doc['user_id']}</code>)\n\n"
+        f"<b>Member:</b> {name} (<code>{target_id}</code>)\n\n"
     )
 
     if is_owner:
@@ -168,12 +195,12 @@ def _format_member_status(doc: Dict[str, Any]) -> str:
         )
     elif exempt:
         status = "✅ Marked exempt from requirements for this cycle."
-    elif total >= REQUIRED_MIN_SPEND:
-        status = f"✅ Requirements met with ${total:.2f} logged."
+    elif display_total >= REQUIRED_MIN_SPEND:
+        status = f"✅ Requirements met with ${display_total:.2f} logged."
     else:
         status = (
             f"⚠️ Currently behind.\n"
-            f"Logged so far: ${total:.2f} (minimum ${REQUIRED_MIN_SPEND:.2f})."
+            f"Logged so far: ${display_total:.2f} (minimum ${REQUIRED_MIN_SPEND:.2f})."
         )
 
     lines = [header, status]
@@ -184,6 +211,85 @@ def _format_member_status(doc: Dict[str, Any]) -> str:
         lines.append(f"\nLast updated: <code>{dt}</code>")
     return "\n".join(lines)
 
+
+async def _log_monthly_totals(app: Client, label: Optional[str] = None):
+    """
+    Dump ALL member totals (real, uncapped) into the log group.
+    Called automatically right before the 'New Month – Clear All Totals' reset.
+    """
+    if LOG_GROUP_ID is None:
+        return
+
+    docs = list(members_coll.find().sort("user_id", ASCENDING))
+    if not docs:
+        await _safe_send(
+            app,
+            LOG_GROUP_ID,
+            "[Requirements] No member totals to report for this cycle.",
+        )
+        return
+
+    now = datetime.now(timezone.utc)
+    if not label:
+        label = now.strftime("%B %Y")
+
+    header_base = f"📊 Sanctuary Requirement Totals – {label}"
+    chunk_lines: List[str] = [header_base]
+    max_len = 3500  # keep safely under Telegram 4096 limit
+
+    async def flush_chunk():
+        nonlocal chunk_lines
+        if len(chunk_lines) <= 1:
+            return
+        text = "\n".join(chunk_lines)
+        await _safe_send(app, LOG_GROUP_ID, text)
+        chunk_lines = [header_base + " (cont.)"]
+
+    for d in docs:
+        uid = d["user_id"]
+        total = float(d.get("manual_spend", 0.0) or 0.0)
+        db_exempt = d.get("is_exempt", False)
+        is_owner = uid == OWNER_ID
+        is_model = uid in MODELS or is_owner
+        effective_exempt = db_exempt or is_model
+
+        if is_owner:
+            status = "OWNER (EXEMPT)"
+        elif is_model:
+            status = "MODEL (EXEMPT)"
+        elif effective_exempt:
+            status = "EXEMPT"
+        elif total >= REQUIRED_MIN_SPEND:
+            status = "MET"
+        else:
+            status = "BEHIND"
+
+        first_name = d.get("first_name") or ""
+        username = d.get("username")
+        display_name = (
+            first_name.strip()
+            or (f"@{username}" if username else "Unknown")
+        )
+        if username and first_name:
+            display_name = f"{first_name} (@{username})"
+
+        line = f"• {display_name} (<code>{uid}</code>) – {status}, total ${total:.2f}"
+
+        # If adding this line would overflow, flush current chunk first
+        if len("\n".join(chunk_lines + [line])) > max_len:
+            await flush_chunk()
+        chunk_lines.append(line)
+
+    await flush_chunk()
+
+    await _safe_send(
+        app,
+        LOG_GROUP_ID,
+        "[Requirements] Monthly totals snapshot complete – safe to run sweep / reset.",
+    )
+
+
+# ────────────── DM text templates ──────────────
 
 REMINDER_MSGS = [
     "Hi {name}! 💋 Just a sweet reminder that Sanctuary requirements are still open this month. "
@@ -280,7 +386,9 @@ def _back_to_admin_kb() -> InlineKeyboardMarkup:
 
 
 def _custom_amount_kb(target_id: int) -> InlineKeyboardMarkup:
-    """Inline keypad for adjusting a custom amount (integer dollars)."""
+    """
+    Inline keypad for adjusting a custom amount (integer dollars).
+    """
     return InlineKeyboardMarkup(
         [
             [
@@ -410,7 +518,7 @@ def register(app: Client):
     async def reqpanel_self_cb(_, cq: CallbackQuery):
         user = cq.from_user
         doc = _member_doc(user.id)
-        text = _format_member_status(doc)
+        text = _format_member_status(doc, viewer_id=user.id)
         await cq.answer()
         await _safe_edit_text(
             cq.message,
@@ -419,7 +527,7 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # Lookup / exempt text flow (DM only, still using text)
+    # Lookup / exempt text flow (DM only)
 
     @app.on_callback_query(filters.regex("^reqpanel:lookup$"))
     async def reqpanel_lookup_cb(_, cq: CallbackQuery):
@@ -503,7 +611,7 @@ def register(app: Client):
                     return
 
                 doc = _member_doc(target_id)
-                await msg.reply_text(_format_member_status(doc))
+                await msg.reply_text(_format_member_status(doc, viewer_id=user_id))
                 STATE.pop(user_id, None)
                 return
 
@@ -571,14 +679,24 @@ def register(app: Client):
                 "No tracked members yet. Try running a scan first."
             )
         else:
+            viewer_id = cq.from_user.id
+            viewer_is_owner = viewer_id == OWNER_ID
+            viewer_is_model = _is_model(viewer_id) and not viewer_is_owner
+
             lines = ["<b>Member Status List (first 50)</b>\n"]
             for d in docs:
                 uid = d["user_id"]
-                total = float(d.get("manual_spend", 0.0))
+                total = float(d.get("manual_spend", 0.0) or 0.0)
                 db_exempt = d.get("is_exempt", False)
                 is_owner = uid == OWNER_ID
                 is_model = uid in MODELS or is_owner
                 effective_exempt = db_exempt or is_model
+
+                # Clamp visible total for model viewers
+                if viewer_is_model:
+                    display_total = min(total, REQUIRED_MIN_SPEND)
+                else:
+                    display_total = total
 
                 if is_owner:
                     status = "OWNER (EXEMPT)"
@@ -597,11 +715,12 @@ def register(app: Client):
                     first_name.strip()
                     or (f"@{username}" if username else "Unknown")
                 )
+
                 if username and first_name:
                     display_name = f"{first_name} (@{username})"
 
                 lines.append(
-                    f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})"
+                    f"• {display_name} (<code>{uid}</code>) – {status} (${display_total:.2f})"
                 )
             text = "\n".join(lines)
 
@@ -668,6 +787,16 @@ def register(app: Client):
         target_id = int(cq.data.split(":")[-1])
         doc = _member_doc(target_id)
 
+        viewer_is_owner = user_id == OWNER_ID
+        viewer_is_model = _is_model(user_id) and not viewer_is_owner
+
+        total = doc["manual_spend"]
+        # Clamp for model viewers
+        if viewer_is_model:
+            display_total = min(total, REQUIRED_MIN_SPEND)
+        else:
+            display_total = total
+
         name_parts = []
         if doc.get("first_name"):
             name_parts.append(doc["first_name"])
@@ -678,7 +807,7 @@ def register(app: Client):
         text = (
             "<b>Add Manual Spend</b>\n\n"
             f"Member: {name} (<code>{target_id}</code>)\n"
-            f"Current manual total: ${doc['manual_spend']:.2f}\n\n"
+            f"Current manual total: ${display_total:.2f}\n\n"
             "Pick an amount to credit for this cycle:"
         )
 
@@ -761,8 +890,15 @@ def register(app: Client):
             f"Manual spend +${amount:.2f} for {target_id} by {user_id}.",
         )
 
+        viewer_is_owner = user_id == OWNER_ID
+        viewer_is_model = _is_model(user_id) and not viewer_is_owner
+        if viewer_is_model:
+            display_new_total = min(new_total, REQUIRED_MIN_SPEND)
+        else:
+            display_new_total = new_total
+
         await cq.answer(
-            f"Added ${amount:.2f}. New total: ${new_total:.2f}", show_alert=True
+            f"Added ${amount:.2f}. New total: ${display_new_total:.2f}", show_alert=True
         )
         await reqpanel_spend_member_cb(client, cq)
 
@@ -799,7 +935,7 @@ def register(app: Client):
         await cq.answer("Manual total cleared to $0 for this member.", show_alert=True)
         await reqpanel_spend_member_cb(client, cq)
 
-    # ────────────── Global clear-all ──────────────
+    # ────────────── Global clear-all (with monthly log) ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:clear_all_totals$"))
     async def reqpanel_clear_all_totals_cb(client: Client, cq: CallbackQuery):
@@ -808,6 +944,10 @@ def register(app: Client):
             await cq.answer("Only Roni and models can clear all totals.", show_alert=True)
             return
 
+        # 1) Log all real totals to the log group before reset
+        await _log_monthly_totals(client)
+
+        # 2) Reset manual totals + reminder flags for fresh month
         result = members_coll.update_many(
             {},
             {
@@ -827,14 +967,15 @@ def register(app: Client):
         )
 
         await cq.answer(
-            f"Cleared manual totals for {modified} member(s). New month started.",
+            f"Logged this month’s totals and cleared manual totals for {modified} member(s).",
             show_alert=True,
         )
         await _safe_edit_text(
             cq.message,
             text=(
                 f"🧹 New month reset complete.\n"
-                f"Manual totals cleared for {modified} member(s). "
+                f"All member totals were logged to the requirements log group, then "
+                f"manual totals were cleared for {modified} member(s).\n\n"
                 "You can now start logging this month’s requirements fresh."
             ),
             reply_markup=_admin_kb(),
@@ -975,8 +1116,15 @@ def register(app: Client):
             f"Manual spend +${amount:.2f} (custom keypad) for {target_id} by {user_id}.",
         )
 
+        viewer_is_owner = user_id == OWNER_ID
+        viewer_is_model = _is_model(user_id) and not viewer_is_owner
+        if viewer_is_model:
+            display_new_total = min(new_total, REQUIRED_MIN_SPEND)
+        else:
+            display_new_total = new_total
+
         await cq.answer(
-            f"Added ${amount:.2f}. New total: ${new_total:.2f}", show_alert=True
+            f"Added ${amount:.2f}. New total: ${display_new_total:.2f}", show_alert=True
         )
         await reqpanel_spend_member_cb(client, cq)
 
@@ -991,7 +1139,7 @@ def register(app: Client):
         await cq.answer("Custom amount cancelled.", show_alert=False)
         await reqpanel_add_spend_cb(_, cq)
 
-    # ────────────── Scan & sweeps (unchanged) ──────────────
+    # ────────────── Scan members ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:scan$"))
     async def reqpanel_scan_cb(client: Client, cq: CallbackQuery):
@@ -1044,6 +1192,8 @@ def register(app: Client):
             reply_markup=_admin_kb(),
             disable_web_page_preview=True,
         )
+
+    # ────────────── Reminder sweeps ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
     async def reqpanel_reminders_cb(client: Client, cq: CallbackQuery):
