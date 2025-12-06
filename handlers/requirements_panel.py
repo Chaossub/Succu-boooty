@@ -300,6 +300,51 @@ def _back_to_admin_kb() -> InlineKeyboardMarkup:
     )
 
 
+def _custom_amount_kb(target_id: int, amount: int) -> InlineKeyboardMarkup:
+    """
+    Inline keypad for adjusting a custom amount (integer dollars).
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "−10", callback_data=f"reqpanel:custom_delta:{target_id}:-10"
+                ),
+                InlineKeyboardButton(
+                    "−5", callback_data=f"reqpanel:custom_delta:{target_id}:-5"
+                ),
+                InlineKeyboardButton(
+                    "−1", callback_data=f"reqpanel:custom_delta:{target_id}:-1"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "+1", callback_data=f"reqpanel:custom_delta:{target_id}:+1"
+                ),
+                InlineKeyboardButton(
+                    "+5", callback_data=f"reqpanel:custom_delta:{target_id}:+5"
+                ),
+                InlineKeyboardButton(
+                    "+10", callback_data=f"reqpanel:custom_delta:{target_id}:+10"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "✅ Confirm", callback_data=f"reqpanel:custom_confirm:{target_id}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Cancel", callback_data=f"reqpanel:custom_cancel:{target_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅ Back to Member List", callback_data="reqpanel:add_spend"
+                )
+            ],
+        ]
+    )
+
+
 # ────────────── Core handlers ──────────────
 
 
@@ -422,12 +467,9 @@ def register(app: Client):
             reply_markup=_back_to_admin_kb(),
         )
 
-    # ────────────── Text router for multi-step flows ──────────────
-    # Handles:
-    # 1) Custom manual-spend amount (pending_custom_coll)
-    # 2) Lookup / toggle_exempt flows (STATE)
+    # ────────────── Text router for lookup / exempt only ──────────────
 
-    @app.on_message(filters.text)
+    @app.on_message(filters.text & filters.private)
     async def requirements_state_router(client: Client, msg: Message):
         if not msg.from_user:
             return
@@ -435,60 +477,6 @@ def register(app: Client):
         user_id = msg.from_user.id
         text = (msg.text or "").strip()
 
-        # 1) Custom amount flow (works in private or groups)
-        pending = pending_custom_coll.find_one({"owner_id": user_id})
-        if pending:
-            target_id = pending.get("target_id")
-            if not target_id:
-                pending_custom_coll.delete_one({"owner_id": user_id})
-                await msg.reply_text(
-                    "Something went wrong remembering who this was for. "
-                    "Please pick them again from the buttons."
-                )
-                return
-
-            try:
-                amount = float(text)
-                if amount <= 0:
-                    raise ValueError
-            except ValueError:
-                await msg.reply_text(
-                    "Please send just a positive number for how many dollars to credit.\n\n"
-                    "Example: <code>17.50</code>"
-                )
-                return
-
-            doc = members_coll.find_one({"user_id": target_id}) or {
-                "user_id": target_id
-            }
-            new_total = float(doc.get("manual_spend", 0.0)) + amount
-
-            members_coll.update_one(
-                {"user_id": target_id},
-                {
-                    "$set": {
-                        "manual_spend": new_total,
-                        "last_updated": datetime.now(timezone.utc),
-                        "first_name": doc.get("first_name", ""),
-                        "username": doc.get("username"),
-                    }
-                },
-                upsert=True,
-            )
-
-            pending_custom_coll.delete_one({"owner_id": user_id})
-
-            await msg.reply_text(
-                f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
-                f"New manual total: ${new_total:.2f}"
-            )
-            await _log_event(
-                client,
-                f"Manual spend +${amount:.2f} (custom) for {target_id} by {user_id}.",
-            )
-            return
-
-        # 2) Legacy STATE flows (lookup / toggle_exempt)
         state = STATE.get(user_id)
         if not state:
             return
@@ -875,7 +863,7 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ────────────── Custom amount via typed number ──────────────
+    # ────────────── Custom amount via keypad (callbacks only) ──────────────
 
     @app.on_callback_query(filters.regex(r"^reqpanel:spend_custom:(\d+)$"))
     async def reqpanel_spend_custom_cb(_, cq: CallbackQuery):
@@ -886,37 +874,154 @@ def register(app: Client):
 
         target_id = int(cq.data.split(":")[-1])
 
+        # Initialize pending custom amount at $0 for this owner & target
         pending_custom_coll.replace_one(
             {"owner_id": user_id},
             {
                 "owner_id": user_id,
                 "target_id": target_id,
+                "amount": 0,  # integer dollars
                 "created_at": datetime.utcnow(),
             },
             upsert=True,
         )
 
-        kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "⬅ Back to Member List", callback_data="reqpanel:add_spend"
-                    )
-                ]
-            ]
+        text = (
+            "<b>Add Manual Spend – Custom Amount</b>\n\n"
+            f"Target member ID: <code>{target_id}</code>\n\n"
+            "Use the buttons below to adjust the custom amount for this cycle.\n"
+            "When you’re happy with the number, tap <b>✅ Confirm</b> to apply it."
+            "\n\nCurrent pending amount: <b>$0</b>"
         )
+
+        kb = _custom_amount_kb(target_id, 0)
 
         await cq.answer()
         await _safe_edit_text(
             cq.message,
-            text=(
-                "<b>Add Manual Spend – Custom Amount</b>\n\n"
-                "Send me just the number for how many dollars to credit.\n\n"
-                "Example: <code>17.50</code>"
-            ),
+            text=text,
             reply_markup=kb,
             disable_web_page_preview=True,
         )
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:custom_delta:(\d+):([+-]?\d+)$"))
+    async def reqpanel_custom_delta_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can add spend.", show_alert=True)
+            return
+
+        parts = cq.data.split(":")
+        target_id = int(parts[2])
+        delta = int(parts[3])
+
+        doc = pending_custom_coll.find_one(
+            {"owner_id": user_id, "target_id": target_id}
+        ) or {
+            "owner_id": user_id,
+            "target_id": target_id,
+            "amount": 0,
+        }
+
+        amount = int(doc.get("amount", 0)) + delta
+        if amount < 0:
+            amount = 0
+
+        pending_custom_coll.update_one(
+            {"owner_id": user_id},
+            {
+                "$set": {
+                    "owner_id": user_id,
+                    "target_id": target_id,
+                    "amount": amount,
+                    "created_at": datetime.utcnow(),
+                }
+            },
+            upsert=True,
+        )
+
+        text = (
+            "<b>Add Manual Spend – Custom Amount</b>\n\n"
+            f"Target member ID: <code>{target_id}</code>\n\n"
+            "Use the buttons below to adjust the custom amount for this cycle.\n"
+            "When you’re happy with the number, tap <b>✅ Confirm</b> to apply it."
+            f"\n\nCurrent pending amount: <b>${amount}</b>"
+        )
+
+        kb = _custom_amount_kb(target_id, amount)
+
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=text,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:custom_confirm:(\d+)$"))
+    async def reqpanel_custom_confirm_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can add spend.", show_alert=True)
+            return
+
+        target_id = int(cq.data.split(":")[-1])
+
+        doc = pending_custom_coll.find_one(
+            {"owner_id": user_id, "target_id": target_id}
+        )
+        if not doc:
+            await cq.answer("No pending custom amount found.", show_alert=True)
+            return
+
+        amount = int(doc.get("amount", 0))
+        pending_custom_coll.delete_one({"owner_id": user_id})
+
+        if amount <= 0:
+            await cq.answer("Amount is $0 – nothing to add.", show_alert=True)
+            return
+
+        member_doc = members_coll.find_one({"user_id": target_id}) or {
+            "user_id": target_id
+        }
+        base = float(member_doc.get("manual_spend", 0.0) or 0.0)
+        new_total = base + float(amount)
+
+        members_coll.update_one(
+            {"user_id": target_id},
+            {
+                "$set": {
+                    "manual_spend": new_total,
+                    "last_updated": datetime.now(timezone.utc),
+                    "first_name": member_doc.get("first_name", ""),
+                    "username": member_doc.get("username"),
+                }
+            },
+            upsert=True,
+        )
+
+        await _log_event(
+            client,
+            f"Manual spend +${amount:.2f} (custom keypad) for {target_id} by {user_id}.",
+        )
+
+        await cq.answer(
+            f"Added ${amount:.2f}. New total: ${new_total:.2f}", show_alert=True
+        )
+
+        # Return to the member view
+        await reqpanel_spend_member_cb(client, cq)
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:custom_cancel:(\d+)$"))
+    async def reqpanel_custom_cancel_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can add spend.", show_alert=True)
+            return
+
+        pending_custom_coll.delete_one({"owner_id": user_id})
+        await cq.answer("Custom amount cancelled.", show_alert=False)
+        await reqpanel_add_spend_cb(_, cq)
 
     # ────────────── Toggle Exempt ──────────────
 
