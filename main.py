@@ -71,6 +71,9 @@ def main():
     _try_register("moderation")
     _try_register("warnings")
 
+    # 🔔 Summon everyone in a group (/summon /summonall /all)
+    _try_register("summon")
+
     # Message scheduler
     _try_register("schedulemsg")
 
