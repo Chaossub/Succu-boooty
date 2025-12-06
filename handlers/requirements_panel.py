@@ -28,10 +28,8 @@ if not MONGO_URI:
 mongo = MongoClient(MONGO_URI)
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
-pending_custom_coll = db["requirements_pending_custom_spend"]
 
 members_coll.create_index([("user_id", ASCENDING)], unique=True)
-pending_custom_coll.create_index([("owner_id", ASCENDING)], unique=True)
 
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
@@ -75,7 +73,7 @@ for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
 # Minimum requirement total to be "met"
 REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 
-# Simple in-memory state for some flows
+# Simple in-memory state for some flows (lookup / toggle_exempt)
 STATE: Dict[int, Dict[str, Any]] = {}
 
 # ────────────── Helper functions ──────────────
@@ -294,19 +292,6 @@ def _back_to_admin_kb() -> InlineKeyboardMarkup:
     )
 
 
-def _back_to_member_list_kb() -> InlineKeyboardMarkup:
-    """Used after custom amount so you still see a Back button."""
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton(
-                    "⬅ Back to Member List", callback_data="reqpanel:add_spend"
-                )
-            ]
-        ]
-    )
-
-
 def _member_select_keyboard() -> InlineKeyboardMarkup:
     docs = list(members_coll.find().sort("first_name", ASCENDING).limit(50))
     rows: List[List[InlineKeyboardButton]] = []
@@ -338,6 +323,70 @@ def _member_select_keyboard() -> InlineKeyboardMarkup:
         ]
     )
     return InlineKeyboardMarkup(rows)
+
+
+def _member_adjust_keyboard(target_id: int, current_total: float) -> InlineKeyboardMarkup:
+    """
+    Buttons ONLY:
+      - rows of + and - fixed amounts
+      - clear total
+      - back to member list
+    """
+    return InlineKeyboardMarkup(
+        [
+            # Add money
+            [
+                InlineKeyboardButton(
+                    "+$5", callback_data=f"reqpanel:spend_delta:{target_id}:5"
+                ),
+                InlineKeyboardButton(
+                    "+$10", callback_data=f"reqpanel:spend_delta:{target_id}:10"
+                ),
+                InlineKeyboardButton(
+                    "+$20", callback_data=f"reqpanel:spend_delta:{target_id}:20"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "+$25", callback_data=f"reqpanel:spend_delta:{target_id}:25"
+                ),
+                InlineKeyboardButton(
+                    "+$50", callback_data=f"reqpanel:spend_delta:{target_id}:50"
+                ),
+            ],
+            # Subtract money
+            [
+                InlineKeyboardButton(
+                    "−$5", callback_data=f"reqpanel:spend_delta:{target_id}:-5"
+                ),
+                InlineKeyboardButton(
+                    "−$10", callback_data=f"reqpanel:spend_delta:{target_id}:-10"
+                ),
+                InlineKeyboardButton(
+                    "−$20", callback_data=f"reqpanel:spend_delta:{target_id}:-20"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "−$25", callback_data=f"reqpanel:spend_delta:{target_id}:-25"
+                ),
+                InlineKeyboardButton(
+                    "−$50", callback_data=f"reqpanel:spend_delta:{target_id}:-50"
+                ),
+            ],
+            # Clear + back
+            [
+                InlineKeyboardButton(
+                    "🧹 Clear Total", callback_data=f"reqpanel:spend_clear:{target_id}"
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "⬅ Back to Member List", callback_data="reqpanel:add_spend"
+                )
+            ],
+        ]
+    )
 
 
 # ────────────── Core handlers ──────────────
@@ -462,71 +511,11 @@ def register(app: Client):
             reply_markup=_back_to_admin_kb(),
         )
 
-    # ────────────── Text router for multi-step flows ──────────────
+    # ────────────── Text router (ONLY for lookup / toggle_exempt now) ──────────────
 
     @app.on_message(filters.text)
     async def requirements_state_router(client: Client, msg: Message):
         user_id = msg.from_user.id
-
-        # 1) Check for a pending custom amount flow in Mongo
-        pending = pending_custom_coll.find_one({"owner_id": user_id})
-        if pending:
-            target_id = pending.get("target_id")
-            if not target_id:
-                pending_custom_coll.delete_one({"owner_id": user_id})
-                await msg.reply_text(
-                    "Something went wrong remembering who this was for. "
-                    "Please pick them again from the buttons.",
-                    reply_markup=_back_to_member_list_kb(),
-                )
-                return
-
-            try:
-                amount = float(msg.text.strip())
-                if amount <= 0:
-                    raise ValueError
-            except ValueError:
-                await msg.reply_text(
-                    "Please send just a positive number for how many dollars to credit.\n\n"
-                    "Example: <code>17.50</code>",
-                    reply_markup=_back_to_member_list_kb(),
-                )
-                return
-
-            doc = members_coll.find_one({"user_id": target_id}) or {
-                "user_id": target_id
-            }
-            new_total = float(doc.get("manual_spend", 0.0)) + amount
-
-            members_coll.update_one(
-                {"user_id": target_id},
-                {
-                    "$set": {
-                        "manual_spend": new_total,
-                        "last_updated": datetime.now(timezone.utc),
-                        "first_name": doc.get("first_name", ""),
-                        "username": doc.get("username"),
-                    }
-                },
-                upsert=True,
-            )
-
-            pending_custom_coll.delete_one({"owner_id": user_id})
-
-            # 👇 NEW: confirmation message includes Back to Member List button
-            await msg.reply_text(
-                f"Logged ${amount:.2f} for <code>{target_id}</code>.\n"
-                f"New manual total: ${new_total:.2f}",
-                reply_markup=_back_to_member_list_kb(),
-                disable_web_page_preview=True,
-            )
-            await _log_event(
-                client,
-                f"Manual spend +${amount:.2f} (custom via Mongo) for {target_id} by {user_id}.",
-            )
-            return
-
-        # 2) Legacy STATE flows (lookup / toggle_exempt)
         state = STATE.get(user_id)
         if not state:
             return
@@ -680,7 +669,7 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ────────────── Add Manual Spend (buttons) ──────────────
+    # ────────────── Add Manual Spend (buttons only) ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:add_spend$"))
     async def reqpanel_add_spend_cb(_, cq: CallbackQuery):
@@ -695,8 +684,8 @@ def register(app: Client):
             cq.message,
             text=(
                 "<b>Add Manual Spend</b>\n\n"
-                "Tap a member below to credit offline payments for this month.\n"
-                "This adds extra credited dollars on top of Stripe / games for this month only."
+                "Tap a member below to adjust offline payments for this month.\n"
+                "Use the buttons on their page to add, subtract, or clear their total."
             ),
             reply_markup=kb,
             disable_web_page_preview=True,
@@ -722,42 +711,12 @@ def register(app: Client):
         text = (
             "<b>Add Manual Spend</b>\n\n"
             f"Member: {name} (<code>{target_id}</code>)\n"
-            f"Current manual total: ${doc['manual_spend']:.2f}\n\n"
-            "Pick an amount to credit for this month:"
+            f"Current manual total: <b>${doc['manual_spend']:.2f}</b>\n\n"
+            "Use the buttons below to add, subtract, or clear their total for this month.\n"
+            "Totals will be included in the end-of-month requirement logs."
         )
 
-        kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        "$5", callback_data=f"reqpanel:spend_amount:{target_id}:5"
-                    ),
-                    InlineKeyboardButton(
-                        "$10", callback_data=f"reqpanel:spend_amount:{target_id}:10"
-                    ),
-                    InlineKeyboardButton(
-                        "$20", callback_data=f"reqpanel:spend_amount:{target_id}:20"
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        "$25", callback_data=f"reqpanel:spend_amount:{target_id}:25"
-                    ),
-                    InlineKeyboardButton(
-                        "$50", callback_data=f"reqpanel:spend_amount:{target_id}:50"
-                    ),
-                    InlineKeyboardButton(
-                        "Custom amount",
-                        callback_data=f"reqpanel:spend_custom:{target_id}",
-                    ),
-                ],
-                [
-                    InlineKeyboardButton(
-                        "⬅ Back to Member List", callback_data="reqpanel:add_spend"
-                    )
-                ],
-            ]
-        )
+        kb = _member_adjust_keyboard(target_id, doc["manual_spend"])
 
         await cq.answer()
         await _safe_edit_text(
@@ -767,8 +726,8 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    @app.on_callback_query(filters.regex(r"^reqpanel:spend_amount:(\d+):(\d+)$"))
-    async def reqpanel_spend_amount_cb(client: Client, cq: CallbackQuery):
+    @app.on_callback_query(filters.regex(r"^reqpanel:spend_delta:(\d+):(-?\d+)$"))
+    async def reqpanel_spend_delta_cb(client: Client, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
             await cq.answer("Only Roni and models can add spend.", show_alert=True)
@@ -776,10 +735,15 @@ def register(app: Client):
 
         parts = cq.data.split(":")
         target_id = int(parts[2])
-        amount = float(parts[3])
+        delta = float(parts[3])
 
         doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
-        new_total = float(doc.get("manual_spend", 0.0)) + amount
+        current = float(doc.get("manual_spend", 0.0))
+        new_total = current + delta
+
+        # Don't go below zero
+        if new_total < 0:
+            new_total = 0.0
 
         members_coll.update_one(
             {"user_id": target_id},
@@ -794,48 +758,52 @@ def register(app: Client):
             upsert=True,
         )
 
+        sign = "+" if delta >= 0 else "-"
         await _log_event(
             client,
-            f"Manual spend +${amount:.2f} for {target_id} by {user_id}.",
+            f"Manual spend {sign}${abs(delta):.2f} for {target_id} by {user_id}. "
+            f"New total: ${new_total:.2f}",
         )
 
         await cq.answer(
-            f"Added ${amount:.2f}. New total: ${new_total:.2f}", show_alert=True
+            f"{'Added' if delta >= 0 else 'Removed'} ${abs(delta):.2f}. "
+            f"New total: ${new_total:.2f}",
+            show_alert=True,
         )
+
+        # Refresh the member page
         await reqpanel_spend_member_cb(client, cq)
 
-    @app.on_callback_query(filters.regex(r"^reqpanel:spend_custom:(\d+)$"))
-    async def reqpanel_spend_custom_cb(_, cq: CallbackQuery):
+    @app.on_callback_query(filters.regex(r"^reqpanel:spend_clear:(\d+)$"))
+    async def reqpanel_spend_clear_cb(client: Client, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
             await cq.answer("Only Roni and models can add spend.", show_alert=True)
             return
 
         target_id = int(cq.data.split(":")[-1])
+        doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
 
-        pending_custom_coll.replace_one(
-            {"owner_id": user_id},
+        members_coll.update_one(
+            {"user_id": target_id},
             {
-                "owner_id": user_id,
-                "target_id": target_id,
-                "created_at": datetime.utcnow(),
+                "$set": {
+                    "manual_spend": 0.0,
+                    "last_updated": datetime.now(timezone.utc),
+                    "first_name": doc.get("first_name", ""),
+                    "username": doc.get("username"),
+                }
             },
             upsert=True,
         )
 
-        kb = _back_to_member_list_kb()
-
-        await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text=(
-                "<b>Add Manual Spend – Custom Amount</b>\n\n"
-                "Send me just the number for how many dollars to credit.\n\n"
-                "Example: <code>17.50</code>"
-            ),
-            reply_markup=kb,
-            disable_web_page_preview=True,
+        await _log_event(
+            client,
+            f"Manual spend CLEARED for {target_id} by {user_id}.",
         )
+
+        await cq.answer("Manual total cleared for this member.", show_alert=True)
+        await reqpanel_spend_member_cb(client, cq)
 
     # ────────────── Toggle Exempt ──────────────
 
