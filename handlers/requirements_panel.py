@@ -321,7 +321,7 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    "🛠 Requirements Panel", callback_data="reqpanel:admin"
+                    "🛠 Requirements Help", callback_data="reqpanel:admin"
                 )
             ]
         )
@@ -457,7 +457,7 @@ def register(app: Client):
         ]
         if is_admin:
             text_lines.append(
-                "• <b>Requirements Panel</b> – owner/model tools for lists, manual credit, "
+                "• <b>Requirements Help</b> – owner/model tools for lists, manual credit, "
                 "exemptions, reminders, and monthly resets."
             )
         text_lines.append("")
@@ -1290,3 +1290,4 @@ def register(app: Client):
             reply_markup=_admin_kb(),
             disable_web_page_preview=True,
         )
+
