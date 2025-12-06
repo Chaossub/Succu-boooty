@@ -250,8 +250,9 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🛠 Admin / Model Controls", callback_data="reqpanel:admin")]
         )
 
+    # Instead of portal:home, we trigger /start (so Requirements Help always shows)
     rows.append(
-        [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="portal:home")]
+        [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="reqpanel:back_start")]
     )
     return InlineKeyboardMarkup(rows)
 
@@ -263,6 +264,11 @@ def _admin_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     "📋 Member Status List", callback_data="reqpanel:list:0"
                 ),
+                InlineKeyboardButton(
+                    "➕ Add Manual Spend", callback_data="reqpanel:add_select"
+                ),
+            ],
+            [
                 InlineKeyboardButton(
                     "📡 Scan Group Members", callback_data="reqpanel:scan"
                 ),
@@ -279,7 +285,7 @@ def _admin_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
-                    "⬅ Back to Requirements Help", callback_data="reqpanel:home"
+                    "⬅ Back to Requirements Help", callback_data="reqpanel:help"
                 )
             ],
         ]
@@ -422,10 +428,19 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # We also treat reqpanel:home and reqpanel:open as aliases to "help"
+    # aliases
     @app.on_callback_query(filters.regex(r"^reqpanel:(home|open)$"))
     async def reqpanel_home_cb(_, cq: CallbackQuery):
         await reqpanel_help_cb(_, cq)
+
+    # Back to sanctuary menu → simulate /start so Requirements Help always shows
+    @app.on_callback_query(filters.regex(r"^reqpanel:back_start$"))
+    async def reqpanel_back_start_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        # fire /start so your normal start handler runs
+        await client.send_message(user_id, "/start")
+        await cq.answer()
+        # optional: keep current panel text or delete; we'll just leave it
 
     # Admin / model tools panel
     @app.on_callback_query(filters.regex(r"^reqpanel:admin$"))
@@ -442,6 +457,7 @@ def register(app: Client):
             "or running sweeps, so double-check before confirming changes.\n\n"
             "From here you can:\n"
             "▪️ Open the full member list\n"
+            "▪️ Add manual spend credit\n"
             "▪️ Scan groups into the tracker\n"
             "▪️ Send reminder DMs\n"
             "▪️ Send final-warning DMs\n\n"
@@ -579,7 +595,77 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ────────────── Add Manual Spend (button-based) ──────────────
+    # ────────────── Add Manual Spend (select member from button list) ──────────────
+
+    @app.on_callback_query(filters.regex(r"^reqpanel:add_select$"))
+    async def reqpanel_add_select_cb(_, cq: CallbackQuery):
+        user_id = cq.from_user.id
+        if not _is_admin_or_model(user_id):
+            await cq.answer("Only Roni and models can add spend.", show_alert=True)
+            return
+
+        docs = list(members_coll.find().sort("first_name", ASCENDING).limit(50))
+        if not docs:
+            text = (
+                "<b>Add Manual Spend</b>\n\n"
+                "No tracked members yet. Try running a scan first."
+            )
+            kb = InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton(
+                            "📡 Scan Group Members", callback_data="reqpanel:scan"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "⬅ Back to Admin / Model Controls", callback_data="reqpanel:admin"
+                        )
+                    ],
+                ]
+            )
+        else:
+            lines = [
+                "<b>Add Manual Spend</b>\n\n"
+                "Tap a member below to credit manual spend for this month:\n"
+            ]
+            buttons: List[List[InlineKeyboardButton]] = []
+            for d in docs:
+                uid = d["user_id"]
+                doc_full = _member_doc(uid)
+                name = _display_name(doc_full)
+                status = _status_label(doc_full)
+                total = doc_full["manual_spend"]
+                lines.append(
+                    f"• {name} (<code>{uid}</code>) – {status} (${total:.2f})"
+                )
+                buttons.append(
+                    [
+                        InlineKeyboardButton(
+                            f"{name} – ${total:.2f}",
+                            callback_data=f"reqpanel:add:{uid}",
+                        )
+                    ]
+                )
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "⬅ Back to Admin / Model Controls", callback_data="reqpanel:admin"
+                    )
+                ]
+            )
+            text = "\n".join(lines)
+            kb = InlineKeyboardMarkup(buttons)
+
+        await cq.answer()
+        await _safe_edit_text(
+            cq.message,
+            text=text,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+
+    # ────────────── Add Manual Spend (per-member flow) ──────────────
 
     @app.on_callback_query(filters.regex(r"^reqpanel:add:(\d+)$"))
     async def reqpanel_add_cb(_, cq: CallbackQuery):
