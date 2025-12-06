@@ -250,9 +250,9 @@ def _root_kb(is_admin: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🛠 Admin / Model Controls", callback_data="reqpanel:admin")]
         )
 
-    # Instead of portal:home, we trigger /start (so Requirements Help always shows)
+    # Back to your main portal menu (your portal handler shows Requirements Help)
     rows.append(
-        [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="reqpanel:back_start")]
+        [InlineKeyboardButton("⬅ Back to Sanctuary Menu", callback_data="portal:home")]
     )
     return InlineKeyboardMarkup(rows)
 
@@ -432,15 +432,6 @@ def register(app: Client):
     @app.on_callback_query(filters.regex(r"^reqpanel:(home|open)$"))
     async def reqpanel_home_cb(_, cq: CallbackQuery):
         await reqpanel_help_cb(_, cq)
-
-    # Back to sanctuary menu → simulate /start so Requirements Help always shows
-    @app.on_callback_query(filters.regex(r"^reqpanel:back_start$"))
-    async def reqpanel_back_start_cb(client: Client, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        # fire /start so your normal start handler runs
-        await client.send_message(user_id, "/start")
-        await cq.answer()
-        # optional: keep current panel text or delete; we'll just leave it
 
     # Admin / model tools panel
     @app.on_callback_query(filters.regex(r"^reqpanel:admin$"))
@@ -809,8 +800,13 @@ def register(app: Client):
         mode = state.get("mode")
 
         if mode == "add_amount_custom":
+            text = msg.text.strip()
+            # Let real commands like /start work instead of treating them as amounts
+            if text.startswith("/"):
+                return
+
             try:
-                amount = float(msg.text.strip())
+                amount = float(text)
                 if amount <= 0:
                     raise ValueError
             except ValueError:
@@ -825,7 +821,7 @@ def register(app: Client):
             target_id = int(state["target_id"])
 
             doc = _member_doc(target_id)
-            text = (
+            resp_text = (
                 "<b>Add Manual Spend</b>\n\n"
                 f"Member: {_display_name(doc)} (<code>{target_id}</code>)\n"
                 f"Amount: ${amount:.2f}\n\n"
@@ -833,7 +829,7 @@ def register(app: Client):
             )
 
             await msg.reply_text(
-                text,
+                resp_text,
                 reply_markup=_who_kb(target_id),
                 disable_web_page_preview=True,
             )
