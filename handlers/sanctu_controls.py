@@ -47,9 +47,6 @@ for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
         except ValueError:
             pass
 
-# pending state for multi-step flows
-PENDING: Dict[int, Dict[str, Any]] = {}
-
 # ────────────── Leave messages (randomized) ──────────────
 
 LEAVE_MESSAGES: List[str] = [
@@ -265,31 +262,40 @@ def register(app: Client):
         )
         await m.reply_text(text, reply_markup=_sanctu_root_kb())
 
-    # Backup command: /blacklist_add <id or @username>
-    @app.on_message(filters.private & filters.user(OWNER_ID) & filters.command("blacklist_add"))
-    async def cmd_blacklist_add_direct(client: Client, m: Message):
-        parts = (m.text or "").split(maxsplit=1)
-        if len(parts) < 2:
-            await m.reply_text("Usage: <code>/blacklist_add @username</code> or <code>/blacklist_add 123456789</code>")
-            return
-
-        target_raw = parts[1].strip()
+    # Backup command: /blacklist_add <id or @username>, can be run anywhere you are
+    @app.on_message(filters.user(OWNER_ID) & filters.command("blacklist_add"))
+    async def cmd_blacklist_add(client: Client, m: Message):
+        # if replying to a message with a visible from_user, use that
         target_id: Optional[int] = None
         target_username: Optional[str] = None
 
-        try:
-            if target_raw.startswith("@"):
-                target_username = target_raw[1:]
-                user = await client.get_users(target_raw)
-                target_id = user.id
-                if not target_username:
-                    target_username = user.username
-            else:
-                target_id = int(target_raw)
-        except Exception as e:
-            log.warning("sanctu_controls: /blacklist_add failed resolving %s: %s", target_raw, e)
-            await m.reply_text("I couldn't resolve that user. Make sure the username/ID is correct.")
-            return
+        if m.reply_to_message and m.reply_to_message.from_user:
+            target_id = m.reply_to_message.from_user.id
+            target_username = m.reply_to_message.from_user.username
+        else:
+            parts = (m.text or "").split(maxsplit=1)
+            if len(parts) < 2:
+                await m.reply_text(
+                    "Usage:\n"
+                    "<code>/blacklist_add @username</code>\n"
+                    "or\n"
+                    "<code>/blacklist_add 123456789</code>"
+                )
+                return
+            raw = parts[1].strip()
+            try:
+                if raw.startswith("@"):
+                    target_username = raw[1:]
+                    user = await client.get_users(raw)
+                    target_id = user.id
+                    if not target_username:
+                        target_username = user.username
+                else:
+                    target_id = int(raw)
+            except Exception as e:
+                log.warning("sanctu_controls: /blacklist_add failed resolving %s: %s", raw, e)
+                await m.reply_text("I couldn't resolve that user. Make sure the username/ID is correct.")
+                return
 
         if not target_id:
             await m.reply_text("I couldn’t figure out who you meant.")
@@ -347,115 +353,30 @@ def register(app: Client):
 
         await cq.message.edit_text(
             "👤 <b>Blacklist Controls</b>\n\n"
-            "• Add users who should never touch your bot\n"
+            "• Use /blacklist_add to add users\n"
             "• Remove users if you ever change your mind\n"
             "• View current blacklist",
             reply_markup=_blacklist_menu_kb(),
         )
         await cq.answer()
 
-    # Start add flow (button)
+    # “Add user” button: just explain the command now
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:add$"))
     async def sanctu_blacklist_add_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
             await cq.answer("You don’t have access to this panel.", show_alert=True)
             return
 
-        PENDING[cq.from_user.id] = {"mode": "await_blacklist_target"}
-        kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("❌ Cancel", callback_data="sanctu:cancel")]]
-        )
-        await cq.message.edit_text(
+        text = (
             "➕ <b>Add User to Blacklist</b>\n\n"
-            "Forward a message from the user you want to blacklist, or send their @username or numeric ID.\n\n"
-            "They will be blocked from using SuccuBot and any group that contains them will be left automatically.\n\n"
-            "<i>Note:</i> If Telegram hides their info when you forward, sending their @username or numeric ID works best.",
-            reply_markup=kb,
+            "Run one of these in this chat with SuccuBot:\n\n"
+            "• <code>/blacklist_add @username</code>\n"
+            "• <code>/blacklist_add 123456789</code>\n\n"
+            "You can also reply to a message and run:\n"
+            "• <code>/blacklist_add</code>\n\n"
+            "Once added, they will be blocked from using SuccuBot and any group that contains them will be left automatically."
         )
-        await cq.answer()
-
-    # This MUST run before other private handlers so our add flow can't be swallowed.
-    @app.on_message(filters.private, group=-1)
-    async def sanctu_private_msg_handler(client: Client, m: Message):
-        try:
-            if not m.from_user:
-                return
-            user_id = m.from_user.id
-            if not _is_owner(user_id):
-                return
-
-            state = PENDING.get(user_id)
-            if not state or state.get("mode") != "await_blacklist_target":
-                return
-
-            target_id: Optional[int] = None
-            target_username: Optional[str] = None
-
-            if m.forward_from:
-                # Forward with user info visible
-                target_id = m.forward_from.id
-                target_username = m.forward_from.username
-            else:
-                text = (m.text or "").strip()
-                if text:
-                    if text.startswith("@"):
-                        # @username
-                        target_username = text[1:]
-                        try:
-                            user = await client.get_users(text)
-                            target_id = user.id
-                            if not target_username:
-                                target_username = user.username
-                        except Exception as e:
-                            log.warning("sanctu_controls: failed to resolve username %s: %s", text, e)
-                    else:
-                        # numeric ID
-                        try:
-                            target_id = int(text)
-                        except ValueError:
-                            target_id = None
-
-            if not target_id:
-                await m.reply_text(
-                    "I couldn’t figure out who you meant.\n"
-                    "Please forward a message from them, or send their @username or numeric ID.",
-                )
-                return
-
-            doc = {
-                "user_id": target_id,
-                "username": target_username,
-                "reason": "Manual blacklist",
-                "created_at": datetime.now(timezone.utc),
-            }
-            blacklist_coll.update_one({"user_id": target_id}, {"$set": doc}, upsert=True)
-
-            PENDING.pop(user_id, None)
-
-            await m.reply_text(
-                f"✅ User <code>{target_id}</code> has been added to the blacklist.\n"
-                f"They will be blocked from using SuccuBot and any group that contains them will be left automatically."
-            )
-            await _log_event(
-                client,
-                f"User `{target_id}` added to blacklist by owner.",
-            )
-        except Exception as e:
-            log.exception("sanctu_controls: error in private msg handler: %s", e)
-            try:
-                await m.reply_text("Something went wrong while trying to add that user. Check logs.")
-            except Exception:
-                pass
-
-    # Cancel add
-    @app.on_callback_query(filters.regex(r"^sanctu:cancel$"))
-    async def sanctu_cancel_cb(client: Client, cq: CallbackQuery):
-        if cq.from_user:
-            PENDING.pop(cq.from_user.id, None)
-        await cq.message.edit_text(
-            "❌ Action cancelled.\n\nBack to Sanctuary Controls.",
-            reply_markup=_sanctu_root_kb(),
-        )
+        await cq.message.edit_text(text, reply_markup=_blacklist_menu_kb())
         await cq.answer()
 
     # View blacklist
