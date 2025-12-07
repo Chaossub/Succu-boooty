@@ -79,21 +79,10 @@ LEAVE_MESSAGES: List[str] = [
     "This chat is not eligible for SuccuBot. Leaving now.",
 ]
 
-
 # ────────────── Helpers ──────────────
 
 def _is_owner(user_id: int) -> bool:
     return user_id == OWNER_ID
-
-
-async def _owner_only(cq: CallbackQuery) -> bool:
-    if not cq.from_user:
-        await cq.answer("No user info on this callback.", show_alert=True)
-        return False
-    if not _is_owner(cq.from_user.id):
-        await cq.answer("You don’t have access to this panel.", show_alert=True)
-        return False
-    return True
 
 
 async def _safe_send(client: Client, chat_id: int, text: str):
@@ -139,18 +128,15 @@ async def _leave_group_for_blacklist(
 ):
     msg = random.choice(LEAVE_MESSAGES)
     try:
-        # Announce in the group before leaving
         await client.send_message(chat.id, msg)
     except Exception as e:
         log.warning("sanctu_controls: failed to announce before leaving %s: %s", chat.id, e)
 
-    # Actually leave
     try:
         await client.leave_chat(chat.id)
     except Exception as e:
         log.warning("sanctu_controls: failed to leave chat %s: %s", chat.id, e)
 
-    # Log + DM Roni
     user_info = ""
     if trigger_user_id:
         doc = _blacklist_doc(trigger_user_id)
@@ -166,7 +152,6 @@ async def _leave_group_for_blacklist(
 
     await _log_event(client, base)
 
-    # DM to owner
     try:
         await client.send_message(OWNER_ID, f"🚨 {base}")
     except Exception as e:
@@ -174,10 +159,6 @@ async def _leave_group_for_blacklist(
 
 
 async def _scan_chat_for_blacklisted(client: Client, chat: Chat) -> None:
-    """
-    Checks whether ANY blacklisted user is present in the given chat.
-    If so, leaves and logs.
-    """
     docs = list(blacklist_coll.find({}, {"user_id": 1}))
     if not docs:
         return
@@ -188,7 +169,6 @@ async def _scan_chat_for_blacklisted(client: Client, chat: Chat) -> None:
             member = await client.get_chat_member(chat.id, uid)
         except Exception:
             continue
-        # If they are still a participant (not left/kicked)
         if member and member.status not in ("left", "kicked"):
             await _leave_group_for_blacklist(
                 client,
@@ -205,8 +185,8 @@ def _sanctu_root_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("👤 Blacklist Controls", callback_data="sanctu:blacklist")],
-            [InlineKeyboardButton("🧭 Force Check & Leave", callback_data="sanctu:force_scan")],
-            [InlineKeyboardButton("⬅ Back to Main Menu", callback_data="portal:home")],
+            [InlineKeyboardButton("🧭 Safety Sweep (Force Check & Leave)", callback_data="sanctu:force_scan")],
+            [InlineKeyboardButton("❌ Close", callback_data="sanctu:close")],
         ]
     )
 
@@ -223,30 +203,52 @@ def _blacklist_menu_kb() -> InlineKeyboardMarkup:
 
 
 def register(app: Client):
-    log.info("✅ handlers.sanctu_controls registered (blacklist + auto-leave enabled)")
+    log.info("✅ handlers.sanctu_controls registered (DM-only Sanctuary Controls + blacklist + auto-leave)")
 
-    # ────────────── Sanctuary Controls entry ──────────────
+    # ────────────── /sanctu command in DM (entry point) ──────────────
 
-    @app.on_callback_query(filters.regex(r"^sanctu:open$"))
-    async def sanctu_open_cb(client: Client, cq: CallbackQuery):
-        if not await _owner_only(cq):
+    @app.on_message(filters.private & filters.command("sanctu"))
+    async def sanctu_cmd(client: Client, m: Message):
+        if not _is_owner(m.from_user.id):
+            await m.reply_text("You don’t have access to Sanctuary Controls.")
             return
 
         text = (
             "🛡 <b>Sanctuary Controls</b>\n\n"
-            "These controls are <b>Roni-only</b> and manage blacklist + safety behavior for SuccuBot.\n\n"
+            "Roni-only control panel for safety + blacklist.\n\n"
             "• Blacklist users so they can’t touch your bot\n"
             "• Auto-leave any group that contains a blacklisted user\n"
-            "• Log and DM you whenever this happens\n"
+            "• Run a Safety Sweep to force check all groups\n"
         )
-        await cq.message.edit_text(text, reply_markup=_sanctu_root_kb())
+        await m.reply_text(text, reply_markup=_sanctu_root_kb())
+
+    # open from callbacks (DM only)
+    @app.on_callback_query(filters.regex(r"^sanctu:open$"))
+    async def sanctu_open_cb(client: Client, cq: CallbackQuery):
+        if not cq.from_user or not _is_owner(cq.from_user.id):
+            await cq.answer("You don’t have access to this panel.", show_alert=True)
+            return
+        await cq.message.edit_text(
+            "🛡 <b>Sanctuary Controls</b>\n\n"
+            "Roni-only control panel.",
+            reply_markup=_sanctu_root_kb(),
+        )
+        await cq.answer()
+
+    @app.on_callback_query(filters.regex(r"^sanctu:close$"))
+    async def sanctu_close_cb(client: Client, cq: CallbackQuery):
+        if not cq.from_user or not _is_owner(cq.from_user.id):
+            await cq.answer("You don’t have access to this panel.", show_alert=True)
+            return
+        await cq.message.edit_text("Closed Sanctuary Controls.")
         await cq.answer()
 
     # ────────────── Blacklist menu ──────────────
 
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist$"))
     async def sanctu_blacklist_menu_cb(client: Client, cq: CallbackQuery):
-        if not await _owner_only(cq):
+        if not cq.from_user or not _is_owner(cq.from_user.id):
+            await cq.answer("You don’t have access to this panel.", show_alert=True)
             return
 
         await cq.message.edit_text(
@@ -262,7 +264,8 @@ def register(app: Client):
 
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:add$"))
     async def sanctu_blacklist_add_cb(client: Client, cq: CallbackQuery):
-        if not await _owner_only(cq):
+        if not cq.from_user or not _is_owner(cq.from_user.id):
+            await cq.answer("You don’t have access to this panel.", show_alert=True)
             return
 
         PENDING[cq.from_user.id] = {"mode": "await_blacklist_target"}
@@ -272,12 +275,11 @@ def register(app: Client):
         await cq.message.edit_text(
             "➕ <b>Add User to Blacklist</b>\n\n"
             "Forward a message from the user you want to blacklist, or send their @username or numeric ID.\n\n"
-            "I’ll lock them out from using SuccuBot anywhere.\n",
+            "They will be blocked from using SuccuBot and any group that contains them will be left automatically.",
             reply_markup=kb,
         )
         await cq.answer()
 
-    # Messages from owner while waiting for target user
     @app.on_message(filters.private)
     async def sanctu_private_msg_handler(client: Client, m: Message):
         user_id = m.from_user.id if m.from_user else None
@@ -289,7 +291,6 @@ def register(app: Client):
             return
 
         if state.get("mode") == "await_blacklist_target":
-            # Try to resolve target from forward, username, or plain ID
             target_id: Optional[int] = None
             target_username: Optional[str] = None
 
@@ -301,7 +302,6 @@ def register(app: Client):
                 if text:
                     if text.startswith("@"):
                         target_username = text[1:]
-                        # Best effort: try to resolve to an ID
                         try:
                             user = await client.get_users(text)
                             target_id = user.id
@@ -310,7 +310,6 @@ def register(app: Client):
                         except Exception as e:
                             log.warning("sanctu_controls: failed to resolve username %s: %s", text, e)
                     else:
-                        # maybe it's an ID
                         try:
                             target_id = int(text)
                         except ValueError:
@@ -323,7 +322,6 @@ def register(app: Client):
                 )
                 return
 
-            # Upsert into blacklist
             doc = {
                 "user_id": target_id,
                 "username": target_username,
@@ -332,7 +330,7 @@ def register(app: Client):
             }
             blacklist_coll.update_one({"user_id": target_id}, {"$set": doc}, upsert=True)
 
-            del PENDING[user_id]
+            PENDING.pop(user_id, None)
 
             await m.reply_text(
                 f"✅ User <code>{target_id}</code> has been added to the blacklist.\n"
@@ -343,11 +341,10 @@ def register(app: Client):
                 f"User `{target_id}` added to blacklist by owner.",
             )
 
-    # ────────────── Cancel pending sanctu flow ──────────────
-
     @app.on_callback_query(filters.regex(r"^sanctu:cancel$"))
     async def sanctu_cancel_cb(client: Client, cq: CallbackQuery):
-        if not await _owner_only(cq):
+        if not cq.from_user or not _is_owner(cq.from_user.id):
+            await cq.answer("You don’t have access to this panel.", show_alert=True)
             return
 
         if cq.from_user:
@@ -363,7 +360,8 @@ def register(app: Client):
 
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:list$"))
     async def sanctu_blacklist_list_cb(client: Client, cq: CallbackQuery):
-        if not await _owner_only(cq):
+        if not cq.from_user or not _is_owner(cq.from_user.id):
+            await cq.answer("You don’t have access to this panel.", show_alert=True)
             return
 
         docs = list(blacklist_coll.find().sort("created_at", -1))
@@ -385,7 +383,8 @@ def register(app: Client):
 
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:remove$"))
     async def sanctu_blacklist_remove_start_cb(client: Client, cq: CallbackQuery):
-        if not await _owner_only(cq):
+        if not cq.from_user or not _is_owner(cq.from_user.id):
+            await cq.answer("You don’t have access to this panel.", show_alert=True)
             return
 
         docs = list(blacklist_coll.find().sort("created_at", -1))
@@ -417,7 +416,8 @@ def register(app: Client):
 
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:remove:(\d+)$"))
     async def sanctu_blacklist_remove_cb(client: Client, cq: CallbackQuery):
-        if not await _owner_only(cq):
+        if not cq.from_user or not _is_owner(cq.from_user.id):
+            await cq.answer("You don’t have access to this panel.", show_alert=True)
             return
 
         data = cq.data or ""
@@ -443,30 +443,26 @@ def register(app: Client):
             client, f"User `{uid}` removed from blacklist by owner."
         )
 
-    # ────────────── Force Check & Leave (manual scan) ──────────────
+    # ────────────── Safety Sweep (Force Check & Leave) ──────────────
 
     @app.on_callback_query(filters.regex(r"^sanctu:force_scan$"))
     async def sanctu_force_scan_cb(client: Client, cq: CallbackQuery):
-        if not await _owner_only(cq):
+        if not cq.from_user or not _is_owner(cq.from_user.id):
+            await cq.answer("You don’t have access to this panel.", show_alert=True)
             return
 
-        await cq.answer("Starting safety scan… this may take a bit.", show_alert=False)
+        await cq.answer("Starting safety sweep…", show_alert=False)
 
-        left_count = 0
         async for dialog in client.get_dialogs():
             chat = dialog.chat
             if chat.type not in ("group", "supergroup"):
                 continue
             if chat.is_deleted:
                 continue
-
-            # This will leave and log if a blacklisted user is found.
-            before = left_count
             await _scan_chat_for_blacklisted(client, chat)
-            # crude way: if the bot left, future calls can't check; we rely on logs/DMs
 
         await cq.message.edit_text(
-            "🧭 Safety scan completed.\n\n"
+            "🧭 Safety Sweep completed.\n\n"
             "Any groups containing blacklisted users have been left, and you were notified.",
             reply_markup=_sanctu_root_kb(),
         )
@@ -475,20 +471,12 @@ def register(app: Client):
 
     @app.on_chat_member_updated()
     async def sanctu_chat_member_updated(client: Client, cmu: ChatMemberUpdated):
-        """
-        1) If SuccuBot is added to a group that already has a blacklisted user,
-           it will announce and leave.
-        2) If a blacklisted user joins a group where SuccuBot is present,
-           it will announce and leave.
-        """
         chat = cmu.chat
         new = cmu.new_chat_member
-        old = cmu.old_chat_member
 
-        # Case 1: this update is about the bot itself being added
+        # Case 1: the bot itself was added to a group
         if new.user and new.user.is_self:
             if new.status in ("member", "administrator"):
-                # Bot was added or (re)enabled in this chat
                 await _scan_chat_for_blacklisted(client, chat)
             return
 
@@ -497,7 +485,6 @@ def register(app: Client):
         if not user:
             return
 
-        # Only care when they become a member
         if new.status not in ("member", "restricted"):
             return
 
@@ -505,7 +492,6 @@ def register(app: Client):
         if not _is_blacklisted(uid):
             return
 
-        # Blacklisted user is (now) in this chat -> leave
         await _leave_group_for_blacklist(
             client,
             chat,
