@@ -135,10 +135,11 @@ async def _safe_send(app: Client, chat_id: int, text: str):
 async def _log_event(app: Client, text: str):
     """
     Lightweight logger to the Sanctuary records channel.
-    Currently used for:
+    Used for:
     - Scans
-    - Full requirements sweeps
-    (Kicks will be logged from the moderation handler using the same pattern.)
+    - Sweeps
+    - Manual spend changes (from this or other handlers)
+    - Kicks (from moderation, once wired)
     """
     if LOG_GROUP_ID is None:
         return
@@ -398,7 +399,7 @@ def register(app: Client):
             "▪️ Scan groups into the tracker\n"
             "▪️ Send reminder DMs to members who are behind\n"
             "▪️ Send final-warning DMs to those still not meeting minimums\n"
-            "▪️ Run a full requirements sweep and send a report to the log channel (owner only)\n\n"
+            "▪️ Run a full requirements sweep and send a summary to the log channel (owner only)\n\n"
             "All changes here affect this month’s requirement checks and future sweeps/reminders.\n\n"
             "<i>Only you and approved model admins see this panel. Members just see their own status.</i>"
         )
@@ -1095,7 +1096,6 @@ def register(app: Client):
                     "requirements_panel: failed scanning group %s: %s", gid, e
                 )
 
-        # Log scan in records channel
         await _log_event(
             client,
             f"Scan complete by {user_id}: indexed or updated {total_indexed} members.",
@@ -1206,7 +1206,7 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ────────────── Owner-only Requirements Sweep (full report to log channel) ──────────────
+    # ────────────── Owner-only Requirements Sweep (summary to log channel) ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:sweep$"))
     async def reqpanel_sweep_cb(client: Client, cq: CallbackQuery):
@@ -1227,142 +1227,44 @@ def register(app: Client):
             )
             return
 
-        docs = list(members_coll.find().sort("user_id", ASCENDING))
+        docs = list(members_coll.find())
         total_members = len(docs)
 
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        header = (
-            f"📊 <b>Requirements Sweep Report</b>\n\n"
-            f"Generated: <code>{now_str}</code>\n"
-            f"Minimum required: <b>${REQUIRED_MIN_SPEND:.2f}</b>\n"
-            f"Tracked members: <b>{total_members}</b>\n\n"
-        )
-
-        # Totals for the whole group
         total_manual_spend = 0.0
         totals_by_model: Dict[str, float] = {slug: 0.0 for slug in MODEL_NAME_MAP.keys()}
         totals_by_model["other"] = 0.0
         totals_by_model["untracked"] = 0.0
 
-        if not docs:
-            await _safe_send(
-                client,
-                LOG_GROUP_ID,
-                header + "No members found in requirements_members collection.",
-            )
-        else:
-            # Send header once
-            await _safe_send(client, LOG_GROUP_ID, header)
+        for d in docs:
+            md = _member_doc(d["user_id"])
+            total_manual_spend += md["manual_spend"]
 
-            chunk_lines: List[str] = []
-            current_len = 0
-            limit = 3500  # stay under Telegram's 4096-char limit
+            breakdown = md.get("manual_spend_models", {}) or {}
+            # Roni / Ruby / Rin / Savy
+            for slug in MODEL_NAME_MAP.keys():
+                amt = float(breakdown.get(slug, 0.0))
+                totals_by_model[slug] = totals_by_model.get(slug, 0.0) + amt
+            # Other + untracked
+            totals_by_model["other"] += float(breakdown.get("other", 0.0))
+            totals_by_model["untracked"] += float(breakdown.get("untracked", 0.0))
 
-            async def flush_chunk():
-                nonlocal chunk_lines, current_len
-                if not chunk_lines:
-                    return
-                text = "\n".join(chunk_lines)
-                await _safe_send(client, LOG_GROUP_ID, text)
-                chunk_lines = []
-                current_len = 0
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-            for d in docs:
-                uid = d["user_id"]
-                md = _member_doc(uid)
-                total = md["manual_spend"]
-                total_manual_spend += total
+        lines = [
+            f"Requirements sweep run by {user_id} at {now_str}.",
+            f"Tracked members: {total_members}",
+            f"Total manual spend logged this month: ${total_manual_spend:.2f}",
+            "",
+            "By model attribution:",
+        ]
 
-                is_owner_flag = md["is_owner"]
-                is_model_flag = md["is_model"]
-                effective_exempt = md["is_exempt"]
+        for slug, label in MODEL_NAME_MAP.items():
+            amt = totals_by_model.get(slug, 0.0)
+            lines.append(f"• {label}: ${amt:.2f}")
 
-                if is_owner_flag:
-                    status = "OWNER (EXEMPT)"
-                elif is_model_flag:
-                    status = "MODEL (EXEMPT)"
-                elif effective_exempt:
-                    status = "EXEMPT"
-                elif total >= REQUIRED_MIN_SPEND:
-                    status = "MET"
-                else:
-                    status = "BEHIND"
+        lines.append(f"• Other / Split: ${totals_by_model.get('other', 0.0):.2f}")
+        lines.append(f"• Untracked: ${totals_by_model.get('untracked', 0.0):.2f}")
 
-                first_name = md.get("first_name") or ""
-                username = md.get("username")
-                display_name = (
-                    first_name.strip()
-                    or (f"@{username}" if username else "Unknown")
-                )
-                if username and first_name:
-                    display_name = f"{first_name} (@{username})"
-
-                line = (
-                    f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})"
-                )
-
-                # Per-model breakdown if present (shows who they spent with)
-                breakdown = md.get("manual_spend_models", {}) or {}
-                breakdown_parts: List[str] = []
-
-                # Roni/Ruby/Rin/Savy
-                for slug, label in MODEL_NAME_MAP.items():
-                    amt = float(breakdown.get(slug, 0.0))
-                    if abs(amt) > 0.0001:
-                        totals_by_model[slug] = totals_by_model.get(slug, 0.0) + amt
-                        breakdown_parts.append(f"{label}: ${amt:.2f}")
-
-                # Other / split
-                other_amt = float(breakdown.get("other", 0.0))
-                if abs(other_amt) > 0.0001:
-                    totals_by_model["other"] = totals_by_model.get("other", 0.0) + other_amt
-                    breakdown_parts.append(f"Other/Split: ${other_amt:.2f}")
-
-                # Untracked
-                untracked_amt = float(breakdown.get("untracked", 0.0))
-                if abs(untracked_amt) > 0.0001:
-                    totals_by_model["untracked"] = totals_by_model.get("untracked", 0.0) + untracked_amt
-                    breakdown_parts.append(f"Untracked: ${untracked_amt:.2f}")
-
-                if breakdown_parts:
-                    line += " [ " + ", ".join(breakdown_parts) + " ]"
-
-                # Chunking
-                if current_len + len(line) + 1 > limit:
-                    await flush_chunk()
-                chunk_lines.append(line)
-                current_len += len(line) + 1
-
-            if chunk_lines:
-                await flush_chunk()
-
-            # Group-level totals summary
-            summary_lines = [
-                "📈 <b>Requirements Totals (Manual Spend)</b>",
-                f"Total manual spend logged this month: <b>${total_manual_spend:.2f}</b>",
-                "",
-                "<b>By model attribution:</b>",
-            ]
-
-            # Roni/Ruby/Rin/Savy first, then Other, Untracked
-            for slug, label in MODEL_NAME_MAP.items():
-                amt = totals_by_model.get(slug, 0.0)
-                if abs(amt) > 0.0001:
-                    summary_lines.append(f"• {label}: ${amt:.2f}")
-
-            other_total = totals_by_model.get("other", 0.0)
-            if abs(other_total) > 0.0001:
-                summary_lines.append(f"• Other / Split: ${other_total:.2f}")
-
-            untracked_total = totals_by_model.get("untracked", 0.0)
-            if abs(untracked_total) > 0.0001:
-                summary_lines.append(f"• Untracked: ${untracked_total:.2f}")
-
-            await _safe_send(client, LOG_GROUP_ID, "\n".join(summary_lines))
-
-        await _log_event(
-            client,
-            f"Full requirements sweep report generated by {user_id} and sent to log channel.",
-        )
+        await _log_event(client, "\n".join(lines))
 
         await cq.answer("Requirements sweep sent to log channel.", show_alert=True)
