@@ -442,17 +442,14 @@ def register(app: Client):
         )
 
     # ────────────── Text router for multi-step flows (lookup / toggle exempt) ──────────────
-    # NOTE: Manual spend is NOW BUTTONS ONLY. We no longer create pending_custom_coll
-    # entries, so this will effectively skip that branch.
 
     @app.on_message(filters.text)
     async def requirements_state_router(client: Client, msg: Message):
         user_id = msg.from_user.id
 
-        # 1) Legacy custom-amount flow in Mongo (no longer used, kept for safety)
+        # Legacy custom-amount flow (now disabled)
         pending = pending_custom_coll.find_one({"owner_id": user_id})
         if pending:
-            # Should never be hit anymore, but keep a friendly message just in case.
             pending_custom_coll.delete_one({"owner_id": user_id})
             await msg.reply_text(
                 "This custom-amount flow has been replaced with buttons. "
@@ -460,7 +457,6 @@ def register(app: Client):
             )
             return
 
-        # 2) Legacy STATE flows (lookup / toggle_exempt)
         state = STATE.get(user_id)
         if not state:
             return
@@ -643,9 +639,6 @@ def register(app: Client):
         return InlineKeyboardMarkup(rows)
 
     def _spend_keyboard(target_id: int) -> InlineKeyboardMarkup:
-        """
-        Plus/minus buttons, clear, confirm, back. Everything via buttons only.
-        """
         return InlineKeyboardMarkup(
             [
                 [
@@ -762,7 +755,6 @@ def register(app: Client):
         doc = _member_doc(target_id)
         current_total = doc["manual_spend"]
 
-        # Start a fresh pending-edit session for this admin
         PENDING_SPEND[user_id] = {
             "target_id": target_id,
             "original_total": current_total,
@@ -785,7 +777,6 @@ def register(app: Client):
 
         state = PENDING_SPEND.get(user_id)
         if not state or state.get("target_id") != target_id:
-            # If somehow state was lost, re-seed from DB
             doc = _member_doc(target_id)
             state = {
                 "target_id": target_id,
@@ -796,7 +787,7 @@ def register(app: Client):
 
         working = state.get("working_total", 0.0) + delta
         if working < 0:
-            working = 0.0  # no negative totals
+            working = 0.0
 
         state["working_total"] = working
 
@@ -853,7 +844,6 @@ def register(app: Client):
             await cq.answer("No changes to save for this member.", show_alert=True)
             return
 
-        # Update main manual_spend total in Mongo
         doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
         members_coll.update_one(
             {"user_id": target_id},
@@ -873,14 +863,12 @@ def register(app: Client):
             f"Manual spend change {delta:+.2f} for {target_id} by {user_id}. New total: ${new_total:.2f}",
         )
 
-        # Store pending attribution (which model got this delta)
         PENDING_ATTRIB[user_id] = {
             "target_id": target_id,
             "delta": delta,
             "new_total": new_total,
         }
 
-        # Build model-name buttons (NO tagging)
         model_buttons: List[List[InlineKeyboardButton]] = []
         row: List[InlineKeyboardButton] = []
         for slug, label in MODEL_NAME_MAP.items():
@@ -898,7 +886,6 @@ def register(app: Client):
         if row:
             model_buttons.append(row)
 
-        # Extra options
         model_buttons.append(
             [
                 InlineKeyboardButton(
@@ -955,7 +942,9 @@ def register(app: Client):
 
         attrib = PENDING_ATTRIB.get(user_id)
         if not attrib or attrib.get("target_id") != target_id:
-            await cq.answer("This edit was already finished or expired.", show_alert=True)
+            await cq.answer(
+                "This edit was already finished or expired.", show_alert=True
+            )
             return
 
         delta = float(attrib.get("delta", 0.0))
@@ -972,7 +961,6 @@ def register(app: Client):
             model_field = f"manual_spend_models.{slug}"
             model_label = MODEL_NAME_MAP.get(slug, slug.capitalize())
 
-        # Only increment if we actually have a field
         members_coll.update_one(
             {"user_id": target_id},
             {"$inc": {model_field: delta}},
@@ -984,7 +972,6 @@ def register(app: Client):
             f"Manual spend attribution {delta:+.2f} for {target_id} marked as {model_label} by {user_id}.",
         )
 
-        # Clean up pending state
         PENDING_ATTRIB.pop(user_id, None)
         PENDING_SPEND.pop(user_id, None)
 
@@ -1205,7 +1192,6 @@ def register(app: Client):
     async def reqpanel_sweep_cb(client: Client, cq: CallbackQuery):
         user_id = cq.from_user.id
 
-        # Only OWNER can actually run this
         if not _is_owner(user_id):
             await cq.answer(
                 "Only Roni (owner) can run the full requirements sweep.",
@@ -1238,12 +1224,11 @@ def register(app: Client):
                 header + "No members found in requirements_members collection.",
             )
         else:
-            # Send header once
             await _safe_send(client, LOG_GROUP_ID, header)
 
             chunk_lines: List[str] = []
             current_len = 0
-            limit = 3500  # stay under Telegram's 4096-char limit
+            limit = 3500
 
             async def flush_chunk():
                 nonlocal chunk_lines, current_len
@@ -1285,7 +1270,6 @@ def register(app: Client):
 
                 line = f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})"
 
-                # Per-model breakdown if present
                 breakdown = md.get("manual_spend_models", {}) or {}
                 breakdown_parts: List[str] = []
                 for slug, label in MODEL_NAME_MAP.items():
@@ -1302,7 +1286,6 @@ def register(app: Client):
                 if breakdown_parts:
                     line += " [ " + ", ".join(breakdown_parts) + " ]"
 
-                # Chunking
                 if current_len + len(line) + 1 > limit:
                     await flush_chunk()
                 chunk_lines.append(line)
@@ -1317,13 +1300,3 @@ def register(app: Client):
         )
 
         await cq.answer("Requirements sweep sent to log channel.", show_alert=True)
-        await _safe_edit_text(
-            cq.message,
-            text=(
-                "📊 <b>Requirements Sweep</b>\n\n"
-                "A full report of all tracked members, their totals, exemptions, and model breakdowns "
-                "has been sent to the log channel."
-            ),
-            reply_markup=_admin_kb(),
-            disable_web_page_preview=True,
-        )
