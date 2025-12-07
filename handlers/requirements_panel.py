@@ -1206,7 +1206,7 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ────────────── Owner-only Requirements Sweep (summary to log channel) ──────────────
+    # ────────────── Owner-only Requirements Sweep (summary + full breakdown) ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:sweep$"))
     async def reqpanel_sweep_cb(client: Client, cq: CallbackQuery):
@@ -1227,7 +1227,7 @@ def register(app: Client):
             )
             return
 
-        docs = list(members_coll.find())
+        docs = list(members_coll.find().sort("user_id", ASCENDING))
         total_members = len(docs)
 
         total_manual_spend = 0.0
@@ -1235,23 +1235,76 @@ def register(app: Client):
         totals_by_model["other"] = 0.0
         totals_by_model["untracked"] = 0.0
 
+        # Per-member lines
+        member_lines: List[str] = []
+
         for d in docs:
-            md = _member_doc(d["user_id"])
-            total_manual_spend += md["manual_spend"]
+            uid = d["user_id"]
+            md = _member_doc(uid)
+            total = md["manual_spend"]
+            total_manual_spend += total
+
+            db_exempt = d.get("is_exempt", False)
+            is_owner = uid == OWNER_ID
+            is_model = uid in MODELS or is_owner
+            effective_exempt = db_exempt or is_model
+
+            if is_owner:
+                status = "OWNER (EXEMPT)"
+            elif is_model:
+                status = "MODEL (EXEMPT)"
+            elif effective_exempt:
+                status = "EXEMPT"
+            elif total >= REQUIRED_MIN_SPEND:
+                status = "MET"
+            else:
+                status = "BEHIND"
+
+            first_name = d.get("first_name") or ""
+            username = d.get("username")
+            display_name = (
+                first_name.strip()
+                or (f"@{username}" if username else "Unknown")
+            )
+            if username and first_name:
+                display_name = f"{first_name} (@{username})"
 
             breakdown = md.get("manual_spend_models", {}) or {}
-            # Roni / Ruby / Rin / Savy
+
+            # Update model totals
             for slug in MODEL_NAME_MAP.keys():
                 amt = float(breakdown.get(slug, 0.0))
                 totals_by_model[slug] = totals_by_model.get(slug, 0.0) + amt
-            # Other + untracked
             totals_by_model["other"] += float(breakdown.get("other", 0.0))
             totals_by_model["untracked"] += float(breakdown.get("untracked", 0.0))
 
+            # Build attribution string for this member
+            attrib_parts: List[str] = []
+            for slug, label in MODEL_NAME_MAP.items():
+                amt = float(breakdown.get(slug, 0.0))
+                if abs(amt) > 0.0001:
+                    attrib_parts.append(f"{label}: ${amt:.2f}")
+            other_amt = float(breakdown.get("other", 0.0))
+            if abs(other_amt) > 0.0001:
+                attrib_parts.append(f"Other/Split: ${other_amt:.2f}")
+            untracked_amt = float(breakdown.get("untracked", 0.0))
+            if abs(untracked_amt) > 0.0001:
+                attrib_parts.append(f"Untracked: ${untracked_amt:.2f}")
+
+            if attrib_parts:
+                attrib_str = " [ " + ", ".join(attrib_parts) + " ]"
+            else:
+                attrib_str = ""
+
+            member_lines.append(
+                f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f}){attrib_str}"
+            )
+
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-        lines = [
-            f"Requirements sweep run by {user_id} at {now_str}.",
+        # Overall header + totals
+        lines: List[str] = [
+            f"Full requirements sweep run by {user_id} at {now_str}.",
             f"Tracked members: {total_members}",
             f"Total manual spend logged this month: ${total_manual_spend:.2f}",
             "",
@@ -1261,9 +1314,11 @@ def register(app: Client):
         for slug, label in MODEL_NAME_MAP.items():
             amt = totals_by_model.get(slug, 0.0)
             lines.append(f"• {label}: ${amt:.2f}")
-
         lines.append(f"• Other / Split: ${totals_by_model.get('other', 0.0):.2f}")
         lines.append(f"• Untracked: ${totals_by_model.get('untracked', 0.0):.2f}")
+        lines.append("")
+        lines.append("Per-member breakdown:")
+        lines.extend(member_lines)
 
         await _log_event(client, "\n".join(lines))
 
