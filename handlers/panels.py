@@ -65,6 +65,8 @@ def _main_keyboard() -> InlineKeyboardMarkup:
                 )
             ],  # <- Requirements Help stays here
             [InlineKeyboardButton("❓ Help", callback_data="help:open")],
+            # NEW: Sanctuary Controls entry (handled by its own handler)
+            [InlineKeyboardButton("🛡 Sanctuary Controls", callback_data="sanctu:open")],
         ]
     )
 
