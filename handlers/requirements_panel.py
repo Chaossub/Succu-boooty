@@ -28,7 +28,9 @@ if not MONGO_URI:
 mongo = MongoClient(MONGO_URI)
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
-pending_custom_coll = db["requirements_pending_custom_spend"]  # legacy, now unused for buttons-only
+pending_custom_coll = db[
+    "requirements_pending_custom_spend"
+]  # legacy, now unused for buttons-only
 
 members_coll.create_index([("user_id", ASCENDING)], unique=True)
 pending_custom_coll.create_index([("owner_id", ASCENDING)], unique=True)
@@ -91,7 +93,7 @@ REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 # Simple in-memory state for some flows
 STATE: Dict[int, Dict[str, Any]] = {}
 
-# NEW: pending manual-spend edits (buttons-only) per admin
+# Pending manual-spend edits (buttons-only) per admin
 PENDING_SPEND: Dict[int, Dict[str, Any]] = {}
 PENDING_ATTRIB: Dict[int, Dict[str, Any]] = {}
 
@@ -131,6 +133,13 @@ async def _safe_send(app: Client, chat_id: int, text: str):
 
 
 async def _log_event(app: Client, text: str):
+    """
+    Lightweight logger to the Sanctuary records channel.
+    Currently used for:
+    - Scans
+    - Full requirements sweeps
+    (Kicks will be logged from the moderation handler using the same pattern.)
+    """
     if LOG_GROUP_ID is None:
         return
     await _safe_send(app, LOG_GROUP_ID, f"[Requirements] {text}")
@@ -441,7 +450,7 @@ def register(app: Client):
             reply_markup=_back_to_admin_kb(),
         )
 
-    # ────────────── Text router for multi-step flows (lookup / toggle exempt) ──────────────
+    # ────────────── Text router (lookup / toggle exempt) ──────────────
 
     @app.on_message(filters.text)
     async def requirements_state_router(client: Client, msg: Message):
@@ -518,6 +527,7 @@ def register(app: Client):
                     },
                     upsert=True,
                 )
+
                 model_note = ""
                 if target_id == OWNER_ID:
                     model_note = " (OWNER – still exempt overall)"
@@ -527,10 +537,6 @@ def register(app: Client):
                 await msg.reply_text(
                     f"User <code>{target_id}</code> is now "
                     f"{'✅ EXEMPT' if new_val else '❌ NOT exempt'} for this month.{model_note}"
-                )
-                await _log_event(
-                    client,
-                    f"Exempt toggled to {new_val} for {target_id} by {user_id}",
                 )
                 STATE.pop(user_id, None)
                 return
@@ -639,6 +645,9 @@ def register(app: Client):
         return InlineKeyboardMarkup(rows)
 
     def _spend_keyboard(target_id: int) -> InlineKeyboardMarkup:
+        """
+        Plus/minus buttons, clear, confirm, back. Everything via buttons only.
+        """
         return InlineKeyboardMarkup(
             [
                 [
@@ -755,6 +764,7 @@ def register(app: Client):
         doc = _member_doc(target_id)
         current_total = doc["manual_spend"]
 
+        # Start a fresh pending-edit session for this admin
         PENDING_SPEND[user_id] = {
             "target_id": target_id,
             "original_total": current_total,
@@ -777,6 +787,7 @@ def register(app: Client):
 
         state = PENDING_SPEND.get(user_id)
         if not state or state.get("target_id") != target_id:
+            # If somehow state was lost, re-seed from DB
             doc = _member_doc(target_id)
             state = {
                 "target_id": target_id,
@@ -787,7 +798,7 @@ def register(app: Client):
 
         working = state.get("working_total", 0.0) + delta
         if working < 0:
-            working = 0.0
+            working = 0.0  # no negative totals
 
         state["working_total"] = working
 
@@ -795,7 +806,12 @@ def register(app: Client):
         await _render_spend_panel(cq.message, target_id, working)
 
     @app.on_callback_query(filters.regex(r"^reqpanel:spend_clear:(\d+)$"))
-    async def reqpanel_spend_clear_cb(_, cq: CallbackQuery):
+    async def reqpanel_spend_clear_cb(client: Client, cq: CallbackQuery):
+        """
+        Clear the member's manual total IMMEDIATELY (no extra confirm).
+        Sets manual_spend to 0, wipes per-model breakdown,
+        and updates the on-screen total to $0.00.
+        """
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
             await cq.answer("Only Roni and models can add spend.", show_alert=True)
@@ -803,21 +819,32 @@ def register(app: Client):
 
         target_id = int(cq.data.split(":")[-1])
 
-        state = PENDING_SPEND.get(user_id)
-        if not state or state.get("target_id") != target_id:
-            doc = _member_doc(target_id)
-            state = {
-                "target_id": target_id,
-                "original_total": doc["manual_spend"],
-                "working_total": 0.0,
-            }
-            PENDING_SPEND[user_id] = state
-        else:
-            state["working_total"] = 0.0
+        doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
 
-        await cq.answer(
-            "Manual total cleared (preview). Don't forget to Confirm.", show_alert=False
+        # Update DB: zero total + clear breakdown
+        members_coll.update_one(
+            {"user_id": target_id},
+            {
+                "$set": {
+                    "manual_spend": 0.0,
+                    "manual_spend_models": {},
+                    "last_updated": datetime.now(timezone.utc),
+                    "first_name": doc.get("first_name", ""),
+                    "username": doc.get("username"),
+                }
+            },
+            upsert=True,
         )
+
+        # Reset pending state for this admin
+        PENDING_SPEND[user_id] = {
+            "target_id": target_id,
+            "original_total": 0.0,
+            "working_total": 0.0,
+        }
+        PENDING_ATTRIB.pop(user_id, None)
+
+        await cq.answer("Manual total cleared and saved.", show_alert=False)
         await _render_spend_panel(cq.message, target_id, 0.0)
 
     @app.on_callback_query(filters.regex(r"^reqpanel:spend_confirm:(\d+)$"))
@@ -844,6 +871,7 @@ def register(app: Client):
             await cq.answer("No changes to save for this member.", show_alert=True)
             return
 
+        # Update main manual_spend total in Mongo
         doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
         members_coll.update_one(
             {"user_id": target_id},
@@ -858,17 +886,14 @@ def register(app: Client):
             upsert=True,
         )
 
-        await _log_event(
-            client,
-            f"Manual spend change {delta:+.2f} for {target_id} by {user_id}. New total: ${new_total:.2f}",
-        )
-
+        # Store pending attribution (which model got this delta)
         PENDING_ATTRIB[user_id] = {
             "target_id": target_id,
             "delta": delta,
             "new_total": new_total,
         }
 
+        # Build model-name buttons (NO tagging)
         model_buttons: List[List[InlineKeyboardButton]] = []
         row: List[InlineKeyboardButton] = []
         for slug, label in MODEL_NAME_MAP.items():
@@ -886,6 +911,7 @@ def register(app: Client):
         if row:
             model_buttons.append(row)
 
+        # Extra options
         model_buttons.append(
             [
                 InlineKeyboardButton(
@@ -961,17 +987,14 @@ def register(app: Client):
             model_field = f"manual_spend_models.{slug}"
             model_label = MODEL_NAME_MAP.get(slug, slug.capitalize())
 
+        # Only increment if we actually have a field
         members_coll.update_one(
             {"user_id": target_id},
             {"$inc": {model_field: delta}},
             upsert=True,
         )
 
-        await _log_event(
-            client,
-            f"Manual spend attribution {delta:+.2f} for {target_id} marked as {model_label} by {user_id}.",
-        )
-
+        # Clean up pending state
         PENDING_ATTRIB.pop(user_id, None)
         PENDING_SPEND.pop(user_id, None)
 
@@ -1072,6 +1095,7 @@ def register(app: Client):
                     "requirements_panel: failed scanning group %s: %s", gid, e
                 )
 
+        # Log scan in records channel
         await _log_event(
             client,
             f"Scan complete by {user_id}: indexed or updated {total_indexed} members.",
@@ -1127,7 +1151,6 @@ def register(app: Client):
             )
             count += 1
 
-        await _log_event(client, f"Reminder sweep sent to {count} members by {user_id}")
         await cq.answer(f"Sent reminders to {count} member(s).", show_alert=True)
         await _safe_edit_text(
             cq.message,
@@ -1175,9 +1198,6 @@ def register(app: Client):
             )
             count += 1
 
-        await _log_event(
-            client, f"Final warnings sent to {count} members by {user_id}"
-        )
         await cq.answer(f"Sent final warnings to {count} member(s).", show_alert=True)
         await _safe_edit_text(
             cq.message,
@@ -1192,6 +1212,7 @@ def register(app: Client):
     async def reqpanel_sweep_cb(client: Client, cq: CallbackQuery):
         user_id = cq.from_user.id
 
+        # Only OWNER can actually run this
         if not _is_owner(user_id):
             await cq.answer(
                 "Only Roni (owner) can run the full requirements sweep.",
@@ -1217,6 +1238,12 @@ def register(app: Client):
             f"Tracked members: <b>{total_members}</b>\n\n"
         )
 
+        # Totals for the whole group
+        total_manual_spend = 0.0
+        totals_by_model: Dict[str, float] = {slug: 0.0 for slug in MODEL_NAME_MAP.keys()}
+        totals_by_model["other"] = 0.0
+        totals_by_model["untracked"] = 0.0
+
         if not docs:
             await _safe_send(
                 client,
@@ -1224,11 +1251,12 @@ def register(app: Client):
                 header + "No members found in requirements_members collection.",
             )
         else:
+            # Send header once
             await _safe_send(client, LOG_GROUP_ID, header)
 
             chunk_lines: List[str] = []
             current_len = 0
-            limit = 3500
+            limit = 3500  # stay under Telegram's 4096-char limit
 
             async def flush_chunk():
                 nonlocal chunk_lines, current_len
@@ -1243,7 +1271,8 @@ def register(app: Client):
                 uid = d["user_id"]
                 md = _member_doc(uid)
                 total = md["manual_spend"]
-                db_exempt = md["db_exempt"]
+                total_manual_spend += total
+
                 is_owner_flag = md["is_owner"]
                 is_model_flag = md["is_model"]
                 effective_exempt = md["is_exempt"]
@@ -1268,24 +1297,37 @@ def register(app: Client):
                 if username and first_name:
                     display_name = f"{first_name} (@{username})"
 
-                line = f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})"
+                line = (
+                    f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})"
+                )
 
+                # Per-model breakdown if present (shows who they spent with)
                 breakdown = md.get("manual_spend_models", {}) or {}
                 breakdown_parts: List[str] = []
+
+                # Roni/Ruby/Rin/Savy
                 for slug, label in MODEL_NAME_MAP.items():
                     amt = float(breakdown.get(slug, 0.0))
                     if abs(amt) > 0.0001:
+                        totals_by_model[slug] = totals_by_model.get(slug, 0.0) + amt
                         breakdown_parts.append(f"{label}: ${amt:.2f}")
+
+                # Other / split
                 other_amt = float(breakdown.get("other", 0.0))
                 if abs(other_amt) > 0.0001:
+                    totals_by_model["other"] = totals_by_model.get("other", 0.0) + other_amt
                     breakdown_parts.append(f"Other/Split: ${other_amt:.2f}")
+
+                # Untracked
                 untracked_amt = float(breakdown.get("untracked", 0.0))
                 if abs(untracked_amt) > 0.0001:
+                    totals_by_model["untracked"] = totals_by_model.get("untracked", 0.0) + untracked_amt
                     breakdown_parts.append(f"Untracked: ${untracked_amt:.2f}")
 
                 if breakdown_parts:
                     line += " [ " + ", ".join(breakdown_parts) + " ]"
 
+                # Chunking
                 if current_len + len(line) + 1 > limit:
                     await flush_chunk()
                 chunk_lines.append(line)
@@ -1293,6 +1335,30 @@ def register(app: Client):
 
             if chunk_lines:
                 await flush_chunk()
+
+            # Group-level totals summary
+            summary_lines = [
+                "📈 <b>Requirements Totals (Manual Spend)</b>",
+                f"Total manual spend logged this month: <b>${total_manual_spend:.2f}</b>",
+                "",
+                "<b>By model attribution:</b>",
+            ]
+
+            # Roni/Ruby/Rin/Savy first, then Other, Untracked
+            for slug, label in MODEL_NAME_MAP.items():
+                amt = totals_by_model.get(slug, 0.0)
+                if abs(amt) > 0.0001:
+                    summary_lines.append(f"• {label}: ${amt:.2f}")
+
+            other_total = totals_by_model.get("other", 0.0)
+            if abs(other_total) > 0.0001:
+                summary_lines.append(f"• Other / Split: ${other_total:.2f}")
+
+            untracked_total = totals_by_model.get("untracked", 0.0)
+            if abs(untracked_total) > 0.0001:
+                summary_lines.append(f"• Untracked: ${untracked_total:.2f}")
+
+            await _safe_send(client, LOG_GROUP_ID, "\n".join(summary_lines))
 
         await _log_event(
             client,
