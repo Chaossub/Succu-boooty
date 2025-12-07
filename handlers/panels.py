@@ -19,38 +19,57 @@ log = logging.getLogger(__name__)
 # These mirror contact_admins.py. Env values should NOT contain '@'.
 RONI_USERNAME = (os.getenv("RONI_USERNAME") or "chaossub283").lstrip("@")
 RUBY_USERNAME = (os.getenv("RUBY_USERNAME") or "RubyRansom").lstrip("@")
-RIN_USERNAME = (os.getenv("RIN_USERNAME") or "peachyrinn").lstrip("@")
+RIN_USERNAME  = (os.getenv("RIN_USERNAME")  or "peachyrinn").lstrip("@")
 SAVY_USERNAME = (os.getenv("SAVY_USERNAME") or "savage_savy").lstrip("@")
 
 # Static model config: slug -> {name, username}
 MODEL_CONFIG: Dict[str, Dict[str, str]] = {
     "roni": {"name": "Roni", "username": RONI_USERNAME},
     "ruby": {"name": "Ruby", "username": RUBY_USERNAME},
-    "rin": {"name": "Rin", "username": RIN_USERNAME},
+    "rin":  {"name": "Rin",  "username": RIN_USERNAME},
     "savy": {"name": "Savy", "username": SAVY_USERNAME},
 }
 
-OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611") or "6964994611"))
+# ────────────── STRIPE TIP LINKS FROM ENV ──────────────
+MODEL_TIP_LINKS: Dict[str, str] = {
+    "roni": (os.getenv("TIP_RONI_LINK") or "").strip(),
+    "ruby": (os.getenv("TIP_RUBY_LINK") or "").strip(),
+    "rin":  (os.getenv("TIP_RIN_LINK") or "").strip(),
+    "savy": (os.getenv("TIP_SAVY_LINK") or "").strip(),
+}
 
 
+# ────────────── KEYBOARDS ──────────────
 def _main_keyboard() -> InlineKeyboardMarkup:
     """
-    Main menu keyboard used by /start and panels:root.
-    Sanctuary Controls button is visible to everyone, but only the owner
-    can actually open/use it (checked in sanctu_controls.py).
+    Canonical main menu for SuccuBot.
+    Anything that says 'Back to Main' should end up using this layout.
     """
-    rows = [
-        [InlineKeyboardButton("📜 Menus", callback_data="panels:menus")],
-        [InlineKeyboardButton("📩 Contact Admins", callback_data="contact_admins:open")],
-        [InlineKeyboardButton("🔍 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
-        [InlineKeyboardButton("❓ Help", callback_data="help:open")],
-        [InlineKeyboardButton("🛡 Sanctuary Controls", callback_data="sanctu:open")],
-    ]
-    return InlineKeyboardMarkup(rows)
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💞 Menus", callback_data="panels:menus")],
+            [
+                InlineKeyboardButton(
+                    "🔐 Contact Admins", callback_data="contact_admins:open"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🍑 Find Our Models Elsewhere",
+                    callback_data="models_elsewhere:open",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📌 Requirements Help", callback_data="reqpanel:home"
+                )
+            ],  # <- Requirements Help stays here
+            [InlineKeyboardButton("❓ Help", callback_data="help:open")],
+        ]
+    )
 
 
 def _models_keyboard() -> InlineKeyboardMarkup:
-    # 2x2 grid of names
     rows = [
         [
             InlineKeyboardButton("Roni", callback_data="panels:model:roni"),
@@ -71,30 +90,39 @@ def _model_keyboard(slug: str) -> InlineKeyboardMarkup:
     if username.startswith("@"):
         username = username[1:]
 
-    # If we have a username, book = URL button; otherwise callback that just alerts.
+    # Book button
     if username:
-        book_button = InlineKeyboardButton(
-            "💌 Book", url=f"https://t.me/{username}"
-        )
+        book_button = InlineKeyboardButton("📩 Book", url=f"https://t.me/{username}")
     else:
         book_button = InlineKeyboardButton(
-            "💌 Book", callback_data="panels:nodm"
+            "📩 Book", callback_data="panels:nodm"
         )
 
-    rows = [
-        [book_button],
-        [InlineKeyboardButton("💸 Tip (coming soon)", callback_data="panels:tip_coming")],
+    # Tip button
+    tip_link = MODEL_TIP_LINKS.get(slug) or ""
+    if tip_link:
+        tip_button = InlineKeyboardButton("💸 Tip", url=tip_link)
+    else:
+        tip_button = InlineKeyboardButton(
+            "💸 Tip (coming soon)", callback_data="panels:tip_coming"
+        )
+
+    return InlineKeyboardMarkup(
         [
-            InlineKeyboardButton("⬅️ Back", callback_data="panels:menus"),
-            InlineKeyboardButton("🏠 Main Menu", callback_data="panels:root"),
-        ],
-    ]
-    return InlineKeyboardMarkup(rows)
+            [book_button],
+            [tip_button],
+            [
+                InlineKeyboardButton("⬅️ Back", callback_data="panels:menus"),
+                InlineKeyboardButton("🏠 Main Menu", callback_data="panels:root"),
+            ],
+        ]
+    )
 
 
+# ────────────── REGISTER HANDLERS ──────────────
 def register(app: Client):
     log.info(
-        "✅ handlers.panels registered (MenuStore=%s, RONI=%s RUBY=%s RIN=%s SAVY=%s)",
+        "✅ handlers.panels registered (static 4-model panel, MenuStore=%s, RONI=%s RUBY=%s RIN=%s SAVY=%s)",
         store.uses_mongo(),
         RONI_USERNAME,
         RUBY_USERNAME,
@@ -105,9 +133,14 @@ def register(app: Client):
     # -------- /start --------
     @app.on_message(filters.command("start"))
     async def start_cmd(_, m: Message):
+        # ⛔ Skip Sanctuary welcome if launching ANY Roni assistant/portal
+        text = (m.text or "").lower()
+        if "roni_" in text:
+            return
+
         kb = _main_keyboard()
         await m.reply_text(
-            "💋 <b>Welcome to SuccuBot</b>\n"
+            "🔥 Welcome to SuccuBot\n"
             "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
             "✨ Use the menu below to navigate!",
             reply_markup=kb,
@@ -120,22 +153,21 @@ def register(app: Client):
         kb = _models_keyboard()
         try:
             await cq.message.edit_text(
-                "Choose a model:",
+                "💕 <b>Choose a model:</b>",
                 reply_markup=kb,
                 disable_web_page_preview=True,
             )
         except Exception:
-            # If Telegram complains "MESSAGE_NOT_MODIFIED", just ignore.
             pass
         await cq.answer()
 
-    # -------- Main/root from callbacks --------
+    # -------- Main/root --------
     @app.on_callback_query(filters.regex(r"^panels:root$"))
     async def panels_root_cb(_, cq: CallbackQuery):
         kb = _main_keyboard()
         try:
             await cq.message.edit_text(
-                "💋 <b>Welcome back to SuccuBot</b>\n"
+                "🔥 Welcome back to SuccuBot\n"
                 "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
                 "✨ Use the menu below to navigate!",
                 reply_markup=kb,
@@ -145,7 +177,25 @@ def register(app: Client):
             pass
         await cq.answer()
 
-    # -------- Model page --------
+    # -------- Alias: portal:home → same main menu --------
+    # This makes ANY "Back to Main" that uses portal:home show the SAME UI
+    # as panels:root, including 📌 Requirements Help.
+    @app.on_callback_query(filters.regex(r"^portal:home$"))
+    async def portal_home_alias_cb(_, cq: CallbackQuery):
+        kb = _main_keyboard()
+        try:
+            await cq.message.edit_text(
+                "🔥 Welcome back to SuccuBot\n"
+                "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+                "✨ Use the menu below to navigate!",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+        await cq.answer()
+
+    # -------- Single model page --------
     @app.on_callback_query(filters.regex(r"^panels:model:(.+)$"))
     async def model_page_cb(_, cq: CallbackQuery):
         slug = cq.data.split(":", 2)[-1]
@@ -156,14 +206,15 @@ def register(app: Client):
 
         name = cfg["name"]
         menu_text = store.get_menu(name)
+
         if menu_text:
-            body = f"{name} — Menu\n\n{menu_text}"
+            body = f"<b>{name} — Menu</b>\n\n{menu_text}"
         else:
             body = (
-                f"{name} — Menu\n\n"
-                f"No saved menu yet.\n"
-                f"Ask an admin to run:\n"
-                f"`/createmenu {name} <text...>`"
+                f"<b>{name} — Menu</b>\n\n"
+                "No saved menu yet.\n"
+                "Ask an admin to run:\n"
+                f"<code>/createmenu {name} &lt;text...&gt;</code>"
             )
 
         kb = _model_keyboard(slug)
@@ -177,7 +228,7 @@ def register(app: Client):
             pass
         await cq.answer()
 
-    # -------- "Tip coming soon" alert --------
+    # -------- Tip coming soon --------
     @app.on_callback_query(filters.regex(r"^panels:tip_coming$"))
     async def tip_coming_cb(_, cq: CallbackQuery):
         await cq.answer("💸 Tip support coming soon!", show_alert=True)
@@ -186,6 +237,6 @@ def register(app: Client):
     @app.on_callback_query(filters.regex(r"^panels:nodm$"))
     async def nodm_cb(_, cq: CallbackQuery):
         await cq.answer(
-            "No DM link set for this model yet.\nPlease contact an admin.",
+            "No DM link set for this model yet. Please contact an admin.",
             show_alert=True,
         )
