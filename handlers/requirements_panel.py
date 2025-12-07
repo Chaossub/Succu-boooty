@@ -303,6 +303,12 @@ def _admin_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    "🧹 Clear All Manual Totals",
+                    callback_data="reqpanel:clear_all",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     "⬅ Back to Requirements Menu", callback_data="reqpanel:home"
                 ),
             ],
@@ -350,7 +356,7 @@ def register(app: Client):
             text_lines.extend(
                 [
                     "• <b>Admin / Model Controls</b> – open the owner/models tools panel "
-                    "(lists, manual credit, exemptions, reminders).",
+                    "(lists, manual credit, exemptions, reminders, sweeps).",
                 ]
             )
         text_lines.append("")
@@ -393,7 +399,8 @@ def register(app: Client):
             "▪️ Scan groups into the tracker\n"
             "▪️ Send reminder DMs to members who are behind\n"
             "▪️ Send final-warning DMs to those still not meeting minimums\n"
-            "▪️ Run a full requirements sweep and send a summary to the log channel (owner only)\n\n"
+            "▪️ Run a full requirements sweep and send a summary to the log channel (owner only)\n"
+            "▪️ Clear all manual totals at the start of a new month (owner only)\n\n"
             "All changes here affect this month’s requirement checks and future sweeps/reminders.\n\n"
             "<i>Only you and approved model admins see this panel. Members just see their own status.</i>"
         )
@@ -1339,3 +1346,53 @@ def register(app: Client):
         )
 
         await cq.answer("Requirements sweep sent to log channel.", show_alert=True)
+
+    # ────────────── Owner-only CLEAR ALL ──────────────
+
+    @app.on_callback_query(filters.regex("^reqpanel:clear_all$"))
+    async def reqpanel_clear_all_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+
+        if not _is_owner(user_id):
+            await cq.answer(
+                "Only Roni (owner) can clear ALL manual totals.",
+                show_alert=True,
+            )
+            return
+
+        # Nuke all manual totals + per-model breakdown + reminder flags
+        now = datetime.now(timezone.utc)
+        res = members_coll.update_many(
+            {},
+            {
+                "$set": {
+                    "manual_spend": 0.0,
+                    "manual_spend_models": {},
+                    "last_updated": now,
+                    "reminder_sent": False,
+                    "final_warning_sent": False,
+                }
+            },
+        )
+
+        await _log_event(
+            client,
+            f"All manual totals cleared by {user_id} for new requirements cycle "
+            f"(affected {res.modified_count} member docs).",
+        )
+
+        await cq.answer(
+            f"Cleared manual totals for {res.modified_count} member(s).",
+            show_alert=True,
+        )
+        await _safe_edit_text(
+            cq.message,
+            text=(
+                f"🧹 <b>All Manual Totals Cleared</b>\n\n"
+                f"Manual spend, per-model breakdowns, and reminder flags have been reset "
+                f"for <b>{res.modified_count}</b> member(s).\n\n"
+                "Use this at the start of a new month after you’ve finished your kick sweep."
+            ),
+            reply_markup=_admin_kb(),
+            disable_web_page_preview=True,
+        )
