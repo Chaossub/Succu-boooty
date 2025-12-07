@@ -28,9 +28,7 @@ if not MONGO_URI:
 mongo = MongoClient(MONGO_URI)
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
-pending_custom_coll = db[
-    "requirements_pending_custom_spend"
-]  # legacy, now unused for buttons-only
+pending_custom_coll = db["requirements_pending_custom_spend"]  # legacy, now unused
 
 members_coll.create_index([("user_id", ASCENDING)], unique=True)
 pending_custom_coll.create_index([("owner_id", ASCENDING)], unique=True)
@@ -135,11 +133,7 @@ async def _safe_send(app: Client, chat_id: int, text: str):
 async def _log_event(app: Client, text: str):
     """
     Lightweight logger to the Sanctuary records channel.
-    Used for:
-    - Scans
-    - Sweeps
-    - Manual spend changes (from this or other handlers)
-    - Kicks (from moderation, once wired)
+    Used for: scans, sweeps, kicks, manual spend changes, etc.
     """
     if LOG_GROUP_ID is None:
         return
@@ -809,9 +803,9 @@ def register(app: Client):
     @app.on_callback_query(filters.regex(r"^reqpanel:spend_clear:(\d+)$"))
     async def reqpanel_spend_clear_cb(client: Client, cq: CallbackQuery):
         """
-        Clear the member's manual total IMMEDIATELY (no extra confirm).
-        Sets manual_spend to 0, wipes per-model breakdown,
-        and updates the on-screen total to $0.00.
+        Clear the member's manual total IMMEDIATELY.
+        - Sets manual_spend to 0
+        - Clears per-model breakdown
         """
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
@@ -822,7 +816,6 @@ def register(app: Client):
 
         doc = members_coll.find_one({"user_id": target_id}) or {"user_id": target_id}
 
-        # Update DB: zero total + clear breakdown
         members_coll.update_one(
             {"user_id": target_id},
             {
@@ -837,7 +830,7 @@ def register(app: Client):
             upsert=True,
         )
 
-        # Reset pending state for this admin
+        # Reset pending state
         PENDING_SPEND[user_id] = {
             "target_id": target_id,
             "original_total": 0.0,
@@ -988,7 +981,6 @@ def register(app: Client):
             model_field = f"manual_spend_models.{slug}"
             model_label = MODEL_NAME_MAP.get(slug, slug.capitalize())
 
-        # Only increment if we actually have a field
         members_coll.update_one(
             {"user_id": target_id},
             {"$inc": {model_field: delta}},
@@ -1268,26 +1260,32 @@ def register(app: Client):
             if username and first_name:
                 display_name = f"{first_name} (@{username})"
 
-            breakdown = md.get("manual_spend_models", {}) or {}
-
-            # Update model totals
-            for slug in MODEL_NAME_MAP.keys():
-                amt = float(breakdown.get(slug, 0.0))
-                totals_by_model[slug] = totals_by_model.get(slug, 0.0) + amt
-            totals_by_model["other"] += float(breakdown.get("other", 0.0))
-            totals_by_model["untracked"] += float(breakdown.get("untracked", 0.0))
-
+            # Only count attribution if this member actually has a positive manual total
             attrib_parts: List[str] = []
-            for slug, label in MODEL_NAME_MAP.items():
-                amt = float(breakdown.get(slug, 0.0))
-                if abs(amt) > 0.0001:
-                    attrib_parts.append(f"{label}: ${amt:.2f}")
-            other_amt = float(breakdown.get("other", 0.0))
-            if abs(other_amt) > 0.0001:
-                attrib_parts.append(f"Other/Split: ${other_amt:.2f}")
-            untracked_amt = float(breakdown.get("untracked", 0.0))
-            if abs(untracked_amt) > 0.0001:
-                attrib_parts.append(f"Untracked: ${untracked_amt:.2f}")
+            breakdown: Dict[str, float] = {}
+
+            if total > 0.0001:
+                breakdown = md.get("manual_spend_models", {}) or {}
+
+                # Update model totals
+                for slug in MODEL_NAME_MAP.keys():
+                    amt = float(breakdown.get(slug, 0.0))
+                    totals_by_model[slug] = totals_by_model.get(slug, 0.0) + amt
+                totals_by_model["other"] += float(breakdown.get("other", 0.0))
+                totals_by_model["untracked"] += float(
+                    breakdown.get("untracked", 0.0)
+                )
+
+                for slug, label in MODEL_NAME_MAP.items():
+                    amt = float(breakdown.get(slug, 0.0))
+                    if abs(amt) > 0.0001:
+                        attrib_parts.append(f"{label}: ${amt:.2f}")
+                other_amt = float(breakdown.get("other", 0.0))
+                if abs(other_amt) > 0.0001:
+                    attrib_parts.append(f"Other/Split: ${other_amt:.2f}")
+                untracked_amt = float(breakdown.get("untracked", 0.0))
+                if abs(untracked_amt) > 0.0001:
+                    attrib_parts.append(f"Untracked: ${untracked_amt:.2f}")
 
             attrib_str = ""
             if attrib_parts:
