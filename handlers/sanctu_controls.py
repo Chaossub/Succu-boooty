@@ -265,6 +265,50 @@ def register(app: Client):
         )
         await m.reply_text(text, reply_markup=_sanctu_root_kb())
 
+    # Backup command: /blacklist_add <id or @username>
+    @app.on_message(filters.private & filters.user(OWNER_ID) & filters.command("blacklist_add"))
+    async def cmd_blacklist_add_direct(client: Client, m: Message):
+        parts = (m.text or "").split(maxsplit=1)
+        if len(parts) < 2:
+            await m.reply_text("Usage: <code>/blacklist_add @username</code> or <code>/blacklist_add 123456789</code>")
+            return
+
+        target_raw = parts[1].strip()
+        target_id: Optional[int] = None
+        target_username: Optional[str] = None
+
+        try:
+            if target_raw.startswith("@"):
+                target_username = target_raw[1:]
+                user = await client.get_users(target_raw)
+                target_id = user.id
+                if not target_username:
+                    target_username = user.username
+            else:
+                target_id = int(target_raw)
+        except Exception as e:
+            log.warning("sanctu_controls: /blacklist_add failed resolving %s: %s", target_raw, e)
+            await m.reply_text("I couldn't resolve that user. Make sure the username/ID is correct.")
+            return
+
+        if not target_id:
+            await m.reply_text("I couldn’t figure out who you meant.")
+            return
+
+        doc = {
+            "user_id": target_id,
+            "username": target_username,
+            "reason": "Manual blacklist (command)",
+            "created_at": datetime.now(timezone.utc),
+        }
+        blacklist_coll.update_one({"user_id": target_id}, {"$set": doc}, upsert=True)
+
+        await m.reply_text(
+            f"✅ User <code>{target_id}</code> has been added to the blacklist.\n"
+            f"They will be blocked from using SuccuBot and any group that contains them will be left automatically."
+        )
+        await _log_event(client, f"User `{target_id}` added to blacklist via /blacklist_add.")
+
     # open from main-menu button
     @app.on_callback_query(filters.regex(r"^sanctu:open$"))
     async def sanctu_open_cb(client: Client, cq: CallbackQuery):
@@ -310,7 +354,7 @@ def register(app: Client):
         )
         await cq.answer()
 
-    # Start add flow
+    # Start add flow (button)
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:add$"))
     async def sanctu_blacklist_add_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
@@ -331,68 +375,77 @@ def register(app: Client):
         await cq.answer()
 
     # This MUST run before other private handlers so our add flow can't be swallowed.
-    @app.on_message(filters.private & filters.user(OWNER_ID), group=-1)
+    @app.on_message(filters.private, group=-1)
     async def sanctu_private_msg_handler(client: Client, m: Message):
-        user_id = m.from_user.id if m.from_user else None
-        if user_id is None:
-            return
+        try:
+            if not m.from_user:
+                return
+            user_id = m.from_user.id
+            if not _is_owner(user_id):
+                return
 
-        state = PENDING.get(user_id)
-        if not state or state.get("mode") != "await_blacklist_target":
-            return
+            state = PENDING.get(user_id)
+            if not state or state.get("mode") != "await_blacklist_target":
+                return
 
-        target_id: Optional[int] = None
-        target_username: Optional[str] = None
+            target_id: Optional[int] = None
+            target_username: Optional[str] = None
 
-        if m.forward_from:
-            # Forward with user info visible
-            target_id = m.forward_from.id
-            target_username = m.forward_from.username
-        else:
-            text = (m.text or "").strip()
-            if text:
-                if text.startswith("@"):
-                    # @username
-                    target_username = text[1:]
-                    try:
-                        user = await client.get_users(text)
-                        target_id = user.id
-                        if not target_username:
-                            target_username = user.username
-                    except Exception as e:
-                        log.warning("sanctu_controls: failed to resolve username %s: %s", text, e)
-                else:
-                    # numeric ID
-                    try:
-                        target_id = int(text)
-                    except ValueError:
-                        target_id = None
+            if m.forward_from:
+                # Forward with user info visible
+                target_id = m.forward_from.id
+                target_username = m.forward_from.username
+            else:
+                text = (m.text or "").strip()
+                if text:
+                    if text.startswith("@"):
+                        # @username
+                        target_username = text[1:]
+                        try:
+                            user = await client.get_users(text)
+                            target_id = user.id
+                            if not target_username:
+                                target_username = user.username
+                        except Exception as e:
+                            log.warning("sanctu_controls: failed to resolve username %s: %s", text, e)
+                    else:
+                        # numeric ID
+                        try:
+                            target_id = int(text)
+                        except ValueError:
+                            target_id = None
 
-        if not target_id:
+            if not target_id:
+                await m.reply_text(
+                    "I couldn’t figure out who you meant.\n"
+                    "Please forward a message from them, or send their @username or numeric ID.",
+                )
+                return
+
+            doc = {
+                "user_id": target_id,
+                "username": target_username,
+                "reason": "Manual blacklist",
+                "created_at": datetime.now(timezone.utc),
+            }
+            blacklist_coll.update_one({"user_id": target_id}, {"$set": doc}, upsert=True)
+
+            PENDING.pop(user_id, None)
+
             await m.reply_text(
-                "I couldn’t figure out who you meant.\n"
-                "Please forward a message from them, or send their @username or numeric ID.",
+                f"✅ User <code>{target_id}</code> has been added to the blacklist.\n"
+                f"They will be blocked from using SuccuBot and any group that contains them will be left automatically."
             )
-            return
-
-        doc = {
-            "user_id": target_id,
-            "username": target_username,
-            "reason": "Manual blacklist",
-            "created_at": datetime.now(timezone.utc),
-        }
-        blacklist_coll.update_one({"user_id": target_id}, {"$set": doc}, upsert=True)
-
-        PENDING.pop(user_id, None)
-
-        await m.reply_text(
-            f"✅ User <code>{target_id}</code> has been added to the blacklist.\n"
-            f"They will be blocked from using SuccuBot and any group that contains them will be left automatically."
-        )
-        await _log_event(
-            client,
-            f"User `{target_id}` added to blacklist by owner.",
-        )
+            await _log_event(
+                client,
+                f"User `{target_id}` added to blacklist by owner.",
+            )
+        except Exception as e:
+            log.exception("sanctu_controls: error in private msg handler: %s", e)
+            try:
+                await m.reply_text("Something went wrong while trying to add that user. Check logs.")
+            except Exception:
+                pass
 
     # Cancel add
     @app.on_callback_query(filters.regex(r"^sanctu:cancel$"))
