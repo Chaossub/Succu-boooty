@@ -3,7 +3,7 @@ import logging
 import os
 import random
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from typing import Optional, List
 
 from pymongo import MongoClient, ASCENDING
 from pyrogram import Client, filters
@@ -102,7 +102,7 @@ async def _log_event(client: Client, text: str):
     await _safe_send(client, LOG_GROUP_ID, f"[Sanctuary] {text}")
 
 
-def _blacklist_doc(user_id: int) -> Optional[Dict[str, Any]]:
+def _blacklist_doc(user_id: int):
     return blacklist_coll.find_one({"user_id": user_id})
 
 
@@ -110,13 +110,13 @@ def _is_blacklisted(user_id: int) -> bool:
     return _blacklist_doc(user_id) is not None
 
 
-def _format_user_line(doc: Dict[str, Any]) -> str:
+def _format_user_line(doc) -> str:
     uid = doc["user_id"]
     username = doc.get("username")
     reason = doc.get("reason") or "No reason stored"
     ts = doc.get("created_at")
     if ts and isinstance(ts, datetime):
-        ts_str = ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        ts_str = ts.astimezone().strftime("%Y-%m-%d %H:%M")
     else:
         ts_str = "unknown"
     name_part = f"@{username}" if username else "(no username)"
@@ -124,7 +124,6 @@ def _format_user_line(doc: Dict[str, Any]) -> str:
 
 
 def _track_chat(chat: Chat):
-    """Store chat in Mongo so Safety Sweep knows about it."""
     if chat.type not in ("group", "supergroup"):
         return
     try:
@@ -135,7 +134,7 @@ def _track_chat(chat: Chat):
                     "chat_id": chat.id,
                     "title": chat.title or "",
                     "type": chat.type,
-                    "updated_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(),
                 }
             },
             upsert=True,
@@ -183,7 +182,6 @@ async def _leave_group_for_blacklist(
 
 
 async def _scan_chat_for_blacklisted(client: Client, chat: Chat) -> None:
-    """Checks whether ANY blacklisted user is present in the given chat."""
     docs = list(blacklist_coll.find({}, {"user_id": 1}))
     if not docs:
         return
@@ -228,7 +226,6 @@ def _blacklist_menu_kb() -> InlineKeyboardMarkup:
 
 
 def _main_menu_kb() -> InlineKeyboardMarkup:
-    """Clone of your main SuccuBot menu so Close can go back there."""
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("💞 Menus", callback_data="panels:menus")],
@@ -262,34 +259,39 @@ def register(app: Client):
         )
         await m.reply_text(text, reply_markup=_sanctu_root_kb())
 
-    # Backup command: /blacklist_add <id or @username>, can be run anywhere you are
-    @app.on_message(filters.user(OWNER_ID) & filters.command("blacklist_add"))
+    # HIGH PRIORITY: /blacklist_add (runs before anything else)
+    @app.on_message(filters.user(OWNER_ID) & filters.regex(r"^/blacklist_add\b"), group=-1)
     async def cmd_blacklist_add(client: Client, m: Message):
-        # if replying to a message with a visible from_user, use that
+        text = (m.text or "").strip()
+        parts = text.split(maxsplit=1)
+
         target_id: Optional[int] = None
         target_username: Optional[str] = None
 
+        # If replying to someone with visible from_user, prefer that
         if m.reply_to_message and m.reply_to_message.from_user:
-            target_id = m.reply_to_message.from_user.id
-            target_username = m.reply_to_message.from_user.username
+            u = m.reply_to_message.from_user
+            target_id = u.id
+            target_username = u.username
         else:
-            parts = (m.text or "").split(maxsplit=1)
             if len(parts) < 2:
                 await m.reply_text(
                     "Usage:\n"
                     "<code>/blacklist_add @username</code>\n"
                     "or\n"
-                    "<code>/blacklist_add 123456789</code>"
+                    "<code>/blacklist_add 123456789</code>\n\n"
+                    "You can also reply to a message and just use <code>/blacklist_add</code>."
                 )
                 return
+
             raw = parts[1].strip()
             try:
                 if raw.startswith("@"):
                     target_username = raw[1:]
-                    user = await client.get_users(raw)
-                    target_id = user.id
+                    u = await client.get_users(raw)
+                    target_id = u.id
                     if not target_username:
-                        target_username = user.username
+                        target_username = u.username
                 else:
                     target_id = int(raw)
             except Exception as e:
@@ -305,7 +307,7 @@ def register(app: Client):
             "user_id": target_id,
             "username": target_username,
             "reason": "Manual blacklist (command)",
-            "created_at": datetime.now(timezone.utc),
+            "created_at": datetime.now(),
         }
         blacklist_coll.update_one({"user_id": target_id}, {"$set": doc}, upsert=True)
 
@@ -360,7 +362,7 @@ def register(app: Client):
         )
         await cq.answer()
 
-    # “Add user” button: just explain the command now
+    # “Add user” button: explain the command
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:add$"))
     async def sanctu_blacklist_add_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
@@ -369,12 +371,12 @@ def register(app: Client):
 
         text = (
             "➕ <b>Add User to Blacklist</b>\n\n"
-            "Run one of these in this chat with SuccuBot:\n\n"
+            "Run one of these commands:\n\n"
             "• <code>/blacklist_add @username</code>\n"
             "• <code>/blacklist_add 123456789</code>\n\n"
-            "You can also reply to a message and run:\n"
+            "Or reply to a message from them with:\n"
             "• <code>/blacklist_add</code>\n\n"
-            "Once added, they will be blocked from using SuccuBot and any group that contains them will be left automatically."
+            "Once added, they’ll be blocked from using SuccuBot and any group that contains them will be left automatically."
         )
         await cq.message.edit_text(text, reply_markup=_blacklist_menu_kb())
         await cq.answer()
@@ -465,7 +467,7 @@ def register(app: Client):
             client, f"User `{uid}` removed from blacklist by owner."
         )
 
-    # Safety Sweep (uses tracked chats, not get_dialogs)
+    # Safety Sweep
     @app.on_callback_query(filters.regex(r"^sanctu:force_scan$"))
     async def sanctu_force_scan_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
@@ -490,7 +492,7 @@ def register(app: Client):
             reply_markup=_sanctu_root_kb(),
         )
 
-    # Track membership changes + auto-leave on blacklisted join
+    # Track membership changes + auto-leave
     @app.on_chat_member_updated()
     async def sanctu_chat_member_updated(client: Client, cmu: ChatMemberUpdated):
         chat = cmu.chat
@@ -523,7 +525,7 @@ def register(app: Client):
             trigger_reason="Blacklisted user joined or became active in this group.",
         )
 
-    # Track groups whenever the bot sees group messages (for sweeps)
+    # Track groups whenever the bot sees group messages
     @app.on_message(filters.group)
     async def sanctu_track_groups_msg(client: Client, m: Message):
         if m.chat:
