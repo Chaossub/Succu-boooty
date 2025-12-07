@@ -48,6 +48,7 @@ MODEL_NAME_MAP: Dict[str, str] = {
     "savy": SAVY_NAME,
 }
 
+
 def _parse_id_list(val: str | None) -> Set[int]:
     if not val:
         return set()
@@ -292,6 +293,12 @@ def _admin_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(
+                    "📊 Run Requirements Sweep",
+                    callback_data="reqpanel:sweep",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
                     "⬅ Back to Requirements Menu", callback_data="reqpanel:home"
                 ),
             ],
@@ -381,7 +388,8 @@ def register(app: Client):
             "▪️ Exempt / un-exempt members\n"
             "▪️ Scan groups into the tracker\n"
             "▪️ Send reminder DMs to members who are behind\n"
-            "▪️ Send final-warning DMs to those still not meeting minimums\n\n"
+            "▪️ Send final-warning DMs to those still not meeting minimums\n"
+            "▪️ Run a full requirements sweep and send a report to the log channel (owner only)\n\n"
             "All changes here affect this month’s requirement checks and future sweeps/reminders.\n\n"
             "<i>Only you and approved model admins see this panel. Members just see their own status.</i>"
         )
@@ -816,7 +824,9 @@ def register(app: Client):
         else:
             state["working_total"] = 0.0
 
-        await cq.answer("Manual total cleared (preview). Don't forget to Confirm.", show_alert=False)
+        await cq.answer(
+            "Manual total cleared (preview). Don't forget to Confirm.", show_alert=False
+        )
         await _render_spend_panel(cq.message, target_id, 0.0)
 
     @app.on_callback_query(filters.regex(r"^reqpanel:spend_confirm:(\d+)$"))
@@ -829,7 +839,10 @@ def register(app: Client):
         target_id = int(cq.data.split(":")[-1])
         state = PENDING_SPEND.get(user_id)
         if not state or state.get("target_id") != target_id:
-            await cq.answer("No pending changes for this member. Use the +/- buttons first.", show_alert=True)
+            await cq.answer(
+                "No pending changes for this member. Use the +/- buttons first.",
+                show_alert=True,
+            )
             return
 
         original = float(state.get("original_total", 0.0))
@@ -1182,6 +1195,135 @@ def register(app: Client):
         await _safe_edit_text(
             cq.message,
             text=f"⚠️ Final-warning sweep complete.\nSent to {count} member(s) still behind.",
+            reply_markup=_admin_kb(),
+            disable_web_page_preview=True,
+        )
+
+    # ────────────── Owner-only Requirements Sweep (full report to log channel) ──────────────
+
+    @app.on_callback_query(filters.regex("^reqpanel:sweep$"))
+    async def reqpanel_sweep_cb(client: Client, cq: CallbackQuery):
+        user_id = cq.from_user.id
+
+        # Only OWNER can actually run this
+        if not _is_owner(user_id):
+            await cq.answer(
+                "Only Roni (owner) can run the full requirements sweep.",
+                show_alert=True,
+            )
+            return
+
+        if LOG_GROUP_ID is None:
+            await cq.answer(
+                "No log group configured. Set SANCTU_LOG_GROUP_ID or SANCTUARY_LOG_CHANNEL in env.",
+                show_alert=True,
+            )
+            return
+
+        docs = list(members_coll.find().sort("user_id", ASCENDING))
+        total_members = len(docs)
+
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        header = (
+            f"📊 <b>Requirements Sweep Report</b>\n\n"
+            f"Generated: <code>{now_str}</code>\n"
+            f"Minimum required: <b>${REQUIRED_MIN_SPEND:.2f}</b>\n"
+            f"Tracked members: <b>{total_members}</b>\n\n"
+        )
+
+        if not docs:
+            await _safe_send(
+                client,
+                LOG_GROUP_ID,
+                header + "No members found in requirements_members collection.",
+            )
+        else:
+            # Send header once
+            await _safe_send(client, LOG_GROUP_ID, header)
+
+            chunk_lines: List[str] = []
+            current_len = 0
+            limit = 3500  # stay under Telegram's 4096-char limit
+
+            async def flush_chunk():
+                nonlocal chunk_lines, current_len
+                if not chunk_lines:
+                    return
+                text = "\n".join(chunk_lines)
+                await _safe_send(client, LOG_GROUP_ID, text)
+                chunk_lines = []
+                current_len = 0
+
+            for d in docs:
+                uid = d["user_id"]
+                md = _member_doc(uid)
+                total = md["manual_spend"]
+                db_exempt = md["db_exempt"]
+                is_owner_flag = md["is_owner"]
+                is_model_flag = md["is_model"]
+                effective_exempt = md["is_exempt"]
+
+                if is_owner_flag:
+                    status = "OWNER (EXEMPT)"
+                elif is_model_flag:
+                    status = "MODEL (EXEMPT)"
+                elif effective_exempt:
+                    status = "EXEMPT"
+                elif total >= REQUIRED_MIN_SPEND:
+                    status = "MET"
+                else:
+                    status = "BEHIND"
+
+                first_name = md.get("first_name") or ""
+                username = md.get("username")
+                display_name = (
+                    first_name.strip()
+                    or (f"@{username}" if username else "Unknown")
+                )
+                if username and first_name:
+                    display_name = f"{first_name} (@{username})"
+
+                line = f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})"
+
+                # Per-model breakdown if present
+                breakdown = md.get("manual_spend_models", {}) or {}
+                breakdown_parts: List[str] = []
+                for slug, label in MODEL_NAME_MAP.items():
+                    amt = float(breakdown.get(slug, 0.0))
+                    if abs(amt) > 0.0001:
+                        breakdown_parts.append(f"{label}: ${amt:.2f}")
+                other_amt = float(breakdown.get("other", 0.0))
+                if abs(other_amt) > 0.0001:
+                    breakdown_parts.append(f"Other/Split: ${other_amt:.2f}")
+                untracked_amt = float(breakdown.get("untracked", 0.0))
+                if abs(untracked_amt) > 0.0001:
+                    breakdown_parts.append(f"Untracked: ${untracked_amt:.2f}")
+
+                if breakdown_parts:
+                    line += " [ " + ", ".join(breakdown_parts) + " ]"
+
+                # Chunking
+                if current_len + len(line) + 1 > limit:
+                    await flush_chunk()
+                chunk_lines.append(line)
+                current_len += len(line) + 1
+
+            if chunk_lines:
+                await flush_chunk()
+
+        await _log_event(
+            client,
+            f"Full requirements sweep report generated by {user_id} and sent to log channel.",
+        )
+
+        await cq.answer("Requirements sweep sent to log channel.", show_alert=True)
+        await _safe_edit_text(
+            cq.message,
+            text=(
+                "📊 <b>Requirements Sweep</b>\n\n"
+                "A full report of all tracked members, their totals, exemptions, and model breakdowns "
+                "has been sent to the log channel."
+            ),
             reply_markup=_admin_kb(),
             disable_web_page_preview=True,
         )
