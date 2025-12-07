@@ -26,8 +26,14 @@ if not MONGO_URI:
 
 mongo = MongoClient(MONGO_URI)
 db = mongo["Succubot"]
+
+# blacklisted users
 blacklist_coll = db["blacklist_users"]
 blacklist_coll.create_index([("user_id", ASCENDING)], unique=True)
+
+# groups the bot has seen (for Safety Sweep)
+chats_coll = db["sanctu_known_chats"]
+chats_coll.create_index([("chat_id", ASCENDING)], unique=True)
 
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611") or "6964994611"))
 
@@ -41,7 +47,7 @@ for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
         except ValueError:
             pass
 
-# In-memory pending state for multi-step flows (Roni-only)
+# pending state for multi-step flows
 PENDING: Dict[int, Dict[str, Any]] = {}
 
 # ────────────── Leave messages (randomized) ──────────────
@@ -120,6 +126,27 @@ def _format_user_line(doc: Dict[str, Any]) -> str:
     return f"- {name_part} (`{uid}`) — {reason} (added {ts_str})"
 
 
+def _track_chat(chat: Chat):
+    """Store chat in Mongo so Safety Sweep knows about it."""
+    if chat.type not in ("group", "supergroup"):
+        return
+    try:
+        chats_coll.update_one(
+            {"chat_id": chat.id},
+            {
+                "$set": {
+                    "chat_id": chat.id,
+                    "title": chat.title or "",
+                    "type": chat.type,
+                    "updated_at": datetime.now(timezone.utc),
+                }
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        log.warning("sanctu_controls: failed to track chat %s: %s", chat.id, e)
+
+
 async def _leave_group_for_blacklist(
     client: Client,
     chat: Chat,
@@ -159,6 +186,7 @@ async def _leave_group_for_blacklist(
 
 
 async def _scan_chat_for_blacklisted(client: Client, chat: Chat) -> None:
+    """Checks whether ANY blacklisted user is present in the given chat."""
     docs = list(blacklist_coll.find({}, {"user_id": 1}))
     if not docs:
         return
@@ -179,7 +207,7 @@ async def _scan_chat_for_blacklisted(client: Client, chat: Chat) -> None:
             return
 
 
-# ────────────── UI keyboards ──────────────
+# ────────────── Keyboards ──────────────
 
 def _sanctu_root_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -202,11 +230,26 @@ def _blacklist_menu_kb() -> InlineKeyboardMarkup:
     )
 
 
+def _main_menu_kb() -> InlineKeyboardMarkup:
+    """Clone of your main SuccuBot menu so Close can go back there."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💞 Menus", callback_data="panels:menus")],
+            [InlineKeyboardButton("🔐 Contact Admins", callback_data="contact_admins:open")],
+            [InlineKeyboardButton("🍑 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
+            [InlineKeyboardButton("📌 Requirements Help", callback_data="reqpanel:home")],
+            [InlineKeyboardButton("❓ Help", callback_data="help:open")],
+            [InlineKeyboardButton("🛡 Sanctuary Controls", callback_data="sanctu:open")],
+        ]
+    )
+
+
+# ────────────── Register ──────────────
+
 def register(app: Client):
-    log.info("✅ handlers.sanctu_controls registered (DM-only Sanctuary Controls + blacklist + auto-leave)")
+    log.info("✅ handlers.sanctu_controls registered (Sanctuary Controls + blacklist + auto-leave)")
 
-    # ────────────── /sanctu command in DM (entry point) ──────────────
-
+    # /sanctu in DM
     @app.on_message(filters.private & filters.command("sanctu"))
     async def sanctu_cmd(client: Client, m: Message):
         if not _is_owner(m.from_user.id):
@@ -218,11 +261,11 @@ def register(app: Client):
             "Roni-only control panel for safety + blacklist.\n\n"
             "• Blacklist users so they can’t touch your bot\n"
             "• Auto-leave any group that contains a blacklisted user\n"
-            "• Run a Safety Sweep to force check all groups\n"
+            "• Run a Safety Sweep to force check all tracked groups\n"
         )
         await m.reply_text(text, reply_markup=_sanctu_root_kb())
 
-    # open from callbacks (DM only)
+    # open from main-menu button
     @app.on_callback_query(filters.regex(r"^sanctu:open$"))
     async def sanctu_open_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
@@ -235,16 +278,23 @@ def register(app: Client):
         )
         await cq.answer()
 
+    # Close → back to normal SuccuBot menu
     @app.on_callback_query(filters.regex(r"^sanctu:close$"))
     async def sanctu_close_cb(client: Client, cq: CallbackQuery):
-        if not cq.from_user or not _is_owner(cq.from_user.id):
-            await cq.answer("You don’t have access to this panel.", show_alert=True)
-            return
-        await cq.message.edit_text("Closed Sanctuary Controls.")
+        kb = _main_menu_kb()
+        try:
+            await cq.message.edit_text(
+                "🔥 Welcome back to SuccuBot\n"
+                "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+                "✨ Use the menu below to navigate!",
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
         await cq.answer()
 
-    # ────────────── Blacklist menu ──────────────
-
+    # Blacklist menu
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist$"))
     async def sanctu_blacklist_menu_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
@@ -260,8 +310,7 @@ def register(app: Client):
         )
         await cq.answer()
 
-    # ────────────── Add user to blacklist (start) ──────────────
-
+    # Start add flow
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:add$"))
     async def sanctu_blacklist_add_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
@@ -275,11 +324,13 @@ def register(app: Client):
         await cq.message.edit_text(
             "➕ <b>Add User to Blacklist</b>\n\n"
             "Forward a message from the user you want to blacklist, or send their @username or numeric ID.\n\n"
-            "They will be blocked from using SuccuBot and any group that contains them will be left automatically.",
+            "They will be blocked from using SuccuBot and any group that contains them will be left automatically.\n\n"
+            "<i>Note:</i> If Telegram hides their info when you forward, sending their @username or numeric ID works best.",
             reply_markup=kb,
         )
         await cq.answer()
 
+    # Handle the actual forwarded message / id
     @app.on_message(filters.private)
     async def sanctu_private_msg_handler(client: Client, m: Message):
         user_id = m.from_user.id if m.from_user else None
@@ -295,12 +346,14 @@ def register(app: Client):
             target_username: Optional[str] = None
 
             if m.forward_from:
+                # Forward with user info visible
                 target_id = m.forward_from.id
                 target_username = m.forward_from.username
             else:
                 text = (m.text or "").strip()
                 if text:
                     if text.startswith("@"):
+                        # @username
                         target_username = text[1:]
                         try:
                             user = await client.get_users(text)
@@ -310,6 +363,7 @@ def register(app: Client):
                         except Exception as e:
                             log.warning("sanctu_controls: failed to resolve username %s: %s", text, e)
                     else:
+                        # numeric ID
                         try:
                             target_id = int(text)
                         except ValueError:
@@ -341,23 +395,18 @@ def register(app: Client):
                 f"User `{target_id}` added to blacklist by owner.",
             )
 
+    # Cancel add
     @app.on_callback_query(filters.regex(r"^sanctu:cancel$"))
     async def sanctu_cancel_cb(client: Client, cq: CallbackQuery):
-        if not cq.from_user or not _is_owner(cq.from_user.id):
-            await cq.answer("You don’t have access to this panel.", show_alert=True)
-            return
-
         if cq.from_user:
             PENDING.pop(cq.from_user.id, None)
-
         await cq.message.edit_text(
             "❌ Action cancelled.\n\nBack to Sanctuary Controls.",
             reply_markup=_sanctu_root_kb(),
         )
         await cq.answer()
 
-    # ────────────── View blacklist ──────────────
-
+    # View blacklist
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:list$"))
     async def sanctu_blacklist_list_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
@@ -379,8 +428,7 @@ def register(app: Client):
         )
         await cq.answer()
 
-    # ────────────── Remove user from blacklist ──────────────
-
+    # Start remove flow
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:remove$"))
     async def sanctu_blacklist_remove_start_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
@@ -414,6 +462,7 @@ def register(app: Client):
         )
         await cq.answer()
 
+    # Confirm remove
     @app.on_callback_query(filters.regex(r"^sanctu:blacklist:remove:(\d+)$"))
     async def sanctu_blacklist_remove_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
@@ -443,8 +492,7 @@ def register(app: Client):
             client, f"User `{uid}` removed from blacklist by owner."
         )
 
-    # ────────────── Safety Sweep (Force Check & Leave) ──────────────
-
+    # Safety Sweep (no get_dialogs, uses tracked chats)
     @app.on_callback_query(filters.regex(r"^sanctu:force_scan$"))
     async def sanctu_force_scan_cb(client: Client, cq: CallbackQuery):
         if not cq.from_user or not _is_owner(cq.from_user.id):
@@ -453,34 +501,37 @@ def register(app: Client):
 
         await cq.answer("Starting safety sweep…", show_alert=False)
 
-        async for dialog in client.get_dialogs():
-            chat = dialog.chat
-            if chat.type not in ("group", "supergroup"):
-                continue
-            if chat.is_deleted:
+        docs = list(chats_coll.find({}))
+        for d in docs:
+            chat_id = d["chat_id"]
+            try:
+                chat = await client.get_chat(chat_id)
+            except Exception as e:
+                log.warning("sanctu_controls: failed to get chat %s during sweep: %s", chat_id, e)
                 continue
             await _scan_chat_for_blacklisted(client, chat)
 
         await cq.message.edit_text(
             "🧭 Safety Sweep completed.\n\n"
-            "Any groups containing blacklisted users have been left, and you were notified.",
+            "Any tracked groups containing blacklisted users have been left, and you were notified.",
             reply_markup=_sanctu_root_kb(),
         )
 
-    # ────────────── Auto-leave on membership changes ──────────────
-
+    # Track membership changes + auto-leave on blacklisted join
     @app.on_chat_member_updated()
     async def sanctu_chat_member_updated(client: Client, cmu: ChatMemberUpdated):
         chat = cmu.chat
+        _track_chat(chat)
+
         new = cmu.new_chat_member
 
-        # Case 1: the bot itself was added to a group
+        # Bot itself added → scan
         if new.user and new.user.is_self:
             if new.status in ("member", "administrator"):
                 await _scan_chat_for_blacklisted(client, chat)
             return
 
-        # Case 2: some other user changed status (join / invite / etc.)
+        # Other user joined/activated
         user = new.user
         if not user:
             return
@@ -498,3 +549,9 @@ def register(app: Client):
             trigger_user_id=uid,
             trigger_reason="Blacklisted user joined or became active in this group.",
         )
+
+    # Track groups whenever the bot sees group messages (for sweeps)
+    @app.on_message(filters.group)
+    async def sanctu_track_groups_msg(client: Client, m: Message):
+        if m.chat:
+            _track_chat(m.chat)
