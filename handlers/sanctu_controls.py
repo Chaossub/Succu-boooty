@@ -538,4 +538,3 @@ def register(app: Client):
     async def sanctu_track_groups_msg(client: Client, m: Message):
         if m.chat:
             _track_chat(m.chat)
-
