@@ -53,6 +53,9 @@ def main():
     # Core panels & menus (this contains /start; DON'T add another /start here)
     _try_register("panels")  # Menus picker + home
 
+    # Requirements / admin-model controls panel
+    _try_register("requirements_panel")
+
     # Contact Admins & DM helpers
     _try_register("contact_admins")
     _try_register("dm_admin")
