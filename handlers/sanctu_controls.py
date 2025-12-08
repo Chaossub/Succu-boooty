@@ -116,7 +116,7 @@ def _format_user_line(doc) -> str:
     reason = doc.get("reason") or "No reason stored"
     ts = doc.get("created_at")
     if ts and isinstance(ts, datetime):
-        ts_str = ts.astimezone().strftime("%Y-%m-%d %H:%M")
+        ts_str = ts.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     else:
         ts_str = "unknown"
     name_part = f"@{username}" if username else "(no username)"
@@ -134,7 +134,7 @@ def _track_chat(chat: Chat):
                     "chat_id": chat.id,
                     "title": chat.title or "",
                     "type": chat.type,
-                    "updated_at": datetime.now(),
+                    "updated_at": datetime.now(timezone.utc),
                 }
             },
             upsert=True,
@@ -259,9 +259,13 @@ def register(app: Client):
         )
         await m.reply_text(text, reply_markup=_sanctu_root_kb())
 
-    # HIGH PRIORITY: /blacklist_add (runs before anything else)
-    @app.on_message(filters.user(OWNER_ID) & filters.regex(r"^/blacklist_add\b"), group=-1)
+    # SUPER SIMPLE: /blacklist_add (private, with you & the bot)
+    @app.on_message(filters.private & filters.command("blacklist_add"))
     async def cmd_blacklist_add(client: Client, m: Message):
+        if not m.from_user or not _is_owner(m.from_user.id):
+            await m.reply_text("You don’t have access to this command.")
+            return
+
         text = (m.text or "").strip()
         parts = text.split(maxsplit=1)
 
@@ -280,7 +284,8 @@ def register(app: Client):
                     "<code>/blacklist_add @username</code>\n"
                     "or\n"
                     "<code>/blacklist_add 123456789</code>\n\n"
-                    "You can also reply to a message and just use <code>/blacklist_add</code>."
+                    "You can also reply to a message from them with:\n"
+                    "<code>/blacklist_add</code>."
                 )
                 return
 
@@ -307,7 +312,7 @@ def register(app: Client):
             "user_id": target_id,
             "username": target_username,
             "reason": "Manual blacklist (command)",
-            "created_at": datetime.now(),
+            "created_at": datetime.now(timezone.utc),
         }
         blacklist_coll.update_one({"user_id": target_id}, {"$set": doc}, upsert=True)
 
