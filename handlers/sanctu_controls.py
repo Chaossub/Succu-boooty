@@ -259,8 +259,11 @@ def register(app: Client):
         )
         await m.reply_text(text, reply_markup=_sanctu_root_kb())
 
-    # SUPER SIMPLE: /blacklist_add (private, with you & the bot)
-    @app.on_message(filters.private & filters.command("blacklist_add"))
+    # SUPER SIMPLE: /blacklist_add (works in DMs or groups, highest priority)
+    @app.on_message(
+        filters.command("blacklist_add", prefixes=["/", "!"]),
+        group=-2,  # run before your existing group -1 handlers
+    )
     async def cmd_blacklist_add(client: Client, m: Message):
         if not m.from_user or not _is_owner(m.from_user.id):
             await m.reply_text("You don’t have access to this command.")
@@ -535,3 +538,4 @@ def register(app: Client):
     async def sanctu_track_groups_msg(client: Client, m: Message):
         if m.chat:
             _track_chat(m.chat)
+
