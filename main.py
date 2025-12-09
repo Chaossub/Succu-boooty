@@ -77,7 +77,6 @@ def main():
     _try_register("schedulemsg")
     try:
         from handlers import schedulemsg as _sm
-
         _sm.set_main_loop(app.loop)
         log.info("✅ Set main loop for schedulemsg")
     except Exception as e:
