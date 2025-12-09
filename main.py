@@ -75,6 +75,13 @@ def main():
 
     # Message scheduler
     _try_register("schedulemsg")
+    try:
+        from handlers import schedulemsg as _sm
+
+        _sm.set_main_loop(app.loop)
+        log.info("✅ Set main loop for schedulemsg")
+    except Exception as e:
+        log.warning("Could not set main loop for schedulemsg: %s", e)
 
     # Flyers (ad-hoc send + CRUD)
     _try_register("flyer")  # /addflyer /flyer /listflyers /deleteflyer /textflyer
