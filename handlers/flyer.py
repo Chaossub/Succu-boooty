@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import List
 
 from pymongo import MongoClient, ASCENDING
+from pymongo.errors import DuplicateKeyError
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from pyrogram.handlers import MessageHandler
@@ -21,9 +22,12 @@ MONGO_DBNAME = os.getenv("MONGO_DBNAME") or "Succubot"
 mongo = MongoClient(MONGO_URI)
 db = mongo[MONGO_DBNAME]
 flyers_coll = db["flyers"]
-# one flyer name per chat
+
+# Old versions may already have a unique index on "name".
+# This new index enforces uniqueness per chat going forward.
 flyers_coll.create_index(
     [("chat_id", ASCENDING), ("name", ASCENDING)],
+    name="chat_name_unique",
     unique=True,
 )
 
@@ -45,15 +49,13 @@ def _parse_ids(env_name: str) -> List[int]:
     return ids
 
 
+# Only owner + super admins can create flyers
 SUPER_ADMIN_IDS = set(_parse_ids("SUPER_ADMIN_IDS"))
-MODEL_IDS = set(_parse_ids("MODEL_IDS"))
-
-CREATOR_IDS = {OWNER_ID} | SUPER_ADMIN_IDS | MODEL_IDS
+CREATOR_IDS = {OWNER_ID} | SUPER_ADMIN_IDS
 
 
 def is_creator(user_id: int) -> bool:
-    # Who can /addflyer
-    return user_id in CREATOR_IDS or user_id == OWNER_ID
+    return user_id in CREATOR_IDS
 
 
 # ────────────── HELPERS ──────────────
@@ -92,7 +94,7 @@ async def addflyer_cmd(client: Client, message: Message):
     Must be sent with a photo attached OR as a reply to a photo.
     """
     if not is_creator(message.from_user.id):
-        return await message.reply_text("Only admins and models can create flyers. 💋")
+        return await message.reply_text("Only admins can create flyers. 💋")
 
     raw = get_command_text(message)
     if not raw:
@@ -132,11 +134,26 @@ async def addflyer_cmd(client: Client, message: Message):
         "updated_by": message.from_user.id,
     }
 
-    res = flyers_coll.update_one(
-        {"chat_id": message.chat.id, "name": name},
-        {"$set": doc},
-        upsert=True,
-    )
+    # Normal path: upsert by chat_id + name
+    try:
+        res = flyers_coll.update_one(
+            {"chat_id": message.chat.id, "name": name},
+            {"$set": doc},
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        # Migration path: there is an old doc with this name but no chat_id,
+        # because of the legacy unique index on "name".
+        log.warning(
+            "DuplicateKeyError on flyer '%s' in chat %s; applying legacy migration update.",
+            name,
+            message.chat.id,
+        )
+        res = flyers_coll.update_one(
+            {"name": name},
+            {"$set": doc},
+            upsert=False,
+        )
 
     if res.matched_count:
         text = f"✅ Flyer <b>{name}</b> updated."
