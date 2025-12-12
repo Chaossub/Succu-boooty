@@ -99,7 +99,7 @@ def _get_photo_file_id(message: Message) -> Optional[str]:
       - OR a replied-to photo
     """
     if message.photo:
-        # Pyrogram 2: message.photo is a Photo object, not a list
+        # Pyrogram 2: message.photo is a Photo object
         return message.photo.file_id
 
     if message.reply_to_message and message.reply_to_message.photo:
@@ -245,15 +245,14 @@ def register(app: Client):
     log.info("✅ handlers.flyer registered (flyer commands)")
 
     app.add_handler(
-        MessageHandler(addflyer_cmd, filters.command("addflyer") & ~filters.edited),
+        MessageHandler(addflyer_cmd, filters.command("addflyer")),
         group=0,
     )
     app.add_handler(
-        MessageHandler(flyer_cmd, filters.command("flyer") & ~filters.edited),
+        MessageHandler(flyer_cmd, filters.command("flyer")),
         group=0,
     )
     app.add_handler(
-        MessageHandler(flyerlist_cmd, filters.command("flyerlist") & ~filters.edited),
+        MessageHandler(flyerlist_cmd, filters.command("flyerlist")),
         group=0,
     )
-
