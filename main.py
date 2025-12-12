@@ -4,7 +4,7 @@ import logging
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, Message
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("main")
@@ -77,18 +77,18 @@ def main():
     _try_register("schedulemsg")
     try:
         from handlers import schedulemsg as _sm
+
         _sm.set_main_loop(app.loop)
         log.info("✅ Set main loop for schedulemsg")
     except Exception as e:
         log.warning("Could not set main loop for schedulemsg: %s", e)
 
-    # Flyers (ad-hoc send + CRUD)
-    _try_register("flyer")  # /addflyer /flyer /listflyers /deleteflyer /textflyer
+    # Flyers (CRUD + viewing)
+    _try_register("flyer")  # /addflyer /flyer /flyerlist /deleteflyer
 
-    # Flyer scheduler (date/time -> post)
+    # Flyer scheduler (date/time → post flyer by name, Mongo-backed)
     _try_register("flyer_scheduler")
     try:
-        # give scheduler the running loop so it can post from its thread
         from handlers import flyer_scheduler as _fs
 
         _fs.set_main_loop(app.loop)
@@ -99,7 +99,35 @@ def main():
     # Sanctuary Controls + Blacklist (new)
     _try_register("sanctu_controls")
 
-    # -------- Central “Back to Main” handler (portal:home) --------
+    # -------- Central Portal command + “Back to Main” handler --------
+
+    @app.on_message(filters.command("portal"))
+    async def _portal_cmd(_, m: Message):
+        """
+        /portal → show the main SuccuBot menu with buttons.
+        Works in DMs and groups.
+        """
+        rows = [
+            [InlineKeyboardButton("📜 Menus", callback_data="panels:root")],
+            [InlineKeyboardButton("📩 Contact Admins", callback_data="contact_admins:open")],
+            [InlineKeyboardButton("🔍 Find Our Models Elsewhere", callback_data="models_elsewhere:open")],
+            [InlineKeyboardButton("❓ Help", callback_data="help:open")],
+        ]
+
+        # Secret admin/model control button – visible, but only owner can use it.
+        rows.append(
+            [InlineKeyboardButton("🛡 Sanctuary Controls", callback_data="sanctu:open")]
+        )
+
+        kb = InlineKeyboardMarkup(rows)
+
+        await m.reply_text(
+            "💋 <b>Welcome to SuccuBot</b>\n"
+            "I’m your naughty little helper inside the Sanctuary — ready to keep things fun, flirty, and flowing.\n\n"
+            "✨ Use the menu below to navigate!",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
 
     @app.on_callback_query(filters.regex(r"^portal:home$"))
     async def _portal_home_cb(_, cq: CallbackQuery):
