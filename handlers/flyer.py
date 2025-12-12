@@ -2,87 +2,70 @@
 import logging
 import os
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 
-from pymongo import MongoClient, ASCENDING, errors as mongo_errors
+from pymongo import MongoClient, ASCENDING
 from pyrogram import Client, filters
-from pyrogram.types import Message
 from pyrogram.handlers import MessageHandler
+from pyrogram.types import Message
 
 log = logging.getLogger(__name__)
 
-# ────────────── ENV / DB ──────────────
-
-MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
-MONGO_DBNAME = os.getenv("MONGO_DBNAME", "Succubot")
+# ────────────── ENV / MONGO ──────────────
+MONGO_URI = os.getenv("MONGO_DB_URI") or os.getenv("MONGO_URI")
+MONGO_DBNAME = os.getenv("MONGO_DBNAME") or "Succubot"
 
 if not MONGO_URI:
-    raise RuntimeError("MONGO_URI / MONGODB_URI must be set for flyers")
+    raise RuntimeError("MONGO_DB_URI / MONGO_URI must be set for flyers")
 
 mongo = MongoClient(MONGO_URI)
 db = mongo[MONGO_DBNAME]
 flyers_coll = db["flyers"]
 
-# old index on "name" alone caused duplicate key issues; try to drop it quietly
-try:
-    flyers_coll.drop_index("name_1")
-except Exception:
-    pass
-
-# unique per chat + name
+# Unique per chat + name key
 flyers_coll.create_index(
-    [("chat_id", ASCENDING), ("name", ASCENDING)],
+    [("chat_id", ASCENDING), ("key", ASCENDING)],
     unique=True,
+    name="chat_key_unique",
 )
 
-OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))
 MAX_CAPTION_LENGTH = 1024
+
+OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))  # you by default
 
 
 # ────────────── HELPERS ──────────────
-
-
 async def is_admin(client: Client, message: Message) -> bool:
-    """Only allow owner or chat admins to create/update flyers."""
+    """Owner or chat admin can manage flyers."""
+    if message.chat.type == "private":
+        return True
     if not message.from_user:
         return False
-
-    user_id = message.from_user.id
-    if user_id == OWNER_ID:
+    if message.from_user.id == OWNER_ID:
         return True
 
     try:
-        member = await client.get_chat_member(message.chat.id, user_id)
-        return member.status in ("administrator", "creator")
-    except Exception as e:
-        log.warning("is_admin failed: %s", e)
+        member = await client.get_chat_member(message.chat.id, message.from_user.id)
+    except Exception:
         return False
 
-
-def _get_command_text(message: Message) -> Optional[str]:
-    """
-    For messages with a photo and caption:
-      - message.text is None
-      - message.caption contains '/addflyer ...'
-    For normal text commands:
-      - message.text contains '/addflyer ...'
-    """
-    return message.text or message.caption
+    return member.status in ("creator", "administrator")
 
 
-def _parse_addflyer_args(raw: str) -> Optional[tuple]:
+def parse_addflyer_text(raw: Optional[str]) -> Optional[tuple[str, str]]:
     """
-    Parse '/addflyer <name> <caption>' from raw text/caption.
-    Returns (name, caption) or None if invalid.
+    Expect: /addflyer <name> <caption>
+    Return (name, caption) or None if invalid.
     """
-    parts = raw.split(maxsplit=2)
+    if not raw:
+        return None
+
+    parts = raw.split(maxsplit=2)  # /addflyer, name, caption
     if len(parts) < 3:
         return None
 
-    _, name, caption = parts
-    name = name.strip()
-    caption = caption.strip()
-
+    name = parts[1].strip()
+    caption = parts[2].strip()
     if not name or not caption:
         return None
 
@@ -92,157 +75,154 @@ def _parse_addflyer_args(raw: str) -> Optional[tuple]:
     return name, caption
 
 
-def _get_photo_file_id(message: Message) -> Optional[str]:
-    """
-    Get file_id from:
-      - photo attached to the same message
-      - OR a replied-to photo
-    """
-    if message.photo:
-        # Pyrogram 2: message.photo is a Photo object
-        return message.photo.file_id
-
-    if message.reply_to_message and message.reply_to_message.photo:
-        return message.reply_to_message.photo.file_id
-
-    return None
-
-
-# ────────────── COMMANDS ──────────────
-
-
+# ────────────── COMMAND HANDLERS ──────────────
 async def addflyer_cmd(client: Client, message: Message):
     """
-    /addflyer <name> <caption>
-    - Must be sent with a photo attached in the same message
-      OR as a reply to a photo.
-    - Only admins / owner can use this.
+    Usage:
+      Send a photo with this as the message text OR caption:
+        /addflyer <name> <caption>
+
+    Example:
+      (photo)
+      /addflyer monday Merry & Mischievous Monday 💕
     """
     if not await is_admin(client, message):
-        return await message.reply("Only chat admins can add or update flyers.")
+        await message.reply_text("Only group admins can add or change flyers.")
+        return
 
-    raw = _get_command_text(message)
-    parsed = _parse_addflyer_args(raw) if raw else None
+    # We want the command and args from either text OR caption
+    raw_text = message.text or message.caption
+    parsed = parse_addflyer_text(raw_text)
     if not parsed:
-        return await message.reply(
+        await message.reply_text(
             "Usage:\n"
             "/addflyer <name> <caption>\n\n"
             "Example:\n"
-            "/addflyer monday Merry & Mischievous Monday 💕"
+            "/addflyer monday Merry & Mischievous Monday 💕",
+            quote=True,
         )
+        return
 
     name, caption = parsed
-    name_key = name.lower()
 
-    file_id = _get_photo_file_id(message)
-    if not file_id:
-        return await message.reply(
-            "Please attach a photo to the same message (or reply to a photo) "
-            "when using /addflyer."
+    if not message.photo:
+        await message.reply_text(
+            "Please send /addflyer *with a photo attached*.\n\n"
+            "Example:\n"
+            "(photo)\n"
+            "/addflyer monday Merry & Mischievous Monday 💕",
+            quote=True,
         )
+        return
+
+    # Largest size is last
+    file_id = message.photo[-1].file_id
+
+    key = name.lower()
 
     doc = {
         "chat_id": message.chat.id,
-        "name": name_key,
-        "display_name": name,  # keep the original casing
+        "name": name,       # pretty display name
+        "key": key,         # lowercase key for lookups
         "caption": caption,
-        "file_id": file_id,
-        "type": "photo",
+        "photo_id": file_id,
         "updated_at": datetime.utcnow(),
-        "updated_by": message.from_user.id if message.from_user else None,
     }
 
-    try:
-        res = flyers_coll.update_one(
-            {"chat_id": message.chat.id, "name": name_key},
-            {"$set": doc},
-            upsert=True,
-        )
-    except mongo_errors.DuplicateKeyError as e:
-        log.error("DuplicateKeyError in addflyer_cmd: %s", e)
-        return await message.reply(
-            "I couldn't save that flyer because another flyer with the same "
-            "name already exists and conflicts with an old index.\n\n"
-            "Try a different name (like 'monday2') and I'll remember that one."
-        )
+    # Upsert by chat_id + key
+    flyers_coll.update_one(
+        {"chat_id": message.chat.id, "key": key},
+        {"$set": doc},
+        upsert=True,
+    )
 
-    if res.matched_count:
-        msg = f"✅ Flyer <b>{name}</b> updated with photo.\nUse <code>/flyer {name}</code> to send it."
-    else:
-        msg = f"✅ Flyer <b>{name}</b> saved with photo.\nUse <code>/flyer {name}</code> to send it."
-
-    await message.reply(msg)
+    await message.reply_text(
+        f"✅ Flyer <b>{name}</b> saved with photo.\n"
+        f"Use <code>/flyer {name}</code> to send it.\n"
+        f"Use <code>/flyerlist</code> to see all flyers.",
+        quote=True,
+    )
 
 
 async def flyer_cmd(client: Client, message: Message):
     """
-    /flyer <name>
-    Everyone can use this.
+    /flyer <name> → sends the stored flyer in that chat
     """
-    raw = message.text
-    if not raw:
+    if not message.text:
         return
 
-    parts = raw.split(maxsplit=1)
+    parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        return await message.reply("Usage: /flyer <name>")
+        await message.reply_text(
+            "Usage: /flyer <name>\n\nExample: /flyer monday\n"
+            "See all flyers with /flyerlist.",
+            quote=True,
+        )
+        return
 
-    name = parts[1].strip().lower()
+    name = parts[1].strip()
     if not name:
-        return await message.reply("Usage: /flyer <name>")
+        await message.reply_text(
+            "Usage: /flyer <name>\nExample: /flyer monday",
+            quote=True,
+        )
+        return
 
-    doc = flyers_coll.find_one(
-        {"chat_id": message.chat.id, "name": name}
-    ) or flyers_coll.find_one({"name": name})
+    key = name.lower()
+    doc = flyers_coll.find_one({"chat_id": message.chat.id, "key": key})
 
     if not doc:
-        return await message.reply(f"I couldn't find a flyer named <b>{name}</b> here.")
+        await message.reply_text(
+            f"I couldn’t find a flyer named <b>{name}</b> in this chat.\n"
+            "Use /flyerlist to see what exists.",
+            quote=True,
+        )
+        return
 
     caption = doc.get("caption") or ""
-    file_id = doc.get("file_id")
-    ftype = doc.get("type", "photo")
+    photo_id = doc.get("photo_id")
 
-    try:
-        if ftype == "photo" and file_id:
-            await client.send_photo(
-                message.chat.id,
-                file_id,
-                caption=caption or None,
-            )
-        else:
-            await client.send_message(
-                message.chat.id,
-                caption or f"<b>{doc.get('display_name', name)}</b>",
-            )
-    except Exception as e:
-        log.error("Failed to send flyer %s: %s", name, e)
-        await message.reply("Something went wrong sending that flyer.")
+    if photo_id:
+        # Reply to user’s command in groups (but not required)
+        reply_to = message.id if message.chat.type != "channel" else None
+        await client.send_photo(
+            chat_id=message.chat.id,
+            photo=photo_id,
+            caption=caption,
+            reply_to_message_id=reply_to,
+        )
+    else:
+        await message.reply_text(
+            caption or f"(Flyer <b>{doc.get('name','?')}</b> has no content.)",
+            quote=True,
+        )
 
 
 async def flyerlist_cmd(client: Client, message: Message):
     """
-    /flyerlist
-    Everyone can use this.
+    /flyerlist → lists all flyer names in this chat
     """
     cursor = flyers_coll.find({"chat_id": message.chat.id}).sort("name", ASCENDING)
-    flyers: List[dict] = list(cursor)
+    names = [doc.get("name") for doc in cursor if doc.get("name")]
 
-    if not flyers:
-        return await message.reply("No flyers saved in this chat yet.")
+    if not names:
+        await message.reply_text(
+            "No flyers saved for this chat yet.\n"
+            "Admins can create one with:\n"
+            "/addflyer <name> <caption> (with a photo).",
+            quote=True,
+        )
+        return
 
-    lines = ["<b>Saved flyers in this chat:</b>"]
-    for doc in flyers:
-        display_name = doc.get("display_name", doc.get("name", ""))
-        lines.append(f"• <code>{display_name}</code>")
-
-    await message.reply("\n".join(lines))
+    text = "📌 <b>Flyers in this chat:</b>\n" + "\n".join(
+        f"• <code>{n}</code>" for n in names
+    )
+    await message.reply_text(text, quote=True)
 
 
-# ────────────── REGISTER ──────────────
-
-
+# ────────────── REGISTRATION ──────────────
 def register(app: Client):
-    log.info("✅ handlers.flyer registered (flyer commands)")
+    log.info("[FLYER] Registering flyer handlers")
 
     app.add_handler(
         MessageHandler(addflyer_cmd, filters.command("addflyer")),
@@ -253,6 +233,11 @@ def register(app: Client):
         group=0,
     )
     app.add_handler(
-        MessageHandler(flyerlist_cmd, filters.command("flyerlist")),
+        MessageHandler(
+            flyerlist_cmd,
+            filters.command(["flyerlist", "listflyers"]),
+        ),
         group=0,
     )
+
+    log.info("✅ handlers.flyer registered (flyer commands)")
