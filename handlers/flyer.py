@@ -22,15 +22,36 @@ mongo = MongoClient(MONGO_URI)
 db = mongo[MONGO_DBNAME]
 flyers_coll = db["flyers"]
 
-# Unique per chat + name key
-flyers_coll.create_index(
-    [("chat_id", ASCENDING), ("key", ASCENDING)],
-    unique=True,
-    name="chat_key_unique",
-)
+# Clean up any broken legacy docs that have null chat_id / key
+try:
+    res = flyers_coll.delete_many(
+        {"$or": [{"chat_id": None}, {"key": None}]}
+    )
+    if res.deleted_count:
+        log.warning(
+            "[FLYER] Removed %s legacy flyer docs with null chat_id/key",
+            res.deleted_count,
+        )
+except Exception as e:
+    log.warning("[FLYER] Failed cleaning legacy flyers: %r", e)
+
+# Create per-chat unique index, but only for docs that have proper fields
+try:
+    flyers_coll.create_index(
+        [("chat_id", ASCENDING), ("key", ASCENDING)],
+        unique=True,
+        name="chat_key_unique",
+        partialFilterExpression={
+            "chat_id": {"$ne": None},
+            "key": {"$ne": None},
+        },
+    )
+    log.info("[FLYER] Ensured index chat_key_unique on (chat_id, key)")
+except Exception as e:
+    # Do NOT crash the bot over an index problem
+    log.warning("[FLYER] Could not create index chat_key_unique: %r", e)
 
 MAX_CAPTION_LENGTH = 1024
-
 OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))  # you by default
 
 
@@ -117,7 +138,6 @@ async def addflyer_cmd(client: Client, message: Message):
 
     # Largest size is last
     file_id = message.photo[-1].file_id
-
     key = name.lower()
 
     doc = {
@@ -129,7 +149,6 @@ async def addflyer_cmd(client: Client, message: Message):
         "updated_at": datetime.utcnow(),
     }
 
-    # Upsert by chat_id + key
     flyers_coll.update_one(
         {"chat_id": message.chat.id, "key": key},
         {"$set": doc},
@@ -183,7 +202,6 @@ async def flyer_cmd(client: Client, message: Message):
     photo_id = doc.get("photo_id")
 
     if photo_id:
-        # Reply to user’s command in groups (but not required)
         reply_to = message.id if message.chat.type != "channel" else None
         await client.send_photo(
             chat_id=message.chat.id,
