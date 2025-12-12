@@ -2,7 +2,6 @@
 import logging
 import os
 from datetime import datetime, timezone
-
 from typing import Optional, List
 
 from pymongo import MongoClient, ASCENDING
@@ -60,6 +59,11 @@ async def _is_chat_admin(client: Client, message: Message) -> bool:
     return False
 
 
+def _log_debug(msg: str):
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[FLYER][{ts}] {msg}", flush=True)
+
+
 # ────────────── Command handlers ──────────────
 
 
@@ -71,147 +75,180 @@ async def addflyer_cmd(client: Client, message: Message):
       • as a *caption* on a photo
       • or as a text command replying to a photo
     """
-    if not await _is_chat_admin(client, message):
-        await message.reply_text("Only Sanctuary admins can create or update flyers.")
-        return
+    try:
+        if not await _is_chat_admin(client, message):
+            await message.reply_text("Only Sanctuary admins can create or update flyers.")
+            return
 
-    # Figure out which photo to use
-    photo_msg: Optional[Message] = None
-    if message.photo:
-        photo_msg = message
-    elif message.reply_to_message and message.reply_to_message.photo:
-        photo_msg = message.reply_to_message
+        # Figure out which photo to use
+        photo_msg: Optional[Message] = None
+        if message.photo:
+            photo_msg = message
+        elif message.reply_to_message and message.reply_to_message.photo:
+            photo_msg = message.reply_to_message
 
-    if not photo_msg or not photo_msg.photo:
+        if not photo_msg or not photo_msg.photo:
+            await message.reply_text(
+                "Attach a photo with the command, or reply to a photo with:\n"
+                "<code>/addflyer &lt;name&gt; &lt;caption&gt;</code>"
+            )
+            return
+
+        # Parse text (caption or message text)
+        raw = (message.text or message.caption or "").strip()
+        parts = raw.split(maxsplit=2)
+        if len(parts) < 3:
+            await message.reply_text(
+                "Usage:\n"
+                "<code>/addflyer &lt;name&gt; &lt;caption&gt;</code>\n\n"
+                "Example:\n"
+                "<code>/addflyer monday Merry &amp; Mischievous Monday 💋</code>"
+            )
+            return
+
+        _, name, caption = parts
+        norm = _normalize_name(name)
+        file_id = photo_msg.photo.file_id
+
+        doc = {
+            "name": norm,
+            "file_id": file_id,
+            "caption": caption,
+            "updated_at": _now_utc(),
+        }
+
+        # Preserve first creator if it exists
+        existing = flyers_coll.find_one({"name": norm})
+        if existing:
+            doc.setdefault("created_at", existing.get("created_at") or _now_utc())
+            doc.setdefault("created_by", existing.get("created_by") or message.from_user.id)
+        else:
+            doc["created_at"] = _now_utc()
+            if message.from_user:
+                doc["created_by"] = message.from_user.id
+
+        flyers_coll.update_one({"name": norm}, {"$set": doc}, upsert=True)
+
+        _log_debug(f"Saved flyer name={norm} file_id={file_id}")
         await message.reply_text(
-            "Attach a photo with the command, or reply to a photo with:\n"
-            "<code>/addflyer &lt;name&gt; &lt;caption&gt;</code>"
+            f"✅ Flyer <b>{name}</b> saved.\n"
+            "You can send it with <code>/flyer "
+            f"{name}</code> or see all flyers with <code>/flyerlist</code>."
         )
-        return
-
-    # Parse text (caption or message text)
-    raw = (message.text or message.caption or "").strip()
-    parts = raw.split(maxsplit=2)
-    if len(parts) < 3:
-        await message.reply_text(
-            "Usage:\n"
-            "<code>/addflyer &lt;name&gt; &lt;caption&gt;</code>\n\n"
-            "Example:\n"
-            "<code>/addflyer monday Merry &amp; Mischievous Monday 💋</code>"
-        )
-        return
-
-    _, name, caption = parts
-    norm = _normalize_name(name)
-    file_id = photo_msg.photo.file_id
-
-    doc = {
-        "name": norm,
-        "file_id": file_id,
-        "caption": caption,
-        "updated_at": _now_utc(),
-    }
-
-    # Preserve first creator if it exists
-    existing = flyers_coll.find_one({"name": norm})
-    if existing:
-        doc.setdefault("created_at", existing.get("created_at") or _now_utc())
-        doc.setdefault("created_by", existing.get("created_by") or message.from_user.id)
-    else:
-        doc["created_at"] = _now_utc()
-        if message.from_user:
-            doc["created_by"] = message.from_user.id
-
-    flyers_coll.update_one({"name": norm}, {"$set": doc}, upsert=True)
-
-    await message.reply_text(
-        f"✅ Flyer <b>{name}</b> saved.\n"
-        "You can send it with <code>/flyer "
-        f"{name}</code> or see all flyers with <code>/flyerlist</code>."
-    )
+    except Exception as e:
+        log.exception("addflyer_cmd crashed: %s", e)
+        await message.reply_text("❌ Something went wrong while saving that flyer.")
 
 
-async def flyer_cmd(_: Client, message: Message):
+async def flyer_cmd(client: Client, message: Message):
     """
     /flyer <name> → send that flyer (anyone can use)
     """
-    raw = (message.text or "").strip()
-    parts = raw.split(maxsplit=1)
-    if len(parts) < 2:
-        await message.reply_text(
-            "Usage:\n"
-            "<code>/flyer &lt;name&gt;</code>\n\n"
-            "Use <code>/flyerlist</code> to see available names."
-        )
-        return
-
-    name = parts[1].strip()
-    norm = _normalize_name(name)
-    doc = flyers_coll.find_one({"name": norm})
-    if not doc:
-        await message.reply_text(
-            f"❌ I couldn't find a flyer named <b>{name}</b>.\n"
-            "Use <code>/flyerlist</code> to see what's saved."
-        )
-        return
-
     try:
+        raw = (message.text or "").strip()
+        parts = raw.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.reply_text(
+                "Usage:\n"
+                "<code>/flyer &lt;name&gt;</code>\n\n"
+                "Use <code>/flyerlist</code> to see available names."
+            )
+            return
+
+        name = parts[1].strip()
+        norm = _normalize_name(name)
+        doc = flyers_coll.find_one({"name": norm})
+        _log_debug(f"/flyer requested name={norm} found={bool(doc)}")
+
+        if not doc:
+            await message.reply_text(
+                f"❌ I couldn't find a flyer named <b>{name}</b>.\n"
+                "Use <code>/flyerlist</code> to see what's saved."
+            )
+            return
+
         await message.reply_photo(
             doc["file_id"],
             caption=doc.get("caption") or "",
         )
     except Exception as e:
-        log.warning("flyer: failed to send flyer %s: %s", name, e)
-        await message.reply_text("I couldn’t send that flyer (maybe the file_id expired?).")
+        log.exception("flyer_cmd crashed: %s", e)
+        await message.reply_text("❌ I couldn’t send that flyer (internal error).")
 
 
-async def flyerlist_cmd(_: Client, message: Message):
+async def flyerlist_cmd(client: Client, message: Message):
     """
     /flyerlist → show all saved flyers
     """
-    docs: List[dict] = list(flyers_coll.find().sort("name", ASCENDING))
-    if not docs:
-        await message.reply_text("No flyers saved yet.")
-        return
+    try:
+        docs: List[dict] = list(flyers_coll.find().sort("name", ASCENDING))
+        _log_debug(f"/flyerlist requested, count={len(docs)}")
+        if not docs:
+            await message.reply_text("No flyers saved yet.")
+            return
 
-    lines = ["📌 <b>Saved flyers:</b>"]
-    for d in docs:
-        name = d["name"]
-        preview = (d.get("caption") or "").strip().replace("\n", " ")
-        if len(preview) > 60:
-            preview = preview[:57] + "…"
-        if preview:
-            lines.append(f"• <code>{name}</code> — {preview}")
-        else:
-            lines.append(f"• <code>{name}</code>")
+        lines = ["📌 <b>Saved flyers:</b>"]
+        for d in docs:
+            name = d["name"]
+            caption = (d.get("caption") or "").strip().replace("\n", " ")
+            if len(caption) > 60:
+                caption = caption[:57] + "…"
+            if caption:
+                lines.append(f"• <code>{name}</code> — {caption}")
+            else:
+                lines.append(f"• <code>{name}</code>")
 
-    await message.reply_text("\n".join(lines))
+        await message.reply_text("\n".join(lines))
+    except Exception as e:
+        log.exception("flyerlist_cmd crashed: %s", e)
+        await message.reply_text("❌ I couldn’t list flyers (internal error).")
 
 
 async def deleteflyer_cmd(client: Client, message: Message):
     """
     /deleteflyer <name>  (admins only)
     """
-    if not await _is_chat_admin(client, message):
-        await message.reply_text("Only Sanctuary admins can delete flyers.")
+    try:
+        if not await _is_chat_admin(client, message):
+            await message.reply_text("Only Sanctuary admins can delete flyers.")
+            return
+
+        raw = (message.text or "").strip()
+        parts = raw.split(maxsplit=1)
+        if len(parts) < 2:
+            await message.reply_text(
+                "Usage:\n"
+                "<code>/deleteflyer &lt;name&gt;</code>"
+            )
+            return
+
+        name = parts[1].strip()
+        norm = _normalize_name(name)
+        res = flyers_coll.delete_one({"name": norm})
+        if res.deleted_count == 0:
+            await message.reply_text(f"❌ No flyer named <b>{name}</b> was found.")
+        else:
+            await message.reply_text(f"🗑 Flyer <b>{name}</b> has been deleted.")
+    except Exception as e:
+        log.exception("deleteflyer_cmd crashed: %s", e)
+        await message.reply_text("❌ I couldn’t delete that flyer (internal error).")
+
+
+async def flyerdebug_cmd(client: Client, message: Message):
+    """
+    /flyerdebug  (OWNER only)
+    Shows how many flyers are in Mongo and a few names.
+    """
+    if not message.from_user or message.from_user.id != OWNER_ID:
         return
 
-    raw = (message.text or "").strip()
-    parts = raw.split(maxsplit=1)
-    if len(parts) < 2:
-        await message.reply_text(
-            "Usage:\n"
-            "<code>/deleteflyer &lt;name&gt;</code>"
-        )
-        return
-
-    name = parts[1].strip()
-    norm = _normalize_name(name)
-    res = flyers_coll.delete_one({"name": norm})
-    if res.deleted_count == 0:
-        await message.reply_text(f"❌ No flyer named <b>{name}</b> was found.")
-    else:
-        await message.reply_text(f"🗑 Flyer <b>{name}</b> has been deleted.")
+    docs = list(flyers_coll.find().sort("name", ASCENDING))
+    count = len(docs)
+    preview = ", ".join(d["name"] for d in docs[:10])
+    await message.reply_text(
+        f"Flyers in DB: <b>{count}</b>\n"
+        f"First names: <code>{preview or 'none'}</code>"
+    )
 
 
 # ────────────── Register ──────────────
@@ -224,3 +261,4 @@ def register(app: Client):
     app.add_handler(MessageHandler(flyer_cmd, filters.command("flyer")), group=0)
     app.add_handler(MessageHandler(flyerlist_cmd, filters.command("flyerlist")), group=0)
     app.add_handler(MessageHandler(deleteflyer_cmd, filters.command("deleteflyer")), group=0)
+    app.add_handler(MessageHandler(flyerdebug_cmd, filters.command("flyerdebug")), group=0)
