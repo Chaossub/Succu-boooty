@@ -30,6 +30,7 @@ flyers_coll.create_index(
 # ────────────── ACCESS CONTROL ──────────────
 OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))
 
+
 def _parse_ids(env_name: str) -> List[int]:
     raw = os.getenv(env_name, "")
     ids: List[int] = []
@@ -43,10 +44,12 @@ def _parse_ids(env_name: str) -> List[int]:
             log.warning("Invalid ID in %s: %r", env_name, part)
     return ids
 
+
 SUPER_ADMIN_IDS = set(_parse_ids("SUPER_ADMIN_IDS"))
 MODEL_IDS = set(_parse_ids("MODEL_IDS"))
 
 CREATOR_IDS = {OWNER_ID} | SUPER_ADMIN_IDS | MODEL_IDS
+
 
 def is_creator(user_id: int) -> bool:
     # Who can /addflyer
@@ -57,6 +60,7 @@ def is_creator(user_id: int) -> bool:
 
 def normalize_name(name: str) -> str:
     return name.strip().lower()
+
 
 def get_photo_file_id(msg: Message) -> str | None:
     """
@@ -72,6 +76,14 @@ def get_photo_file_id(msg: Message) -> str | None:
     return None
 
 
+def get_command_text(message: Message) -> str:
+    """
+    Return the raw command text for this message.
+    For media messages, the command is in caption instead of text.
+    """
+    return (message.text or message.caption or "").strip()
+
+
 # ────────────── COMMANDS ──────────────
 
 async def addflyer_cmd(client: Client, message: Message):
@@ -82,8 +94,8 @@ async def addflyer_cmd(client: Client, message: Message):
     if not is_creator(message.from_user.id):
         return await message.reply_text("Only admins and models can create flyers. 💋")
 
-    parts = message.text.split(maxsplit=2)
-    if len(parts) < 2:
+    raw = get_command_text(message)
+    if not raw:
         return await message.reply_text(
             "Usage:\n"
             "<code>/addflyer &lt;name&gt; &lt;caption&gt;</code>\n"
@@ -92,10 +104,17 @@ async def addflyer_cmd(client: Client, message: Message):
             "<code>/addflyer monday Warm-up teaser for the boys 💕</code>"
         )
 
+    parts = raw.split(maxsplit=2)
+    if len(parts) < 2:
+        return await message.reply_text(
+            "Usage:\n"
+            "<code>/addflyer &lt;name&gt; &lt;caption&gt;</code>\n"
+            "• Send it with a photo attached, or reply to a photo."
+        )
+
+    # parts[0] is "/addflyer"
     name = normalize_name(parts[1])
-    caption = ""
-    if len(parts) >= 3:
-        caption = parts[2]
+    caption = parts[2] if len(parts) >= 3 else ""
 
     file_id = get_photo_file_id(message)
     if not file_id:
@@ -113,7 +132,6 @@ async def addflyer_cmd(client: Client, message: Message):
         "updated_by": message.from_user.id,
     }
 
-    # upsert = create or update if it already exists
     res = flyers_coll.update_one(
         {"chat_id": message.chat.id, "name": name},
         {"$set": doc},
@@ -126,8 +144,9 @@ async def addflyer_cmd(client: Client, message: Message):
         text = f"✅ Flyer <b>{name}</b> saved."
 
     await message.reply_text(
-        text + "\nYou can send it with <code>/flyer {}</code> or see all flyers with "
-        "<code>/flyerlist</code>.".format(name)
+        text
+        + "\nYou can send it with <code>/flyer {}</code> or see all flyers with "
+          "<code>/flyerlist</code>.".format(name)
     )
 
 
@@ -136,7 +155,8 @@ async def flyer_cmd(client: Client, message: Message):
     /flyer <name>
     Anyone can use this to show a saved flyer in the current chat.
     """
-    parts = message.text.split(maxsplit=1)
+    raw = get_command_text(message)
+    parts = raw.split(maxsplit=1)
     if len(parts) < 2:
         return await message.reply_text(
             "Usage: <code>/flyer &lt;name&gt;</code>\n"
