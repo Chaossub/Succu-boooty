@@ -1,220 +1,182 @@
 # handlers/flyer.py
-import logging
+
 import os
-from datetime import datetime
-from typing import List
-
-from pymongo import MongoClient, ASCENDING
+from pyrogram import filters
+from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
-from pyrogram import Client, filters
-from pyrogram.types import Message
-from pyrogram.handlers import MessageHandler
-
-log = logging.getLogger(__name__)
 
 # ────────────── MONGO ──────────────
-MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise RuntimeError("MONGODB_URI / MONGO_URI must be set for flyers")
+MONGO_URI = os.environ.get("MONGO_URI")
+MONGO_DBNAME = os.environ.get("MONGO_DBNAME")
 
-MONGO_DBNAME = os.getenv("MONGO_DBNAME") or "Succubot"
+if not MONGO_URI or not MONGO_DBNAME:
+    raise RuntimeError("MONGO_URI and MONGO_DBNAME must be set for flyers")
 
 mongo = MongoClient(MONGO_URI)
 db = mongo[MONGO_DBNAME]
-flyers_coll = db["flyers"]
+flyer_collection = db["flyers"]
 
-# Old versions may already have a unique index on "name".
-# This new index enforces uniqueness per chat going forward.
-flyers_coll.create_index(
-    [("chat_id", ASCENDING), ("name", ASCENDING)],
-    name="chat_name_unique",
-    unique=True,
-)
+# ────────────── PERMS ──────────────
+OWNER_ID = 6964994611
+SUPER_ADMINS = {6964994611, 8087941938}  # you can edit this set
 
-# ────────────── ACCESS CONTROL ──────────────
-OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))
-
-
-def _parse_ids(env_name: str) -> List[int]:
-    raw = os.getenv(env_name, "")
-    ids: List[int] = []
-    for part in raw.replace(";", ",").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            ids.append(int(part))
-        except ValueError:
-            log.warning("Invalid ID in %s: %r", env_name, part)
-    return ids
-
-
-# Only owner + super admins can create flyers
-SUPER_ADMIN_IDS = set(_parse_ids("SUPER_ADMIN_IDS"))
-CREATOR_IDS = {OWNER_ID} | SUPER_ADMIN_IDS
-
-
-def is_creator(user_id: int) -> bool:
-    return user_id in CREATOR_IDS
-
-
-# ────────────── HELPERS ──────────────
-
-def normalize_name(name: str) -> str:
-    return name.strip().lower()
-
-
-def get_photo_file_id(msg: Message) -> str | None:
-    """
-    Returns the file_id of the photo attached to this message or its reply.
-    Pyrogram v2: message.photo is a Photo object (not a list).
-    """
-    if msg.photo:
-        return msg.photo.file_id
-
-    if msg.reply_to_message and msg.reply_to_message.photo:
-        return msg.reply_to_message.photo.file_id
-
-    return None
-
-
-def get_command_text(message: Message) -> str:
-    """
-    Return the raw command text for this message.
-    For media messages, the command is in caption instead of text.
-    """
-    return (message.text or message.caption or "").strip()
-
-
-# ────────────── COMMANDS ──────────────
-
-async def addflyer_cmd(client: Client, message: Message):
-    """
-    /addflyer <name> <caption...>
-    Must be sent with a photo attached OR as a reply to a photo.
-    """
-    if not is_creator(message.from_user.id):
-        return await message.reply_text("Only admins can create flyers. 💋")
-
-    raw = get_command_text(message)
-    if not raw:
-        return await message.reply_text(
-            "Usage:\n"
-            "<code>/addflyer &lt;name&gt; &lt;caption&gt;</code>\n"
-            "• Send it with a photo attached, or reply to a photo.\n"
-            "Example:\n"
-            "<code>/addflyer monday Warm-up teaser for the boys 💕</code>"
-        )
-
-    parts = raw.split(maxsplit=2)
-    if len(parts) < 2:
-        return await message.reply_text(
-            "Usage:\n"
-            "<code>/addflyer &lt;name&gt; &lt;caption&gt;</code>\n"
-            "• Send it with a photo attached, or reply to a photo."
-        )
-
-    # parts[0] is "/addflyer"
-    name = normalize_name(parts[1])
-    caption = parts[2] if len(parts) >= 3 else ""
-
-    file_id = get_photo_file_id(message)
-    if not file_id:
-        return await message.reply_text(
-            "I need a photo to save as a flyer.\n"
-            "Attach a photo or reply to a photo when using /addflyer. 💌"
-        )
-
-    doc = {
-        "chat_id": message.chat.id,
-        "name": name,
-        "file_id": file_id,
-        "caption": caption,
-        "updated_at": datetime.utcnow(),
-        "updated_by": message.from_user.id,
-    }
-
-    # Normal path: upsert by chat_id + name
-    try:
-        res = flyers_coll.update_one(
-            {"chat_id": message.chat.id, "name": name},
-            {"$set": doc},
-            upsert=True,
-        )
-    except DuplicateKeyError:
-        # Migration path: there is an old doc with this name but no chat_id,
-        # because of the legacy unique index on "name".
-        log.warning(
-            "DuplicateKeyError on flyer '%s' in chat %s; applying legacy migration update.",
-            name,
-            message.chat.id,
-        )
-        res = flyers_coll.update_one(
-            {"name": name},
-            {"$set": doc},
-            upsert=False,
-        )
-
-    if res.matched_count:
-        text = f"✅ Flyer <b>{name}</b> updated."
-    else:
-        text = f"✅ Flyer <b>{name}</b> saved."
-
-    await message.reply_text(
-        text
-        + "\nYou can send it with <code>/flyer {}</code> or see all flyers with "
-          "<code>/flyerlist</code>.".format(name)
-    )
-
-
-async def flyer_cmd(client: Client, message: Message):
-    """
-    /flyer <name>
-    Anyone can use this to show a saved flyer in the current chat.
-    """
-    raw = get_command_text(message)
-    parts = raw.split(maxsplit=1)
-    if len(parts) < 2:
-        return await message.reply_text(
-            "Usage: <code>/flyer &lt;name&gt;</code>\n"
-            "Example: <code>/flyer monday</code>"
-        )
-
-    name = normalize_name(parts[1])
-
-    doc = flyers_coll.find_one({"chat_id": message.chat.id, "name": name})
-    if not doc:
-        return await message.reply_text(f"❌ I don't have a flyer named <b>{name}</b> in this chat.")
-
-    await client.send_photo(
-        chat_id=message.chat.id,
-        photo=doc["file_id"],
-        caption=doc.get("caption") or "",
-    )
-
-
-async def flyerlist_cmd(client: Client, message: Message):
-    """
-    /flyerlist
-    Show all flyer names for this chat.
-    """
-    cursor = flyers_coll.find({"chat_id": message.chat.id}).sort("name", ASCENDING)
-    flyers = list(cursor)
-
-    if not flyers:
-        return await message.reply_text("No flyers saved for this chat yet. 🥺")
-
-    lines = ["<b>Saved flyers in this chat:</b>"]
-    for doc in flyers:
-        lines.append(f"• <code>{doc['name']}</code>")
-
-    await message.reply_text("\n".join(lines))
-
+def is_admin(user_id: int) -> bool:
+    return user_id in SUPER_ADMINS
 
 # ────────────── REGISTER ──────────────
+def register(app):
+    """
+    Register flyer commands on the given Pyrogram app:
+    - /addflyer <name> <caption>   (attach or reply to photo for image flyer)
+    - /flyer <name>
+    - /flyerlist  (alias: /listflyers)
+    - /deleteflyer <name>
+    - /textflyer <name>  (convert to text-only)
+    """
 
-def register(app: Client):
-    log.info("✅ handlers.flyer registered (simple flyer commands)")
-    app.add_handler(MessageHandler(addflyer_cmd, filters.command("addflyer")), group=0)
-    app.add_handler(MessageHandler(flyer_cmd, filters.command("flyer")), group=0)
-    app.add_handler(MessageHandler(flyerlist_cmd, filters.command("flyerlist")), group=0)
+    # ========= /addflyer =========
+    @app.on_message(filters.command("addflyer"))
+    async def addflyer_handler(client, message):
+        # only admins / superadmins can create / edit flyers
+        if not is_admin(message.from_user.id):
+            await message.reply("Only admins can add or edit flyers.")
+            return
+
+        msg_text = (message.text or message.caption or "").strip()
+        parts = msg_text.split(maxsplit=2)  # /addflyer name caption...
+
+        if len(parts) < 2:
+            await message.reply(
+                "Usage: /addflyer <name> <caption>\n\n"
+                "Attach a photo *or* reply to a photo with this command "
+                "to make a photo flyer."
+            )
+            return
+
+        name = parts[1].strip().lower()
+        caption = parts[2] if len(parts) > 2 else ""
+
+        # detect photo: either on this message or the replied-to message
+        file_id = None
+        if message.photo:
+            file_id = message.photo.file_id
+        elif message.reply_to_message and message.reply_to_message.photo:
+            file_id = message.reply_to_message.photo.file_id
+
+        flyer_type = "photo" if file_id else "text"
+
+        doc = {
+            "name": name,
+            "caption": caption,
+            "file_id": file_id,
+            "type": flyer_type,
+        }
+
+        try:
+            # upsert by name only (matches your unique index on "name")
+            flyer_collection.update_one(
+                {"name": name},
+                {"$set": doc},
+                upsert=True,
+            )
+        except DuplicateKeyError:
+            # extremely unlikely with this filter, but just in case:
+            flyer_collection.update_one({"name": name}, {"$set": doc}, upsert=False)
+
+        await message.reply(
+            f"✅ Flyer <b>{name}</b> saved"
+            f"{' with photo' if file_id else ''}.\n"
+            f"Use <code>/flyer {name}</code> to send it."
+        )
+
+    # ========= /flyer =========
+    @app.on_message(filters.command("flyer"))
+    async def flyer_handler(client, message):
+        msg_text = (message.text or message.caption or "").strip()
+        parts = msg_text.split(maxsplit=1)
+
+        if len(parts) < 2:
+            await message.reply("Usage: /flyer <name>")
+            return
+
+        name = parts[1].strip().lower()
+        flyer = flyer_collection.find_one({"name": name})
+
+        if not flyer:
+            await message.reply(f"❌ No flyer found with name <b>{name}</b>.")
+            return
+
+        caption = flyer.get("caption", "")
+        file_id = flyer.get("file_id")
+
+        if file_id and flyer.get("type") == "photo":
+            await message.reply_photo(file_id, caption=caption or None)
+        else:
+            await message.reply(caption or f"📢 Flyer: {name}")
+
+    # ========= /flyerlist & /listflyers =========
+    @app.on_message(filters.command(["flyerlist", "listflyers"]))
+    async def flyerlist_handler(client, message):
+        flyers = list(flyer_collection.find({}, {"_id": 0, "name": 1}).sort("name", 1))
+
+        if not flyers:
+            await message.reply("No flyers saved yet.")
+            return
+
+        lines = ["📂 <b>Available flyers:</b>"]
+        for f in flyers:
+            lines.append(f"• <code>{f['name']}</code>")
+
+        await message.reply("\n".join(lines))
+
+    # ========= /deleteflyer =========
+    @app.on_message(filters.command("deleteflyer"))
+    async def deleteflyer_handler(client, message):
+        if not is_admin(message.from_user.id):
+            await message.reply("Only admins can delete flyers.")
+            return
+
+        msg_text = (message.text or message.caption or "").strip()
+        parts = msg_text.split(maxsplit=1)
+
+        if len(parts) < 2:
+            await message.reply("Usage: /deleteflyer <name>")
+            return
+
+        name = parts[1].strip().lower()
+        res = flyer_collection.delete_one({"name": name})
+
+        if res.deleted_count:
+            await message.reply(f"🗑️ Flyer <b>{name}</b> deleted.")
+        else:
+            await message.reply(f"❌ No flyer found with name <b>{name}</b>.")
+
+    # ========= /textflyer =========
+    @app.on_message(filters.command("textflyer"))
+    async def textflyer_handler(client, message):
+        if not is_admin(message.from_user.id):
+            await message.reply("Only admins can convert flyers.")
+            return
+
+        msg_text = (message.text or message.caption or "").strip()
+        parts = msg_text.split(maxsplit=1)
+
+        if len(parts) < 2:
+            await message.reply("Usage: /textflyer <name>")
+            return
+
+        name = parts[1].strip().lower()
+        flyer = flyer_collection.find_one({"name": name})
+
+        if not flyer:
+            await message.reply(f"❌ No flyer found with name <b>{name}</b>.")
+            return
+
+        flyer_collection.update_one(
+            {"name": name},
+            {"$set": {"file_id": None, "type": "text"}},
+        )
+        await message.reply(
+            f"✅ Flyer <b>{name}</b> is now text-only.\n"
+            f"Use <code>/flyer {name}</code> to view it."
+        )
