@@ -21,6 +21,9 @@ OPEN_ACCESS_KEY = "RoniOpenAccessText"
 TEASER_TEXT_KEY = "RoniTeaserChannelsText"
 SANCTUARY_TEXT_KEY = "RoniSanctuaryText"
 
+# legacy list key (from your working zip)
+AGE_INDEX_KEY = "RoniAgeIndex"
+
 
 def _age_key(user_id: int) -> str:
     return f"AGE_OK:{user_id}"
@@ -32,24 +35,19 @@ def is_age_verified(user_id: int | None) -> bool:
     if user_id == RONI_OWNER_ID:
         return True
 
-    # source of truth: per-user key (never rely on list)
+    # ✅ source of truth: per-user key exists (works for "1" or JSON string)
     try:
         if store.get_menu(_age_key(user_id)):
             return True
     except Exception:
         pass
 
-    # fallback: list
+    # ✅ legacy fallback: RoniAgeIndex contains user_id
     try:
-        raw = store.get_menu("AGE_OK_LIST")
-        if raw:
-            lst = json.loads(raw)
-            if isinstance(lst, list):
-                for x in lst:
-                    if isinstance(x, int) and x == user_id:
-                        return True
-                    if isinstance(x, dict) and x.get("user_id") == user_id:
-                        return True
+        raw = store.get_menu(AGE_INDEX_KEY) or "[]"
+        ids = json.loads(raw)
+        if isinstance(ids, list) and user_id in [int(x) for x in ids]:
+            return True
     except Exception:
         pass
 
@@ -62,7 +60,6 @@ def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("📖 Roni’s Menu", callback_data="roni_portal:menu")])
     rows.append([InlineKeyboardButton("💌 Book Roni", url=f"https://t.me/{RONI_USERNAME}")])
 
-    # ✅ FIX: correct callback that your booking handler actually listens for
     if user_id and is_age_verified(user_id):
         rows.append([InlineKeyboardButton("💞 Book a private NSFW texting session", callback_data="nsfw_book:open")])
 
@@ -74,7 +71,6 @@ def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:open_access")])
     rows.append([InlineKeyboardButton("😈 Succubus Sanctuary", callback_data="roni_portal:sanctuary")])
 
-    # teaser vs age verify
     if user_id == RONI_OWNER_ID:
         rows.append([InlineKeyboardButton("🔥 Teaser & Promo Channels", callback_data="roni_portal:teaser")])
         rows.append([InlineKeyboardButton("✅ Age Verify (test)", callback_data="roni_portal:age")])
@@ -168,18 +164,14 @@ def register(app: Client) -> None:
     async def roni_tip_coming_cb(_, cq: CallbackQuery):
         await cq.answer("Roni’s Stripe tip link is coming soon 💕", show_alert=True)
 
-    @app.on_callback_query(filters.regex(r"^roni_portal:menu"))
+    @app.on_callback_query(filters.regex(r"^roni_portal:menu$"))
     async def roni_menu_cb(_, cq: CallbackQuery):
         menu_text = store.get_menu(RONI_MENU_KEY)
-        if menu_text:
-            text = f"📖 <b>Roni’s Menu</b>\n\n{menu_text}"
-        else:
-            text = (
-                "📖 <b>Roni’s Menu</b>\n\n"
-                "Roni hasn’t set up her personal menu yet.\n"
-                "She can do it from the ⚙️ Roni Admin button. 💕"
-            )
-
+        text = f"📖 <b>Roni’s Menu</b>\n\n{menu_text}" if menu_text else (
+            "📖 <b>Roni’s Menu</b>\n\n"
+            "Roni hasn’t set up her personal menu yet.\n"
+            "She can do it from the ⚙️ Roni Admin button. 💕"
+        )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")]])
         await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
@@ -210,9 +202,7 @@ def register(app: Client) -> None:
         if user_id != RONI_OWNER_ID and not (user_id and is_age_verified(user_id)):
             await cq.answer("You’ll need to complete age verification first 💕", show_alert=True)
             return
-        teaser_text = store.get_menu(TEASER_TEXT_KEY) or (
-            os.getenv("RONI_TEASER_CHANNELS_TEXT") or "Roni will add her teaser & promo channels here soon. 💕"
-        )
+        teaser_text = store.get_menu(TEASER_TEXT_KEY) or (os.getenv("RONI_TEASER_CHANNELS_TEXT") or "Coming soon 💕")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")]])
         await cq.message.edit_text(teaser_text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
@@ -231,64 +221,3 @@ def register(app: Client) -> None:
             disable_web_page_preview=True,
         )
         await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^roni_admin:edit_(menu|open|teaser|sanctuary)$"))
-    async def roni_admin_edit(_, cq: CallbackQuery):
-        if cq.from_user.id != RONI_OWNER_ID:
-            await cq.answer("Only Roni 💜", show_alert=True)
-            return
-
-        action = cq.data.split(":")[-1].replace("edit_", "")
-        store.set_menu(f"_RONI_PENDING:{cq.from_user.id}", action)
-
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="roni_admin:cancel")]])
-        await cq.message.edit_text(
-            "Send me the new text in one message.\n\n"
-            "❗ Tip: you can include emojis and line breaks.\n\n"
-            "🚫 NO meetups — online/texting only.",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^roni_admin:cancel$"))
-    async def roni_admin_cancel_cb(_, cq: CallbackQuery):
-        if cq.from_user.id != RONI_OWNER_ID:
-            await cq.answer()
-            return
-        store.set_menu(f"_RONI_PENDING:{cq.from_user.id}", "")
-        await cq.message.edit_text(
-            "Cancelled 💜",
-            reply_markup=_roni_main_keyboard(cq.from_user.id),
-            disable_web_page_preview=True
-        )
-        await cq.answer()
-
-    @app.on_message(filters.private & filters.text, group=-2)
-    async def roni_admin_capture(_, m: Message):
-        if not m.from_user or m.from_user.id != RONI_OWNER_ID:
-            return
-        pending_key = f"_RONI_PENDING:{m.from_user.id}"
-        action = store.get_menu(pending_key) or ""
-        if not action:
-            return
-        store.set_menu(pending_key, "")
-
-        if action == "menu":
-            store.set_menu(RONI_MENU_KEY, m.text)
-            await m.reply_text("Saved your menu 💕", reply_markup=_admin_keyboard(), disable_web_page_preview=True)
-        elif action == "open":
-            store.set_menu(OPEN_ACCESS_KEY, m.text)
-            await m.reply_text("Saved Open Access 💕", reply_markup=_admin_keyboard(), disable_web_page_preview=True)
-        elif action == "teaser":
-            store.set_menu(TEASER_TEXT_KEY, m.text)
-            await m.reply_text("Saved Teaser/Promo text 💕", reply_markup=_admin_keyboard(), disable_web_page_preview=True)
-        elif action == "sanctuary":
-            store.set_menu(SANCTUARY_TEXT_KEY, m.text)
-            await m.reply_text("Saved Sanctuary text 💕", reply_markup=_admin_keyboard(), disable_web_page_preview=True)
-        else:
-            await m.reply_text("Saved 💕", reply_markup=_admin_keyboard(), disable_web_page_preview=True)
-
-    # ✅ IMPORTANT:
-    # Do NOT define a handler for "roni_portal:age" here.
-    # That callback is owned by handlers/roni_portal_age.py
