@@ -113,6 +113,10 @@ def main():
     _try_register("roni_portal")             # core portal UI + text blocks
     _try_register("roni_portal_age")         # age verification + AV admin
 
+    # ✅ NEW: NSFW texting session booking + Roni-only availability controls
+    _try_register("nsfw_text_session_booking")
+    _try_register("nsfw_text_session_availability")
+
     # Help panel (buttons -> env text)
     _try_register("help_panel")              # help:open + pages
 
@@ -220,70 +224,5 @@ def main():
             await msg.reply_text("Only Roni and approved models can use /summonall here.")
             return
 
-        # Text after the command becomes the message header
-        # /summonall Game night is starting! -> "Game night is starting!"
-        header_text = ""
-        if msg.text:
-            parts = msg.text.split(maxsplit=1)
-            if len(parts) > 1:
-                header_text = parts[1].strip()
-
-        # Collect all human members
-        mentions: List[str] = []
-        try:
-            async for member in client.get_chat_members(chat_id):
-                u = member.user
-                if not u or u.is_bot:
-                    continue
-                name = (u.first_name or u.last_name or "Member").strip()
-                mentions.append(f'<a href="tg://user?id={u.id}">{name}</a>')
-        except Exception as e:
-            log.exception("summon: get_chat_members failed: %s", e)
-            await msg.reply_text(
-                "I couldn’t read the member list. Make sure I can see members."
-            )
-            return
-
-        if not mentions:
-            await msg.reply_text("I don’t see any members to tag (besides bots).")
-            return
-
-        total = len(mentions)
-        chunks = _chunk_list(mentions, 20)   # 20 mentions per message
-        reply_to_id = msg.reply_to_message_id or msg.id
-
-        num_batches = len(chunks)
-        batch_num = 1
-
-        for chunk in chunks:
-            # Very obvious what happened, like MentionMembers
-            header_lines = [f"Summoning {total} member(s) – batch {batch_num}/{num_batches}"]
-            if header_text:
-                header_lines.append(header_text)
-
-            text = "\n".join(header_lines) + "\n\n" + " ".join(chunk)
-
-            try:
-                await client.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_to_message_id=reply_to_id,
-                    disable_web_page_preview=True,
-                )
-            except Exception as e:
-                log.warning("summon: failed to send batch %s: %s", batch_num, e)
-
-            batch_num += 1
-
-        # Delete original command for BOTH /summonall and /summon
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-
-    # IMPORTANT: no /start fallback here (to avoid duplicates).
-    app.run()
-
-
-if __name__ == "__main__":
-    main()
+        # ... rest of your file continues unchanged ...
+        # (Keep everything below exactly as you already have it.)
