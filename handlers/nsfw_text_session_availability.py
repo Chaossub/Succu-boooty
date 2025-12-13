@@ -1,417 +1,644 @@
+# handlers/nsfw_text_session_availability.py
+import json
+import logging
 import os
 from datetime import datetime, timedelta
-from typing import List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import pytz
 from pyrogram import Client, filters
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from utils.menu_store import store
-from utils.nsfw_store import (
-    TZ,
-    add_allowed_window,
-    clear_allowed_for_date,
-    clear_blocks_for_date,
-    get_allowed_for_date,
-    get_blocks_for_date,
-    get_business_hours_for_weekday,
-    set_blocks_for_date,
-)
+
+log = logging.getLogger(__name__)
+
+# ────────────── CONFIG ──────────────
 
 RONI_OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
+TZ_NAME = os.getenv("RONI_TZ", "America/Los_Angeles")
+TZ = pytz.timezone(TZ_NAME)
+
+# Business hours (default fallback when no custom windows exist)
+# Mon-Fri: 9:00 AM - 10:00 PM
+# Sat:     9:00 AM -  9:00 PM
+# Sun:     9:00 AM - 10:00 PM
+BUSINESS_HOURS = {
+    0: ("09:00", "22:00"),  # Mon
+    1: ("09:00", "22:00"),  # Tue
+    2: ("09:00", "22:00"),  # Wed
+    3: ("09:00", "22:00"),  # Thu
+    4: ("09:00", "22:00"),  # Fri
+    5: ("09:00", "21:00"),  # Sat
+    6: ("09:00", "22:00"),  # Sun
+}
+
+# Storage key (MenuStore persists across restarts; Mongo if configured, else JSON file)
+STATE_KEY = "NSFW_TEXTING_AVAIL_STATE"
+
+# Callback prefixes
+CB_OPEN = "nsfw_avail:open"
+CB_WEEK = "nsfw_avail:week"        # nsfw_avail:week:<page>
+CB_DATE = "nsfw_avail:date"        # nsfw_avail:date:<yyyymmdd>
+
+CB_BLOCK = "nsfw_avail:block"      # nsfw_avail:block:<yyyymmdd>:<mins>:<hhmm>
+CB_BLOCK_PICK = "nsfw_avail:blockpick"  # nsfw_avail:blockpick:<yyyymmdd>:<mins>
+
+CB_BLOCK_DAY = "nsfw_avail:blockday"     # nsfw_avail:blockday:<yyyymmdd>
+CB_CLEAR_BLOCKS = "nsfw_avail:clrblk"    # nsfw_avail:clrblk:<yyyymmdd>
+
+CB_ALLOW_ADD = "nsfw_avail:allowadd"     # nsfw_avail:allowadd:<yyyymmdd>
+CB_ALLOW_PRESET = "nsfw_avail:allowpre"  # nsfw_avail:allowpre:<yyyymmdd>:<preset>
+CB_ALLOW_START = "nsfw_avail:allowst"    # nsfw_avail:allowst:<yyyymmdd>:<hhmm>
+CB_ALLOW_END = "nsfw_avail:allowen"      # nsfw_avail:allowen:<yyyymmdd>:<hhmmStart>:<hhmmEnd>
+
+CB_CLEAR_ALLOW = "nsfw_avail:clralw"     # nsfw_avail:clralw:<yyyymmdd>
+CB_CLEAR_ALL = "nsfw_avail:clrall"       # nsfw_avail:clrall:<yyyymmdd>
+
+CB_BACK_ADMIN = "roni_admin:open"
 
 
-def _tz():
-    return pytz.timezone(TZ)
+# ────────────── TIME HELPERS ──────────────
 
-
-def _owner_only(cq: CallbackQuery) -> bool:
-    return bool(cq.from_user and cq.from_user.id == RONI_OWNER_ID)
-
-
-def _dt_to_yyyymmdd(dt: datetime) -> str:
-    return dt.strftime("%Y%m%d")
-
-
-def _yyyymmdd_to_local_day(yyyymmdd: str) -> datetime:
-    tz = _tz()
-    return tz.localize(datetime(int(yyyymmdd[0:4]), int(yyyymmdd[4:6]), int(yyyymmdd[6:8]), 0, 0, 0))
-
-
-def _pretty_date_label(day_dt: datetime) -> str:
-    return day_dt.strftime("%a %b %d").replace(" 0", " ")
-
-
-def _min_from_hhmm(hhmm: str) -> int:
-    h, m = hhmm.split(":")
+def _hm_to_min(hm: str) -> int:
+    h, m = hm.split(":")
     return int(h) * 60 + int(m)
 
+def _min_to_hm(m: int) -> str:
+    m = max(0, min(24 * 60, m))
+    return f"{m//60:02d}:{m%60:02d}"
 
-def _hhmm_from_min(m: int) -> str:
-    return f"{m // 60:02d}:{m % 60:02d}"
+def _hhmm_to_hm(hhmm: str) -> str:
+    return f"{hhmm[0:2]}:{hhmm[2:4]}"
+
+def _hm_to_hhmm(hm: str) -> str:
+    return hm.replace(":", "")
+
+def _date_key(d: datetime) -> str:
+    return d.strftime("%Y%m%d")
+
+def _parse_date_key(k: str) -> datetime:
+    return datetime.strptime(k, "%Y%m%d").replace(tzinfo=TZ)
+
+def _fmt_date(k: str) -> str:
+    # "Sunday, Dec 14"
+    dt = datetime.strptime(k, "%Y%m%d")
+    # dt is naive; format is fine
+    return dt.strftime("%A, %b %d")
+
+def _business_hours_for_date(yyyymmdd: str) -> Tuple[str, str]:
+    dt = datetime.strptime(yyyymmdd, "%Y%m%d")
+    wd = dt.weekday()
+    return BUSINESS_HOURS.get(wd, ("09:00", "22:00"))
+
+def _time_slots_between(start_hm: str, end_hm: str, step_min: int = 30) -> List[str]:
+    s = _hm_to_min(start_hm)
+    e = _hm_to_min(end_hm)
+    out = []
+    cur = s
+    while cur < e:
+        out.append(_min_to_hm(cur))
+        cur += step_min
+    return out
 
 
-def _date_picker_kb(week: int) -> InlineKeyboardMarkup:
-    tz = _tz()
-    base = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-    start = base + timedelta(days=week * 7)
+# ────────────── INTERVAL NORMALIZATION ──────────────
 
+def _merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    intervals = [(s, e) for (s, e) in intervals if e > s]
+    if not intervals:
+        return []
+    intervals.sort(key=lambda x: (x[0], x[1]))
+    merged = [intervals[0]]
+    for s, e in intervals[1:]:
+        ps, pe = merged[-1]
+        if s <= pe:  # overlap/touch
+            merged[-1] = (ps, max(pe, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+def _clip_interval(s: int, e: int) -> Tuple[int, int]:
+    s = max(0, min(24 * 60, s))
+    e = max(0, min(24 * 60, e))
+    return (s, e)
+
+def _as_pairs_hm(intervals: List[Tuple[int, int]]) -> List[List[str]]:
+    return [[_min_to_hm(s), _min_to_hm(e)] for (s, e) in intervals]
+
+def _from_pairs_hm(pairs: List[List[str]]) -> List[Tuple[int, int]]:
+    out = []
+    for p in pairs or []:
+        if not isinstance(p, list) or len(p) != 2:
+            continue
+        try:
+            s = _hm_to_min(p[0])
+            e = _hm_to_min(p[1])
+            s, e = _clip_interval(s, e)
+            if e > s:
+                out.append((s, e))
+        except Exception:
+            continue
+    return out
+
+
+# ────────────── PERSISTENCE ──────────────
+# We store:
+# {
+#   "20251214": {
+#      "allowed": [["09:00","12:00"], ...],
+#      "blocked": [["10:30","11:00"], ...],
+#      "blocked_all_day": false
+#   },
+#   ...
+# }
+
+def _load_state() -> Dict[str, dict]:
+    raw = store.get_menu(STATE_KEY)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def _save_state(state: Dict[str, dict]) -> None:
+    try:
+        store.set_menu(STATE_KEY, json.dumps(state, ensure_ascii=False))
+    except Exception as e:
+        log.warning("nsfw_avail: failed to save state: %s", e)
+
+def _get_day(state: Dict[str, dict], yyyymmdd: str) -> dict:
+    day = state.get(yyyymmdd)
+    if not isinstance(day, dict):
+        day = {"allowed": [], "blocked": [], "blocked_all_day": False}
+        state[yyyymmdd] = day
+    day.setdefault("allowed", [])
+    day.setdefault("blocked", [])
+    day.setdefault("blocked_all_day", False)
+    return day
+
+
+# ────────────── BUSINESS LOGIC ──────────────
+
+def _add_block(state: Dict[str, dict], yyyymmdd: str, start_hm: str, mins: int) -> None:
+    day = _get_day(state, yyyymmdd)
+    if day.get("blocked_all_day"):
+        return
+    s = _hm_to_min(start_hm)
+    e = s + mins
+    s, e = _clip_interval(s, e)
+    blocks = _from_pairs_hm(day.get("blocked", []))
+    blocks.append((s, e))
+    blocks = _merge_intervals(blocks)
+    day["blocked"] = _as_pairs_hm(blocks)
+
+def _set_block_all_day(state: Dict[str, dict], yyyymmdd: str, on: bool) -> None:
+    day = _get_day(state, yyyymmdd)
+    day["blocked_all_day"] = bool(on)
+    if on:
+        day["blocked"] = []  # not needed when all-day block is on
+
+def _clear_blocks(state: Dict[str, dict], yyyymmdd: str) -> None:
+    day = _get_day(state, yyyymmdd)
+    day["blocked_all_day"] = False
+    day["blocked"] = []
+
+def _add_allowed(state: Dict[str, dict], yyyymmdd: str, start_hm: str, end_hm: str) -> None:
+    day = _get_day(state, yyyymmdd)
+    s = _hm_to_min(start_hm)
+    e = _hm_to_min(end_hm)
+    s, e = _clip_interval(s, e)
+    if e <= s:
+        return
+    allowed = _from_pairs_hm(day.get("allowed", []))
+    allowed.append((s, e))
+    allowed = _merge_intervals(allowed)
+    day["allowed"] = _as_pairs_hm(allowed)
+
+def _clear_allowed(state: Dict[str, dict], yyyymmdd: str) -> None:
+    day = _get_day(state, yyyymmdd)
+    day["allowed"] = []
+
+def _clear_all_for_date(state: Dict[str, dict], yyyymmdd: str) -> None:
+    day = _get_day(state, yyyymmdd)
+    day["allowed"] = []
+    day["blocked"] = []
+    day["blocked_all_day"] = False
+
+
+# ────────────── UI HELPERS ──────────────
+
+def _is_owner(user_id: int) -> bool:
+    return user_id == RONI_OWNER_ID
+
+def _kb_admin_back() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back to Roni Admin", callback_data=CB_BACK_ADMIN)]])
+
+def _kb_week_picker(page: int = 0) -> InlineKeyboardMarkup:
+    """
+    Shows a 7-day picker with actual dates + next/prev week.
+    Page 0 = this week (starting today)
+    Page 1 = next week, etc
+    """
+    now = datetime.now(TZ)
+    start = (now.date() + timedelta(days=page * 7))
+    days = [datetime.combine(start + timedelta(days=i), datetime.min.time()).replace(tzinfo=TZ) for i in range(7)]
+
+    # 2 columns-ish like your screenshot
     rows: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
-
-    for i in range(7):
-        d = (start + timedelta(days=i)).astimezone(tz)
-        ymd = _dt_to_yyyymmdd(d)
-        row.append(InlineKeyboardButton(_pretty_date_label(d), callback_data=f"nsfw_avail:date:{ymd}:{week}"))
+    for d in days:
+        label = d.strftime("%a %b %d")  # "Fri Dec 12"
+        key = _date_key(d)
+        row.append(InlineKeyboardButton(label, callback_data=f"{CB_DATE}:{key}"))
         if len(row) == 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
 
-    nav: List[InlineKeyboardButton] = []
-    if week > 0:
-        nav.append(InlineKeyboardButton("⬅ Prev week", callback_data=f"nsfw_avail:pickdate:{week-1}"))
-    nav.append(InlineKeyboardButton("Next week ➡", callback_data=f"nsfw_avail:pickdate:{week+1}"))
-    rows.append(nav)
+    nav_row: List[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅ Prev week", callback_data=f"{CB_WEEK}:{page-1}"))
+    nav_row.append(InlineKeyboardButton("Next week ➡", callback_data=f"{CB_WEEK}:{page+1}"))
+    rows.append(nav_row)
 
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data="nsfw_avail:open")])
+    rows.append([InlineKeyboardButton("⬅ Back to Roni Admin", callback_data=CB_BACK_ADMIN)])
     return InlineKeyboardMarkup(rows)
 
-
-def _date_actions_kb(ymd: str, week: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("➕ Block 30 minutes", callback_data=f"nsfw_avail:blockpick:{ymd}:{week}:30")],
-            [InlineKeyboardButton("➕ Block 60 minutes", callback_data=f"nsfw_avail:blockpick:{ymd}:{week}:60")],
-
-            [InlineKeyboardButton("✅ Add available SLOT (30m)", callback_data=f"nsfw_avail:allowpick:{ymd}:{week}:slot:30")],
-            [InlineKeyboardButton("✅ Add available SLOT (60m)", callback_data=f"nsfw_avail:allowpick:{ymd}:{week}:slot:60")],
-
-            [InlineKeyboardButton("✅ Add available WINDOW", callback_data=f"nsfw_avail:allowpick:{ymd}:{week}:win")],
-
-            [InlineKeyboardButton("🧼 Clear ALL blocks (this date)", callback_data=f"nsfw_avail:clearblocks:{ymd}:{week}")],
-            [InlineKeyboardButton("🔄 Reset availability to business hours", callback_data=f"nsfw_avail:clearallowed:{ymd}:{week}")],
-
-            [InlineKeyboardButton("⬅ Pick another date", callback_data=f"nsfw_avail:pickdate:{week}")],
-            [InlineKeyboardButton("⬅ Back to Roni Admin", callback_data="roni_admin:open")],
-        ]
+def _render_overview_text() -> str:
+    return (
+        "🗓 <b>NSFW Availability (Roni)</b>\n\n"
+        "Business hours are the default.\n"
+        "Pick a date to add <b>availability windows</b> and/or <b>blocks</b>.\n\n"
+        f"Timezone: <b>{TZ_NAME}</b>"
     )
 
+def _render_day_text(state: Dict[str, dict], yyyymmdd: str) -> str:
+    day = _get_day(state, yyyymmdd)
+    open_hm, close_hm = _business_hours_for_date(yyyymmdd)
 
-def _generate_start_times_for_date(ymd: str, duration: int) -> List[str]:
+    allowed_pairs = day.get("allowed", []) or []
+    blocked_pairs = day.get("blocked", []) or []
+    blocked_all_day = bool(day.get("blocked_all_day"))
+
+    lines = [f"📅 <b>{_fmt_date(yyyymmdd)}</b>\n"]
+    lines.append(f"🕘 <b>Business hours:</b> {open_hm} – {close_hm} (default)\n")
+
+    if allowed_pairs:
+        lines.append("✅ <b>Availability windows (custom):</b>")
+        for a in allowed_pairs:
+            if isinstance(a, list) and len(a) == 2:
+                lines.append(f"• {a[0]} – {a[1]}")
+        lines.append("")  # spacer
+    else:
+        lines.append("✅ <b>Availability windows:</b> none set (using business hours)\n")
+
+    if blocked_all_day:
+        lines.append("⛔ <b>Blocked:</b> ALL DAY\n")
+    elif blocked_pairs:
+        lines.append("⛔ <b>Blocked:</b>")
+        for b in blocked_pairs:
+            if isinstance(b, list) and len(b) == 2:
+                lines.append(f"• {b[0]} – {b[1]}")
+        lines.append("")
+    else:
+        lines.append("⛔ <b>Blocked:</b> none\n")
+
+    lines.append("Choose what to do:")
+    return "\n".join(lines)
+
+def _kb_day_actions(yyyymmdd: str) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("➕ Add availability window", callback_data=f"{CB_ALLOW_ADD}:{yyyymmdd}")],
+        [InlineKeyboardButton("➕ Block 30 minutes", callback_data=f"{CB_BLOCK_PICK}:{yyyymmdd}:30"),
+         InlineKeyboardButton("➕ Block 60 minutes", callback_data=f"{CB_BLOCK_PICK}:{yyyymmdd}:60")],
+        [InlineKeyboardButton("⛔ Block entire day", callback_data=f"{CB_BLOCK_DAY}:{yyyymmdd}")],
+        [InlineKeyboardButton("🧼 Clear ALL blocks (this date)", callback_data=f"{CB_CLEAR_BLOCKS}:{yyyymmdd}")],
+        [InlineKeyboardButton("🔄 Clear availability windows (use business hours)", callback_data=f"{CB_CLEAR_ALLOW}:{yyyymmdd}")],
+        [InlineKeyboardButton("🧨 Clear EVERYTHING (this date)", callback_data=f"{CB_CLEAR_ALL}:{yyyymmdd}")],
+        [InlineKeyboardButton("📅 Pick another date", callback_data=f"{CB_WEEK}:0")],
+        [InlineKeyboardButton("⬅ Back to Roni Admin", callback_data=CB_BACK_ADMIN)],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+def _kb_pick_start_times(yyyymmdd: str, kind: str, mins: int = 30) -> InlineKeyboardMarkup:
     """
-    For picking start times: every possible start in business hours (30-min increments),
-    so you can edit weeks/months ahead.
+    kind:
+      - "block"  -> produces nsfw_avail:block:<date>:<mins>:<hhmm>
+      - "allow"  -> produces nsfw_avail:allowst:<date>:<hhmm>
     """
-    day_dt = _yyyymmdd_to_local_day(ymd).astimezone(_tz())
-    weekday = day_dt.weekday()
-    open_h, close_h = get_business_hours_for_weekday(weekday)
+    open_hm, close_hm = _business_hours_for_date(yyyymmdd)
+    slots = _time_slots_between(open_hm, close_hm, 30)
 
-    open_min = _min_from_hhmm(open_h)
-    close_min = _min_from_hhmm(close_h)
-    latest_start = close_min - duration
-
-    starts: List[str] = []
-    m = open_min
-    while m <= latest_start:
-        starts.append(_hhmm_from_min(m))
-        m += 30
-    return starts
-
-
-def _pick_time_kb(prefix: str, ymd: str, week: int, duration: int) -> InlineKeyboardMarkup:
-    starts = _generate_start_times_for_date(ymd, duration)
     rows: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
-
-    for hhmm in starts[:42]:
-        compact = hhmm.replace(":", "")
-        row.append(InlineKeyboardButton(hhmm, callback_data=f"{prefix}:{ymd}:{week}:{duration}:{compact}"))
+    for hm in slots:
+        hhmm = _hm_to_hhmm(hm)
+        if kind == "block":
+            cb = f"{CB_BLOCK}:{yyyymmdd}:{mins}:{hhmm}"
+        else:
+            cb = f"{CB_ALLOW_START}:{yyyymmdd}:{hhmm}"
+        row.append(InlineKeyboardButton(hm, callback_data=cb))
         if len(row) == 3:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
 
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data=f"nsfw_avail:date:{ymd}:{week}")])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data=f"{CB_DATE}:{yyyymmdd}")])
+    rows.append([InlineKeyboardButton("⬅ Back to Roni Admin", callback_data=CB_BACK_ADMIN)])
     return InlineKeyboardMarkup(rows)
 
+def _kb_pick_end_times(yyyymmdd: str, start_hm: str) -> InlineKeyboardMarkup:
+    open_hm, close_hm = _business_hours_for_date(yyyymmdd)
+    s = _hm_to_min(start_hm)
+    emax = _hm_to_min(close_hm)
 
-def _pick_window_end_kb(ymd: str, week: int, start_hhmm: str) -> InlineKeyboardMarkup:
-    day_dt = _yyyymmdd_to_local_day(ymd).astimezone(_tz())
-    weekday = day_dt.weekday()
-    open_h, close_h = get_business_hours_for_weekday(weekday)
-
-    start_min = _min_from_hhmm(start_hhmm)
-    close_min = _min_from_hhmm(close_h)
-
-    # end must be at least +30
-    ends: List[str] = []
-    m = start_min + 30
-    while m <= close_min:
-        ends.append(_hhmm_from_min(m))
-        m += 30
+    # end options in 30-min steps, at least +30
+    ends = []
+    cur = s + 30
+    while cur <= emax:
+        ends.append(_min_to_hm(cur))
+        cur += 30
 
     rows: List[List[InlineKeyboardButton]] = []
     row: List[InlineKeyboardButton] = []
-
-    for hhmm in ends[:42]:
-        compact = hhmm.replace(":", "")
-        row.append(InlineKeyboardButton(hhmm, callback_data=f"nsfw_avail:winend:{ymd}:{week}:{start_hhmm.replace(':','')}:{compact}"))
+    for hm_end in ends:
+        cb = f"{CB_ALLOW_END}:{yyyymmdd}:{_hm_to_hhmm(start_hm)}:{_hm_to_hhmm(hm_end)}"
+        row.append(InlineKeyboardButton(hm_end, callback_data=cb))
         if len(row) == 3:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
 
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data=f"nsfw_avail:date:{ymd}:{week}")])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data=f"{CB_ALLOW_ADD}:{yyyymmdd}")])
+    rows.append([InlineKeyboardButton("⬅ Back to Roni Admin", callback_data=CB_BACK_ADMIN)])
     return InlineKeyboardMarkup(rows)
 
+def _kb_allow_presets(yyyymmdd: str) -> InlineKeyboardMarkup:
+    # Presets reflect your business hours vibe (and still allow custom after)
+    open_hm, close_hm = _business_hours_for_date(yyyymmdd)
+
+    rows = [
+        [InlineKeyboardButton("🌞 Morning (09:00–12:00)", callback_data=f"{CB_ALLOW_PRESET}:{yyyymmdd}:morning")],
+        [InlineKeyboardButton("☀️ Afternoon (12:00–17:00)", callback_data=f"{CB_ALLOW_PRESET}:{yyyymmdd}:afternoon")],
+        [InlineKeyboardButton("🌙 Evening (17:00–close)", callback_data=f"{CB_ALLOW_PRESET}:{yyyymmdd}:evening")],
+        [InlineKeyboardButton(f"🕘 Full business hours ({open_hm}–{close_hm})", callback_data=f"{CB_ALLOW_PRESET}:{yyyymmdd}:full")],
+        [InlineKeyboardButton("🧩 Custom window (pick start)", callback_data=f"{CB_ALLOW_START}:{yyyymmdd}:{_hm_to_hhmm(open_hm)}")],
+        [InlineKeyboardButton("⬅ Back", callback_data=f"{CB_DATE}:{yyyymmdd}")],
+        [InlineKeyboardButton("⬅ Back to Roni Admin", callback_data=CB_BACK_ADMIN)],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+# ────────────── REGISTER ──────────────
 
 def register(app: Client) -> None:
+    log.info("✅ handlers.nsfw_text_session_availability registered (tz=%s owner=%s)", TZ_NAME, RONI_OWNER_ID)
+
     @app.on_callback_query(filters.regex(r"^nsfw_avail:open$"))
-    async def avail_open(_, cq: CallbackQuery):
-        if not _owner_only(cq):
+    async def nsfw_avail_open(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
             await cq.answer("Only Roni can use this 💜", show_alert=True)
             return
 
-        await cq.message.edit_text(
-            f"🗓 <b>NSFW Availability (Roni)</b>\n\n"
-            f"Business hours are the default.\n"
-            f"You can:\n"
-            f"• Add <b>blocks</b> (unavailable)\n"
-            f"• Add <b>availability</b> slots/windows (overrides)\n\n"
-            f"Timezone: <b>{TZ}</b>",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("📅 Pick a date", callback_data="nsfw_avail:pickdate:0")],
-                    [InlineKeyboardButton("⬅ Back to Roni Admin", callback_data="roni_admin:open")],
-                ]
-            ),
-            disable_web_page_preview=True,
-        )
+        text = _render_overview_text()
+        kb = _kb_week_picker(page=0)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:pickdate:\d+$"))
-    async def avail_pickdate(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:week:\d+$"))
+    async def nsfw_avail_week(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
             return
 
-        week = int(cq.data.split(":")[2])
-        await cq.message.edit_text(
-            "Pick a date to edit 🗓 (Los Angeles time)",
-            reply_markup=_date_picker_kb(week),
-            disable_web_page_preview=True,
-        )
+        try:
+            page = int(cq.data.split(":")[-1])
+        except Exception:
+            page = 0
+
+        text = "Pick a date 📅 (Los Angeles time)"
+        kb = _kb_week_picker(page=max(0, page))
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:date:\d{8}:\d+$"))
-    async def avail_date(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:date:\d{8}$"))
+    async def nsfw_avail_date(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
             return
 
-        _, _, ymd, week_s = cq.data.split(":")
-        week = int(week_s)
-
-        day_dt = _yyyymmdd_to_local_day(ymd).astimezone(_tz())
-        label = day_dt.strftime("%A, %b %d").replace(" 0", " ")
-
-        blocks = get_blocks_for_date(ymd)
-        allowed = get_allowed_for_date(ymd)
-
-        if allowed:
-            al = "\n".join([f"• {s}–{e}" for (s, e) in allowed])
-            allowed_text = f"<b>Availability overrides:</b>\n{al}\n(Booking will only offer times inside these windows)"
-        else:
-            allowed_text = "<b>Availability overrides:</b>\nNone (using business hours ✅)"
-
-        if blocks:
-            bl = "\n".join([f"• {s}–{e}" for (s, e) in blocks])
-            block_text = f"<b>Blocks (unavailable):</b>\n{bl}"
-        else:
-            block_text = "<b>Blocks (unavailable):</b>\nNone ✅"
-
-        await cq.message.edit_text(
-            f"🗓 <b>{label}</b>\n\n{allowed_text}\n\n{block_text}\n\nChoose what to do:",
-            reply_markup=_date_actions_kb(ymd, week),
-            disable_web_page_preview=True,
-        )
+        yyyymmdd = cq.data.split(":")[-1]
+        state = _load_state()
+        text = _render_day_text(state, yyyymmdd)
+        kb = _kb_day_actions(yyyymmdd)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
 
-    # ────────────── CLEAR BUTTONS ──────────────
+    # ───────── BLOCK FLOW ─────────
 
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:clearblocks:\d{8}:\d+$"))
-    async def avail_clearblocks(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
-            return
-        _, _, ymd, week_s = cq.data.split(":")
-        week = int(week_s)
-        clear_blocks_for_date(ymd)
-        await cq.answer("Cleared blocks ✅", show_alert=True)
-        await cq.message.edit_text("Refreshing…", disable_web_page_preview=True)
-        cq.data = f"nsfw_avail:date:{ymd}:{week}"
-        await avail_date(_, cq)
-
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:clearallowed:\d{8}:\d+$"))
-    async def avail_clearallowed(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
-            return
-        _, _, ymd, week_s = cq.data.split(":")
-        week = int(week_s)
-        clear_allowed_for_date(ymd)
-        await cq.answer("Availability reset ✅", show_alert=True)
-        await cq.message.edit_text("Refreshing…", disable_web_page_preview=True)
-        cq.data = f"nsfw_avail:date:{ymd}:{week}"
-        await avail_date(_, cq)
-
-    # ────────────── BLOCK PICKERS ──────────────
-
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:blockpick:\d{8}:\d+:(30|60)$"))
-    async def avail_blockpick(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:blockpick:\d{8}:(30|60)$"))
+    async def nsfw_block_pick(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
             return
 
-        _, _, ymd, week_s, dur_s = cq.data.split(":")
-        week = int(week_s)
-        duration = int(dur_s)
+        _, _, yyyymmdd, mins_s = cq.data.split(":")
+        mins = int(mins_s)
 
-        day_dt = _yyyymmdd_to_local_day(ymd).astimezone(_tz())
-        label = day_dt.strftime("%A, %b %d").replace(" 0", " ")
-
-        await cq.message.edit_text(
-            f"➕ Block a <b>{duration}-minute</b> slot\n🗓 <b>{label}</b>\n\nPick a start time (LA):",
-            reply_markup=_pick_time_kb("nsfw_avail:blocktime", ymd, week, duration),
-            disable_web_page_preview=True,
-        )
+        text = f"Pick a start time to block ({mins} minutes)\n\nDate: <b>{_fmt_date(yyyymmdd)}</b>"
+        kb = _kb_pick_start_times(yyyymmdd, kind="block", mins=mins)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:blocktime:\d{8}:\d+:(30|60):\d{4}$"))
-    async def avail_blocktime(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:block:\d{8}:(30|60):\d{4}$"))
+    async def nsfw_block_apply(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
             return
 
-        _, _, ymd, week_s, dur_s, hhmm_compact = cq.data.split(":")
-        week = int(week_s)
-        duration = int(dur_s)
-
-        start = f"{hhmm_compact[0:2]}:{hhmm_compact[2:4]}"
-        end = _hhmm_from_min(_min_from_hhmm(start) + duration)
-
-        blocks = get_blocks_for_date(ymd)
-        blocks.append((start, end))
-        set_blocks_for_date(ymd, blocks)
-
-        await cq.answer(f"Blocked {start}–{end} ✅", show_alert=True)
-        cq.data = f"nsfw_avail:date:{ymd}:{week}"
-        await avail_date(_, cq)
-
-    # ────────────── AVAILABILITY PICKERS (SLOT) ──────────────
-
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:allowpick:\d{8}:\d+:slot:(30|60)$"))
-    async def avail_allow_slot_pick(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
+        parts = cq.data.split(":")
+        # nsfw_avail:block:<date>:<mins>:<hhmm>
+        if len(parts) != 5:
+            await cq.answer("That button payload was invalid (please retry).", show_alert=True)
             return
 
-        _, _, ymd, week_s, _, dur_s = cq.data.split(":")
-        week = int(week_s)
-        duration = int(dur_s)
+        yyyymmdd = parts[2]
+        mins = int(parts[3])
+        start_hm = _hhmm_to_hm(parts[4])
 
-        day_dt = _yyyymmdd_to_local_day(ymd).astimezone(_tz())
-        label = day_dt.strftime("%A, %b %d").replace(" 0", " ")
+        state = _load_state()
+        _add_block(state, yyyymmdd, start_hm, mins)
+        _save_state(state)
 
-        await cq.message.edit_text(
-            f"✅ Add available <b>{duration}m</b> SLOT\n🗓 <b>{label}</b>\n\nPick a start time (LA):",
-            reply_markup=_pick_time_kb("nsfw_avail:allowtime", ymd, week, duration),
-            disable_web_page_preview=True,
+        text = _render_day_text(state, yyyymmdd)
+        kb = _kb_day_actions(yyyymmdd)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer("Blocked ✅")
+
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:blockday:\d{8}$"))
+    async def nsfw_block_day(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
+
+        yyyymmdd = cq.data.split(":")[-1]
+        state = _load_state()
+        _set_block_all_day(state, yyyymmdd, True)
+        _save_state(state)
+
+        text = _render_day_text(state, yyyymmdd)
+        kb = _kb_day_actions(yyyymmdd)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer("Blocked all day ⛔")
+
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:clrblk:\d{8}$"))
+    async def nsfw_clear_blocks(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
+
+        yyyymmdd = cq.data.split(":")[-1]
+        state = _load_state()
+        _clear_blocks(state, yyyymmdd)
+        _save_state(state)
+
+        text = _render_day_text(state, yyyymmdd)
+        kb = _kb_day_actions(yyyymmdd)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer("Cleared blocks ✅")
+
+    # ───────── ALLOWED WINDOWS FLOW ─────────
+
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:allowadd:\d{8}$"))
+    async def nsfw_allow_add(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
+
+        yyyymmdd = cq.data.split(":")[-1]
+        text = (
+            f"✅ <b>Add availability window</b>\n\n"
+            f"Date: <b>{_fmt_date(yyyymmdd)}</b>\n\n"
+            "Pick a preset or choose a custom window."
         )
+        kb = _kb_allow_presets(yyyymmdd)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:allowtime:\d{8}:\d+:(30|60):\d{4}$"))
-    async def avail_allowtime(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:allowpre:\d{8}:(morning|afternoon|evening|full)$"))
+    async def nsfw_allow_preset(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
             return
 
-        _, _, ymd, week_s, dur_s, hhmm_compact = cq.data.split(":")
-        week = int(week_s)
-        duration = int(dur_s)
+        # nsfw_avail:allowpre:<date>:<preset>
+        parts = cq.data.split(":")
+        yyyymmdd = parts[2]
+        preset = parts[3]
 
-        start = f"{hhmm_compact[0:2]}:{hhmm_compact[2:4]}"
-        end = _hhmm_from_min(_min_from_hhmm(start) + duration)
+        open_hm, close_hm = _business_hours_for_date(yyyymmdd)
 
-        add_allowed_window(ymd, start, end)
+        if preset == "morning":
+            start_hm, end_hm = "09:00", "12:00"
+        elif preset == "afternoon":
+            start_hm, end_hm = "12:00", "17:00"
+        elif preset == "evening":
+            start_hm, end_hm = "17:00", close_hm
+        else:  # full
+            start_hm, end_hm = open_hm, close_hm
 
-        await cq.answer(f"Available {start}–{end} ✅", show_alert=True)
-        cq.data = f"nsfw_avail:date:{ymd}:{week}"
-        await avail_date(_, cq)
+        state = _load_state()
+        _add_allowed(state, yyyymmdd, start_hm, end_hm)
+        _save_state(state)
 
-    # ────────────── AVAILABILITY PICKERS (WINDOW) ──────────────
+        text = _render_day_text(state, yyyymmdd)
+        kb = _kb_day_actions(yyyymmdd)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer("Added window ✅")
 
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:allowpick:\d{8}:\d+:win$"))
-    async def avail_allow_window_pick(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:allowst:\d{8}:\d{4}$"))
+    async def nsfw_allow_start(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
             return
 
-        _, _, ymd, week_s, _ = cq.data.split(":")
-        week = int(week_s)
+        parts = cq.data.split(":")
+        # nsfw_avail:allowst:<date>:<hhmm>
+        if len(parts) != 4:
+            await cq.answer("That button payload was invalid (please retry).", show_alert=True)
+            return
 
-        day_dt = _yyyymmdd_to_local_day(ymd).astimezone(_tz())
-        label = day_dt.strftime("%A, %b %d").replace(" 0", " ")
+        yyyymmdd = parts[2]
+        start_hm = _hhmm_to_hm(parts[3])
 
-        # pick a START first (30-min grid)
-        await cq.message.edit_text(
-            f"✅ Add available WINDOW\n🗓 <b>{label}</b>\n\nPick a START time (LA):",
-            reply_markup=_pick_time_kb("nsfw_avail:winstart", ymd, week, 30),
-            disable_web_page_preview=True,
+        text = (
+            f"✅ <b>Pick an end time</b>\n\n"
+            f"Date: <b>{_fmt_date(yyyymmdd)}</b>\n"
+            f"Start: <b>{start_hm}</b>"
         )
+        kb = _kb_pick_end_times(yyyymmdd, start_hm)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:winstart:\d{8}:\d+:30:\d{4}$"))
-    async def avail_winstart(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:allowen:\d{8}:\d{4}:\d{4}$"))
+    async def nsfw_allow_end(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
             return
 
-        _, _, ymd, week_s, _, hhmm_compact = cq.data.split(":")
-        week = int(week_s)
-        start = f"{hhmm_compact[0:2]}:{hhmm_compact[2:4]}"
-
-        day_dt = _yyyymmdd_to_local_day(ymd).astimezone(_tz())
-        label = day_dt.strftime("%A, %b %d").replace(" 0", " ")
-
-        await cq.message.edit_text(
-            f"✅ Add available WINDOW\n🗓 <b>{label}</b>\n\nStart: <b>{start}</b>\nPick an END time (LA):",
-            reply_markup=_pick_window_end_kb(ymd, week, start),
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^nsfw_avail:winend:\d{8}:\d+:\d{4}:\d{4}$"))
-    async def avail_winend(_, cq: CallbackQuery):
-        if not _owner_only(cq):
-            await cq.answer("Only Roni 💜", show_alert=True)
+        parts = cq.data.split(":")
+        # nsfw_avail:allowen:<date>:<hhmmStart>:<hhmmEnd>
+        if len(parts) != 5:
+            await cq.answer("That button payload was invalid (please retry).", show_alert=True)
             return
 
-        _, _, ymd, week_s, start_compact, end_compact = cq.data.split(":")
-        week = int(week_s)
-        start = f"{start_compact[0:2]}:{start_compact[2:4]}"
-        end = f"{end_compact[0:2]}:{end_compact[2:4]}"
+        yyyymmdd = parts[2]
+        start_hm = _hhmm_to_hm(parts[3])
+        end_hm = _hhmm_to_hm(parts[4])
 
-        if _min_from_hhmm(end) <= _min_from_hhmm(start):
-            await cq.answer("End must be after start 💕", show_alert=True)
+        state = _load_state()
+        _add_allowed(state, yyyymmdd, start_hm, end_hm)
+        _save_state(state)
+
+        text = _render_day_text(state, yyyymmdd)
+        kb = _kb_day_actions(yyyymmdd)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer("Added window ✅")
+
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:clralw:\d{8}$"))
+    async def nsfw_clear_allowed(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
             return
 
-        add_allowed_window(ymd, start, end)
+        yyyymmdd = cq.data.split(":")[-1]
+        state = _load_state()
+        _clear_allowed(state, yyyymmdd)
+        _save_state(state)
 
-        await cq.answer(f"Available {start}–{end} ✅", show_alert=True)
-        cq.data = f"nsfw_avail:date:{ymd}:{week}"
-        await avail_date(_, cq)
+        text = _render_day_text(state, yyyymmdd)
+        kb = _kb_day_actions(yyyymmdd)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer("Availability reset to business hours ✅")
+
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:clrall:\d{8}$"))
+    async def nsfw_clear_all(_, cq: CallbackQuery):
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
+
+        yyyymmdd = cq.data.split(":")[-1]
+        state = _load_state()
+        _clear_all_for_date(state, yyyymmdd)
+        _save_state(state)
+
+        text = _render_day_text(state, yyyymmdd)
+        kb = _kb_day_actions(yyyymmdd)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.answer("Cleared ✅")
