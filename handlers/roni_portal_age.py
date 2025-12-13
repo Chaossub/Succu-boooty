@@ -1,6 +1,7 @@
 # handlers/roni_portal_age.py
 import json
 import logging
+import os
 from datetime import datetime
 
 from pyrogram import Client, filters
@@ -36,32 +37,84 @@ def _jset(key: str, obj) -> None:
     store.set_menu(key, json.dumps(obj, ensure_ascii=False))
 
 
-def _load_legacy_menus_age_list():
-    """
-    If your MenuStore backend changed, old values may still exist in data/menus.json.
-    This tries to recover AGE_OK_LIST from there.
-    """
-    try:
-        with open("data/menus.json", "r", encoding="utf-8") as f:
-            data = json.load(f)
-        raw = data.get(_av_list_key())
-        if not raw:
-            return []
-        legacy = json.loads(raw)
+def _legacy_path() -> str:
+    return os.getenv("MENU_STORE_PATH", "data/menus.json")
 
-        # legacy could be list[int] or list[dict]
-        cleaned = []
-        if isinstance(legacy, list):
-            for x in legacy:
-                if isinstance(x, dict) and x.get("user_id"):
-                    cleaned.append(x)
-                elif isinstance(x, int):
-                    cleaned.append(
-                        {"user_id": x, "username": "", "name": "", "ts": ""}
-                    )
-        return cleaned
+
+def _load_legacy_json():
+    try:
+        with open(_legacy_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        return []
+        return {}
+
+
+def _normalize_list(lst) -> list[dict]:
+    """Supports legacy formats:
+    - [123, 456]
+    - [{"user_id": 123, "username": "...", "name": "...", "ts": "..."}]
+    """
+    out: list[dict] = []
+    if not isinstance(lst, list):
+        return out
+
+    for x in lst:
+        if isinstance(x, int):
+            out.append({"user_id": x, "username": "", "name": "", "ts": ""})
+        elif isinstance(x, dict) and x.get("user_id"):
+            out.append(
+                {
+                    "user_id": int(x.get("user_id")),
+                    "username": x.get("username") or "",
+                    "name": x.get("name") or "",
+                    "ts": x.get("ts") or "",
+                }
+            )
+
+    seen = set()
+    deduped = []
+    for e in out:
+        uid = e["user_id"]
+        if uid in seen:
+            continue
+        seen.add(uid)
+        deduped.append(e)
+    return deduped
+
+
+def _ensure_per_user_flags(entries: list[dict]) -> None:
+    """If we recovered users from a list, ensure AGE_OK:{id} exists in current backend
+    so the NSFW booking button doesn't disappear on menu rebuild.
+    """
+    for e in entries:
+        uid = e.get("user_id")
+        if not uid:
+            continue
+        try:
+            if not store.get_menu(_age_key(uid)):
+                store.set_menu(_age_key(uid), "1")
+        except Exception:
+            continue
+
+
+def get_age_verified_entries() -> list[dict]:
+    # 1) Active backend list
+    entries = _normalize_list(_jget(_av_list_key(), []))
+    if entries:
+        return entries
+
+    # 2) Legacy JSON list (if deploy switched backends)
+    legacy = _load_legacy_json()
+    legacy_entries = _normalize_list(
+        json.loads(legacy.get(_av_list_key(), "[]")) if legacy.get(_av_list_key()) else []
+    )
+    if legacy_entries:
+        log.warning("Recovered legacy AGE_OK_LIST from %s; migrating into active backend", _legacy_path())
+        _jset(_av_list_key(), legacy_entries)
+        _ensure_per_user_flags(legacy_entries)
+        return legacy_entries
+
+    return []
 
 
 def is_age_verified(user_id: int | None) -> bool:
@@ -69,23 +122,36 @@ def is_age_verified(user_id: int | None) -> bool:
         return False
     if user_id == RONI_OWNER_ID:
         return True
+
+    # Active backend per-user flag
     try:
         if store.get_menu(_age_key(user_id)):
             return True
     except Exception:
         pass
 
-    # fallback: check list (current backend), then legacy
-    lst = _jget(_av_list_key(), [])
-    if isinstance(lst, list):
-        for x in lst:
-            if isinstance(x, dict) and x.get("user_id") == user_id:
-                return True
-            if isinstance(x, int) and x == user_id:
-                return True
+    # Active backend list fallback
+    try:
+        entries = _normalize_list(_jget(_av_list_key(), []))
+        if any(e.get("user_id") == user_id for e in entries):
+            return True
+    except Exception:
+        pass
 
-    legacy = _load_legacy_menus_age_list()
-    return any(isinstance(x, dict) and x.get("user_id") == user_id for x in legacy)
+    # Legacy per-user + list fallback
+    legacy = _load_legacy_json()
+    try:
+        if legacy.get(_age_key(user_id)):
+            return True
+    except Exception:
+        pass
+    try:
+        legacy_entries = _normalize_list(
+            json.loads(legacy.get(_av_list_key(), "[]")) if legacy.get(_av_list_key()) else []
+        )
+        return any(e.get("user_id") == user_id for e in legacy_entries)
+    except Exception:
+        return False
 
 
 def register(app: Client) -> None:
@@ -119,25 +185,21 @@ def register(app: Client) -> None:
             return
         user_id = cq.from_user.id
 
-        # store per-user flag
+        # Set per-user flag
         store.set_menu(_age_key(user_id), "1")
 
-        # store list entry for admin view
-        lst = _jget(_av_list_key(), [])
-        if not isinstance(lst, list):
-            lst = []
-
-        entry = {
-            "user_id": user_id,
-            "username": cq.from_user.username or "",
-            "name": cq.from_user.first_name or "",
-            "ts": datetime.utcnow().isoformat(),
-        }
-
-        # dedupe by user_id
-        lst = [x for x in lst if not (isinstance(x, dict) and x.get("user_id") == user_id)]
-        lst.append(entry)
-        _jset(_av_list_key(), lst)
+        # Update list for admin display
+        entries = get_age_verified_entries()
+        entries = [e for e in entries if e.get("user_id") != user_id]
+        entries.append(
+            {
+                "user_id": user_id,
+                "username": cq.from_user.username or "",
+                "name": cq.from_user.first_name or "",
+                "ts": datetime.utcnow().isoformat(),
+            }
+        )
+        _jset(_av_list_key(), entries)
 
         await cq.message.edit_text(
             "✅ <b>Verified</b> 💕\n\n"
@@ -159,29 +221,22 @@ def register(app: Client) -> None:
             await cq.answer("Only Roni 💜", show_alert=True)
             return
 
-        lst = _jget(_av_list_key(), [])
-        if not isinstance(lst, list) or not lst:
-            # fallback to legacy menus.json
-            legacy = _load_legacy_menus_age_list()
-            if legacy:
-                log.warning("Recovered legacy AGE_OK_LIST from data/menus.json and migrated it into MenuStore")
-                _jset(_av_list_key(), legacy)
-                lst = legacy
+        entries = get_age_verified_entries()
 
-        if not isinstance(lst, list) or not lst:
-            txt = "✅ <b>Age-Verified List</b>\n\n• none yet"
+        if not entries:
+            text = "✅ <b>Age-Verified List</b>\n\n• none yet"
         else:
             lines = ["✅ <b>Age-Verified List</b>\n"]
-            for x in lst[-50:]:
-                if isinstance(x, dict) and x.get("user_id"):
-                    who = (x.get("name") or "User")
-                    if x.get("username"):
-                        who += f" (@{x['username']})"
-                    lines.append(f"• {who} — <code>{x.get('user_id')}</code>")
-                elif isinstance(x, int):
-                    lines.append(f"• <code>{x}</code>")
-            txt = "\n".join(lines)
+            for e in entries[-80:]:
+                uid = e.get("user_id")
+                if not uid:
+                    continue
+                who = (e.get("name") or "User").strip()
+                if e.get("username"):
+                    who += f" (@{e['username']})"
+                lines.append(f"• {who} — <code>{uid}</code>")
+            text = "\n".join(lines)
 
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="roni_admin:open")]])
-        await cq.message.edit_text(txt, reply_markup=kb, disable_web_page_preview=True)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
