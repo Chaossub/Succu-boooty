@@ -1,228 +1,132 @@
 # utils/nsfw_store.py
-import os
 import json
-import tempfile
-import threading
-from datetime import datetime, timedelta
+import os
+import time
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
-MONGO_URL = os.getenv("MONGO_URL") or os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB") or os.getenv("MONGO_DB_NAME") or os.getenv("MONGO_DBNAME") or "Succubot"
-COLL_AVAIL = os.getenv("NSFW_AVAIL_COLLECTION") or "nsfw_availability"
-COLL_BOOK = os.getenv("NSFW_BOOKINGS_COLLECTION") or "nsfw_bookings"
+DATA_DIR = os.getenv("DATA_DIR", "data")
+NSFW_STORE_PATH = os.getenv("NSFW_STORE_PATH", os.path.join(DATA_DIR, "nsfw_store.json"))
 
-JSON_PATH = os.getenv("NSFW_STORE_PATH", "data/nsfw_text_sessions.json")
+TZ = "America/Los_Angeles"
 
-_LOCK = threading.RLock()
-_USE_MONGO = False
-_MC = None
-_AV = None
-_BK = None
+# Business hours (LA) from your screenshot:
+# Mon–Fri 9a–10p, Sat 9a–9p, Sun 9a–10p
+BUSINESS_HOURS = {
+    0: ("09:00", "22:00"),  # Mon
+    1: ("09:00", "22:00"),  # Tue
+    2: ("09:00", "22:00"),  # Wed
+    3: ("09:00", "22:00"),  # Thu
+    4: ("09:00", "22:00"),  # Fri
+    5: ("09:00", "21:00"),  # Sat
+    6: ("09:00", "22:00"),  # Sun
+}
 
-if MONGO_URL:
+
+def _ensure_dir() -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def _load() -> Dict[str, Any]:
+    _ensure_dir()
+    if not os.path.exists(NSFW_STORE_PATH):
+        return {"availability": {}, "bookings": []}
     try:
-        from pymongo import MongoClient
-        _MC = MongoClient(MONGO_URL, serverSelectionTimeoutMS=3000)
-        _MC.admin.command("ping")
-        _AV = _MC[MONGO_DB][COLL_AVAIL]
-        _BK = _MC[MONGO_DB][COLL_BOOK]
-        _AV.create_index("_id", unique=True)
-        _BK.create_index([("yyyymmdd", 1), ("hhmm", 1)], unique=False)
-        _USE_MONGO = True
+        with open(NSFW_STORE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f) or {"availability": {}, "bookings": []}
     except Exception:
-        _USE_MONGO = False
-
-if not _USE_MONGO:
-    os.makedirs(os.path.dirname(JSON_PATH) or ".", exist_ok=True)
+        return {"availability": {}, "bookings": []}
 
 
-def _load_json():
-    try:
-        with open(JSON_PATH, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except Exception:
-        return {}
-
-def _save_json(data: dict):
-    tmp_fd, tmp_path = tempfile.mkstemp(prefix="nsfw.", suffix=".json", dir=os.path.dirname(JSON_PATH) or ".")
-    try:
-        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, JSON_PATH)
-    finally:
-        try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except Exception:
-            pass
-
-def _ensure_shape(data: dict) -> dict:
-    data.setdefault("availability", {})  # yyyymmdd -> {off,start,end,blocks[]}
-    data.setdefault("bookings", [])      # list of bookings
-    return data
+def _save(data: Dict[str, Any]) -> None:
+    _ensure_dir()
+    tmp = f"{NSFW_STORE_PATH}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, NSFW_STORE_PATH)
 
 
-# ---------- Availability ----------
-
-def get_day_config(yyyymmdd: str) -> dict:
-    with _LOCK:
-        if _USE_MONGO:
-            doc = _AV.find_one({"_id": yyyymmdd}) or {}
-            return {
-                "off": bool(doc.get("off", False)),
-                "start": doc.get("start", "") or "",
-                "end": doc.get("end", "") or "",
-                "blocks": doc.get("blocks", []) or [],
-            }
-
-        data = _ensure_shape(_load_json())
-        return data["availability"].get(yyyymmdd, {"off": False, "start": "", "end": "", "blocks": []})
+def _hhmm_to_min(hhmm: str) -> int:
+    h, m = hhmm.split(":")
+    return int(h) * 60 + int(m)
 
 
-def set_day_off(yyyymmdd: str, off: bool) -> None:
-    with _LOCK:
-        if _USE_MONGO:
-            _AV.update_one({"_id": yyyymmdd}, {"$set": {"off": bool(off)}}, upsert=True)
-            return
-        data = _ensure_shape(_load_json())
-        cfg = data["availability"].get(yyyymmdd, {"off": False, "start": "", "end": "", "blocks": []})
-        cfg["off"] = bool(off)
-        data["availability"][yyyymmdd] = cfg
-        _save_json(data)
+def _min_to_hhmm(m: int) -> str:
+    h = m // 60
+    mm = m % 60
+    return f"{h:02d}:{mm:02d}"
 
 
-def set_day_hours(yyyymmdd: str, start: str, end: str) -> None:
-    # start/end are "HHMM" or "" to clear
-    with _LOCK:
-        if _USE_MONGO:
-            _AV.update_one(
-                {"_id": yyyymmdd},
-                {"$set": {"start": start or "", "end": end or "", "off": False}},
-                upsert=True,
-            )
-            return
-        data = _ensure_shape(_load_json())
-        cfg = data["availability"].get(yyyymmdd, {"off": False, "start": "", "end": "", "blocks": []})
-        cfg["start"] = start or ""
-        cfg["end"] = end or ""
-        if start and end:
-            cfg["off"] = False
-        data["availability"][yyyymmdd] = cfg
-        _save_json(data)
+def get_business_hours_for_weekday(weekday: int) -> Tuple[str, str]:
+    return BUSINESS_HOURS.get(weekday, ("09:00", "22:00"))
 
 
-def clear_day_blocks(yyyymmdd: str) -> None:
-    with _LOCK:
-        if _USE_MONGO:
-            _AV.update_one({"_id": yyyymmdd}, {"$set": {"blocks": []}}, upsert=True)
-            return
-        data = _ensure_shape(_load_json())
-        cfg = data["availability"].get(yyyymmdd, {"off": False, "start": "", "end": "", "blocks": []})
-        cfg["blocks"] = []
-        data["availability"][yyyymmdd] = cfg
-        _save_json(data)
+def get_blocks_for_date(date_yyyymmdd: str) -> List[Tuple[str, str]]:
+    """
+    Returns list of (start_hhmm, end_hhmm) blocks for that date.
+    """
+    data = _load()
+    blocks = (data.get("availability", {}).get("blocks", {}) or {}).get(date_yyyymmdd, []) or []
+    out: List[Tuple[str, str]] = []
+    for b in blocks:
+        s = b.get("start")
+        e = b.get("end")
+        if s and e:
+            out.append((s, e))
+    return out
 
 
-def add_day_block(yyyymmdd: str, start: str, end: str) -> None:
-    if not (start and end and end > start):
-        return
-    with _LOCK:
-        if _USE_MONGO:
-            doc = get_day_config(yyyymmdd)
-            blocks = doc.get("blocks", []) or []
-            blocks.append({"start": start, "end": end})
-            _AV.update_one({"_id": yyyymmdd}, {"$set": {"blocks": blocks}}, upsert=True)
-            return
-        data = _ensure_shape(_load_json())
-        cfg = data["availability"].get(yyyymmdd, {"off": False, "start": "", "end": "", "blocks": []})
-        cfg["blocks"] = (cfg.get("blocks") or []) + [{"start": start, "end": end}]
-        data["availability"][yyyymmdd] = cfg
-        _save_json(data)
+def set_blocks_for_date(date_yyyymmdd: str, blocks: List[Tuple[str, str]]) -> None:
+    data = _load()
+    avail = data.setdefault("availability", {})
+    blocks_map = avail.setdefault("blocks", {})
+    blocks_map[date_yyyymmdd] = [{"start": s, "end": e} for (s, e) in blocks]
+    _save(data)
 
 
-# ---------- Booking + availability checks ----------
-
-def _overlaps(a_start: datetime, a_end: datetime, b_start: datetime, b_end: datetime) -> bool:
-    return a_start < b_end and b_start < a_end
-
-
-def is_slot_available(yyyymmdd: str, hhmm: str, duration_min: int) -> bool:
-    cfg = get_day_config(yyyymmdd)
-    if cfg.get("off"):
-        return False
-    if not cfg.get("start") or not cfg.get("end"):
-        return False
-
-    start_dt = datetime.strptime(yyyymmdd + hhmm, "%Y%m%d%H%M")
-    end_dt = start_dt + timedelta(minutes=duration_min)
-
-    day_start = datetime.strptime(yyyymmdd + cfg["start"], "%Y%m%d%H%M")
-    day_end = datetime.strptime(yyyymmdd + cfg["end"], "%Y%m%d%H%M")
-    if not (day_start <= start_dt and end_dt <= day_end):
-        return False
-
-    # blocks
-    for b in cfg.get("blocks", []) or []:
-        b_start = datetime.strptime(yyyymmdd + b["start"], "%Y%m%d%H%M")
-        b_end = datetime.strptime(yyyymmdd + b["end"], "%Y%m%d%H%M")
-        if _overlaps(start_dt, end_dt, b_start, b_end):
-            return False
-
-    # existing bookings
-    for bk in list_bookings_for_day(yyyymmdd):
-        b_start = datetime.strptime(bk["yyyymmdd"] + bk["hhmm"], "%Y%m%d%H%M")
-        b_end = b_start + timedelta(minutes=int(bk["duration_min"]))
-        if _overlaps(start_dt, end_dt, b_start, b_end):
-            return False
-
-    return True
+def clear_blocks_for_date(date_yyyymmdd: str) -> None:
+    data = _load()
+    avail = data.setdefault("availability", {})
+    blocks_map = avail.setdefault("blocks", {})
+    blocks_map.pop(date_yyyymmdd, None)
+    _save(data)
 
 
-def list_bookings_for_day(yyyymmdd: str) -> list[dict]:
-    with _LOCK:
-        if _USE_MONGO:
-            return list(_BK.find({"yyyymmdd": yyyymmdd}, {"_id": 0}))
-        data = _ensure_shape(_load_json())
-        return [b for b in data["bookings"] if b.get("yyyymmdd") == yyyymmdd]
+def is_blocked(date_yyyymmdd: str, start_hhmm: str, end_hhmm: str) -> bool:
+    s1 = _hhmm_to_min(start_hhmm)
+    e1 = _hhmm_to_min(end_hhmm)
+    for s, e in get_blocks_for_date(date_yyyymmdd):
+        s2 = _hhmm_to_min(s)
+        e2 = _hhmm_to_min(e)
+        # overlap
+        if s1 < e2 and s2 < e1:
+            return True
+    return False
 
 
-def list_available_slots_for_day(yyyymmdd: str, duration_min: int) -> list[str]:
-    cfg = get_day_config(yyyymmdd)
-    if cfg.get("off") or not cfg.get("start") or not cfg.get("end"):
-        return []
-
-    start = datetime.strptime(yyyymmdd + cfg["start"], "%Y%m%d%H%M")
-    end = datetime.strptime(yyyymmdd + cfg["end"], "%Y%m%d%H%M")
-
-    slots = []
-    cur = start
-    step = timedelta(minutes=30)  # buttons every 30
-    while cur + timedelta(minutes=duration_min) <= end:
-        hhmm = cur.strftime("%H%M")
-        if is_slot_available(yyyymmdd, hhmm, duration_min):
-            slots.append(hhmm)
-        cur += step
-
-    return slots
+def add_booking(booking: Dict[str, Any]) -> None:
+    data = _load()
+    data.setdefault("bookings", []).append(booking)
+    _save(data)
 
 
-def create_booking(user_id: int, username: str, first_name: str, yyyymmdd: str, hhmm: str, duration_min: int, note: str) -> None:
-    rec = {
-        "user_id": int(user_id),
-        "username": username or "",
-        "first_name": first_name or "",
-        "yyyymmdd": yyyymmdd,
-        "hhmm": hhmm,
-        "duration_min": int(duration_min),
-        "note": note or "",
-        "created_at": datetime.utcnow().isoformat(),
-        "status": "booked",
-    }
+def update_booking(booking_id: str, patch: Dict[str, Any]) -> bool:
+    data = _load()
+    bookings = data.setdefault("bookings", [])
+    for b in bookings:
+        if b.get("booking_id") == booking_id:
+            b.update(patch)
+            _save(data)
+            return True
+    return False
 
-    with _LOCK:
-        if _USE_MONGO:
-            _BK.insert_one(rec)
-            return
 
-        data = _ensure_shape(_load_json())
-        data["bookings"].append(rec)
-        _save_json(data)
+def find_latest_booking_for_user(user_id: int, statuses: List[str]) -> Optional[Dict[str, Any]]:
+    data = _load()
+    bookings = data.get("bookings", []) or []
+    # latest by created_ts
+    candidates = [b for b in bookings if b.get("user_id") == user_id and b.get("status") in statuses]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: float(x.get("created_ts", 0)), reverse=True)
+    return candidates[0]
