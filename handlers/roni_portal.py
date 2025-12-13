@@ -59,6 +59,11 @@ def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("💌 Book Roni", url=f"https://t.me/{RONI_USERNAME}")]
     )
 
+    # ✅ NEW: booking flow (DM-only via Roni assistant menu)
+    rows.append(
+        [InlineKeyboardButton("💞 Book a private NSFW texting session", callback_data="nsfw_book:open")]
+    )
+
     if TIP_RONI_LINK:
         rows.append([InlineKeyboardButton("💸 Pay / Tip Roni", url=TIP_RONI_LINK)])
     else:
@@ -114,6 +119,10 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🌸 Edit Open Access", callback_data="roni_admin:edit_open")],
             [InlineKeyboardButton("🔥 Edit Teaser/Promo Text", callback_data="roni_admin:edit_teaser")],
             [InlineKeyboardButton("😈 Edit Succubus Sanctuary", callback_data="roni_admin:edit_sanctuary")],
+
+            # ✅ NEW: owner-only availability panel (buttons only)
+            [InlineKeyboardButton("🗓 NSFW availability (Roni)", callback_data="nsfw_avail:open")],
+
             [InlineKeyboardButton("✅ Age-Verified List", callback_data="roni_admin:age_list")],
             [InlineKeyboardButton("⬅ Back to Assistant", callback_data="roni_portal:home")],
         ]
