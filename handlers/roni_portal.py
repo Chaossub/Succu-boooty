@@ -27,52 +27,25 @@ def _age_key(user_id: int) -> str:
 
 
 def is_age_verified(user_id: int | None) -> bool:
-    """Source of truth:
-    1) Per-user flag AGE_OK:{id} in active MenuStore
-    2) AGE_OK_LIST in active MenuStore
-    3) Legacy JSON file (MENU_STORE_PATH/data/menus.json): per-user key or list
-    """
     if not user_id:
         return False
     if user_id == RONI_OWNER_ID:
         return True
 
-    # 1) Active backend: per-user flag
+    # source of truth: per-user key (never rely on list)
     try:
         if store.get_menu(_age_key(user_id)):
             return True
     except Exception:
         pass
 
-    # 2) Active backend: list key
+    # fallback: list
     try:
         raw = store.get_menu("AGE_OK_LIST")
         if raw:
             lst = json.loads(raw)
             if isinstance(lst, list):
                 for x in lst:
-                    if isinstance(x, int) and x == user_id:
-                        return True
-                    if isinstance(x, dict) and x.get("user_id") == user_id:
-                        return True
-    except Exception:
-        pass
-
-    # 3) Legacy file fallback (helps if deploy switched backends)
-    try:
-        path = os.getenv("MENU_STORE_PATH", "data/menus.json")
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        # legacy per-user key
-        if data.get(_age_key(user_id)):
-            return True
-
-        raw = data.get("AGE_OK_LIST")
-        if raw:
-            legacy = json.loads(raw)
-            if isinstance(legacy, list):
-                for x in legacy:
                     if isinstance(x, int) and x == user_id:
                         return True
                     if isinstance(x, dict) and x.get("user_id") == user_id:
@@ -89,9 +62,9 @@ def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("📖 Roni’s Menu", callback_data="roni_portal:menu")])
     rows.append([InlineKeyboardButton("💌 Book Roni", url=f"https://t.me/{RONI_USERNAME}")])
 
-    # NSFW booking button ONLY for age verified (owner always counts)
+    # ✅ FIX: correct callback that your booking handler actually listens for
     if user_id and is_age_verified(user_id):
-        rows.append([InlineKeyboardButton("💞 Book a private NSFW texting session", callback_data="nsfw_book:start")])
+        rows.append([InlineKeyboardButton("💞 Book a private NSFW texting session", callback_data="nsfw_book:open")])
 
     if TIP_RONI_LINK:
         rows.append([InlineKeyboardButton("💸 Pay / Tip Roni", url=TIP_RONI_LINK)])
@@ -126,7 +99,6 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔥 Edit Teaser/Promo Text", callback_data="roni_admin:edit_teaser")],
             [InlineKeyboardButton("😈 Edit Succubus Sanctuary", callback_data="roni_admin:edit_sanctuary")],
             [InlineKeyboardButton("🗓 NSFW availability (Roni)", callback_data="nsfw_avail:open")],
-            # ✅ This MUST go to roni_portal_age.py handler
             [InlineKeyboardButton("✅ Age-Verified List", callback_data="roni_admin:age_list")],
             [InlineKeyboardButton("⬅ Back to Assistant", callback_data="roni_portal:home")],
         ]
@@ -198,9 +170,6 @@ def register(app: Client) -> None:
 
     @app.on_callback_query(filters.regex(r"^roni_portal:menu"))
     async def roni_menu_cb(_, cq: CallbackQuery):
-        data = cq.data or "roni_portal:menu"
-        src = "nsfw" if "src=nsfw" in data else ""
-
         menu_text = store.get_menu(RONI_MENU_KEY)
         if menu_text:
             text = f"📖 <b>Roni’s Menu</b>\n\n{menu_text}"
@@ -211,12 +180,8 @@ def register(app: Client) -> None:
                 "She can do it from the ⚙️ Roni Admin button. 💕"
             )
 
-        rows = []
-        if src == "nsfw":
-            rows.append([InlineKeyboardButton("💞 Back to booking", callback_data="nsfw_book:start")])
-        rows.append([InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")])
-
-        await cq.message.edit_text(text, reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")]])
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         await cq.answer()
 
     @app.on_callback_query(filters.regex(r"^roni_portal:open_access$"))
@@ -250,11 +215,6 @@ def register(app: Client) -> None:
         )
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")]])
         await cq.message.edit_text(teaser_text, reply_markup=kb, disable_web_page_preview=True)
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^roni_portal:age$"))
-    async def roni_age_cb(_, cq: CallbackQuery):
-        # roni_portal_age.py handles the verification UI + confirm
         await cq.answer()
 
     @app.on_callback_query(filters.regex(r"^roni_admin:open$"))
@@ -329,5 +289,6 @@ def register(app: Client) -> None:
         else:
             await m.reply_text("Saved 💕", reply_markup=_admin_keyboard(), disable_web_page_preview=True)
 
-    # ✅ IMPORTANT: We DO NOT define roni_admin:age_list here anymore.
-    # That callback is owned by handlers/roni_portal_age.py so it shows the real list.
+    # ✅ IMPORTANT:
+    # Do NOT define a handler for "roni_portal:age" here.
+    # That callback is owned by handlers/roni_portal_age.py
