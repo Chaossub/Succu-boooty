@@ -1,7 +1,6 @@
 # handlers/roni_portal_age.py
 import json
 import logging
-import os
 from datetime import datetime
 
 from pyrogram import Client, filters
@@ -14,107 +13,45 @@ log = logging.getLogger(__name__)
 
 RONI_OWNER_ID = 6964994611
 
+AGE_INDEX_KEY = "RoniAgeIndex"   # ✅ legacy list key from your working build
+AGE_OK_LIST = "AGE_OK_LIST"      # optional newer list
+
 
 def _age_key(user_id: int) -> str:
     return f"AGE_OK:{user_id}"
 
 
-def _av_list_key() -> str:
-    return "AGE_OK_LIST"
-
-
-def _jget(key: str, default):
+def _jloads(raw: str, default):
     try:
-        raw = store.get_menu(key)
-        if not raw:
-            return default
         return json.loads(raw)
     except Exception:
         return default
 
 
-def _jset(key: str, obj) -> None:
-    store.set_menu(key, json.dumps(obj, ensure_ascii=False))
-
-
-def _legacy_path() -> str:
-    return os.getenv("MENU_STORE_PATH", "data/menus.json")
-
-
-def _load_legacy_json():
-    try:
-        with open(_legacy_path(), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _normalize_list(lst) -> list[dict]:
-    """Supports legacy formats:
-    - [123, 456]
-    - [{"user_id": 123, "username": "...", "name": "...", "ts": "..."}]
-    """
-    out: list[dict] = []
-    if not isinstance(lst, list):
+def _load_index_ids() -> list[int]:
+    raw = store.get_menu(AGE_INDEX_KEY) or "[]"
+    data = _jloads(raw, [])
+    if isinstance(data, list):
+        out = []
+        for x in data:
+            try:
+                out.append(int(x))
+            except Exception:
+                pass
         return out
+    return []
 
-    for x in lst:
-        if isinstance(x, int):
-            out.append({"user_id": x, "username": "", "name": "", "ts": ""})
-        elif isinstance(x, dict) and x.get("user_id"):
-            out.append(
-                {
-                    "user_id": int(x.get("user_id")),
-                    "username": x.get("username") or "",
-                    "name": x.get("name") or "",
-                    "ts": x.get("ts") or "",
-                }
-            )
 
+def _save_index_ids(ids: list[int]) -> None:
+    # dedupe while preserving order
     seen = set()
-    deduped = []
-    for e in out:
-        uid = e["user_id"]
+    dedup = []
+    for uid in ids:
         if uid in seen:
             continue
         seen.add(uid)
-        deduped.append(e)
-    return deduped
-
-
-def _ensure_per_user_flags(entries: list[dict]) -> None:
-    """If we recovered users from a list, ensure AGE_OK:{id} exists in current backend
-    so the NSFW booking button doesn't disappear on menu rebuild.
-    """
-    for e in entries:
-        uid = e.get("user_id")
-        if not uid:
-            continue
-        try:
-            if not store.get_menu(_age_key(uid)):
-                store.set_menu(_age_key(uid), "1")
-        except Exception:
-            continue
-
-
-def get_age_verified_entries() -> list[dict]:
-    # 1) Active backend list
-    entries = _normalize_list(_jget(_av_list_key(), []))
-    if entries:
-        return entries
-
-    # 2) Legacy JSON list (if deploy switched backends)
-    legacy = _load_legacy_json()
-    legacy_entries = _normalize_list(
-        json.loads(legacy.get(_av_list_key(), "[]")) if legacy.get(_av_list_key()) else []
-    )
-    if legacy_entries:
-        log.warning("Recovered legacy AGE_OK_LIST from %s; migrating into active backend", _legacy_path())
-        _jset(_av_list_key(), legacy_entries)
-        _ensure_per_user_flags(legacy_entries)
-        return legacy_entries
-
-    return []
+        dedup.append(uid)
+    store.set_menu(AGE_INDEX_KEY, json.dumps(dedup))
 
 
 def is_age_verified(user_id: int | None) -> bool:
@@ -122,34 +59,8 @@ def is_age_verified(user_id: int | None) -> bool:
         return False
     if user_id == RONI_OWNER_ID:
         return True
-
-    # Active backend per-user flag
     try:
-        if store.get_menu(_age_key(user_id)):
-            return True
-    except Exception:
-        pass
-
-    # Active backend list fallback
-    try:
-        entries = _normalize_list(_jget(_av_list_key(), []))
-        if any(e.get("user_id") == user_id for e in entries):
-            return True
-    except Exception:
-        pass
-
-    # Legacy per-user + list fallback
-    legacy = _load_legacy_json()
-    try:
-        if legacy.get(_age_key(user_id)):
-            return True
-    except Exception:
-        pass
-    try:
-        legacy_entries = _normalize_list(
-            json.loads(legacy.get(_av_list_key(), "[]")) if legacy.get(_av_list_key()) else []
-        )
-        return any(e.get("user_id") == user_id for e in legacy_entries)
+        return bool(store.get_menu(_age_key(user_id)))
     except Exception:
         return False
 
@@ -171,7 +82,6 @@ def register(app: Client) -> None:
         )
         await cq.message.edit_text(
             "✅ <b>Age Verification</b>\n\n"
-            "This assistant is for adults only.\n"
             "Tap below to confirm you’re 18+.\n\n"
             "🚫 <b>NO meetups</b> — online/texting only.",
             reply_markup=kb,
@@ -183,31 +93,42 @@ def register(app: Client) -> None:
     async def age_confirm(_, cq: CallbackQuery):
         if not cq.from_user:
             return
-        user_id = cq.from_user.id
+        uid = cq.from_user.id
 
-        # Set per-user flag
-        store.set_menu(_age_key(user_id), "1")
+        # per-user record (works with legacy style too)
+        record = {
+            "status": "ok",
+            "user_id": uid,
+            "username": cq.from_user.username or "",
+            "verified_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+            "note": "",
+        }
+        store.set_menu(_age_key(uid), json.dumps(record))
 
-        # Update list for admin display
-        entries = get_age_verified_entries()
-        entries = [e for e in entries if e.get("user_id") != user_id]
-        entries.append(
-            {
-                "user_id": user_id,
-                "username": cq.from_user.username or "",
-                "name": cq.from_user.first_name or "",
-                "ts": datetime.utcnow().isoformat(),
-            }
-        )
-        _jset(_av_list_key(), entries)
+        # ✅ legacy index
+        ids = _load_index_ids()
+        if uid not in ids:
+            ids.append(uid)
+            _save_index_ids(ids)
+
+        # optional newer list (won't hurt)
+        try:
+            raw = store.get_menu(AGE_OK_LIST) or "[]"
+            lst = _jloads(raw, [])
+            if not isinstance(lst, list):
+                lst = []
+            lst = [x for x in lst if not (isinstance(x, dict) and x.get("user_id") == uid)]
+            lst.append({"user_id": uid, "username": cq.from_user.username or "", "name": cq.from_user.first_name or "", "ts": datetime.utcnow().isoformat()})
+            store.set_menu(AGE_OK_LIST, json.dumps(lst))
+        except Exception:
+            pass
 
         await cq.message.edit_text(
             "✅ <b>Verified</b> 💕\n\n"
-            "You’re age-verified. Your booking options and teaser links are now unlocked.\n\n"
-            "🚫 <b>NO meetups</b> — online/texting only.",
+            "You’re age-verified. Your booking options and teaser links are now unlocked.",
             reply_markup=InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("💞 Book a private NSFW texting session", callback_data="nsfw_book:start")],
+                    [InlineKeyboardButton("💞 Book a private NSFW texting session", callback_data="nsfw_book:open")],
                     [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
                 ]
             ),
@@ -221,22 +142,25 @@ def register(app: Client) -> None:
             await cq.answer("Only Roni 💜", show_alert=True)
             return
 
-        entries = get_age_verified_entries()
+        ids = _load_index_ids()
+        if not ids:
+            await cq.message.edit_text("✅ <b>Age-Verified Users</b>\n\n• none yet", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅ Back", callback_data="roni_admin:open")]]
+            ))
+            await cq.answer()
+            return
 
-        if not entries:
-            text = "✅ <b>Age-Verified List</b>\n\n• none yet"
-        else:
-            lines = ["✅ <b>Age-Verified List</b>\n"]
-            for e in entries[-80:]:
-                uid = e.get("user_id")
-                if not uid:
-                    continue
-                who = (e.get("name") or "User").strip()
-                if e.get("username"):
-                    who += f" (@{e['username']})"
-                lines.append(f"• {who} — <code>{uid}</code>")
-            text = "\n".join(lines)
+        lines = ["✅ <b>Age-Verified Users</b>\n"]
+        for uid in ids[-80:]:
+            raw = store.get_menu(_age_key(uid)) or ""
+            rec = _jloads(raw, {}) if raw else {}
+            uname = rec.get("username") or f"ID {uid}"
+            verified_at = rec.get("verified_at", "")
+            lines.append(f"• {uname} — <code>{uid}</code> {('— ' + verified_at) if verified_at else ''}")
 
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="roni_admin:open")]])
-        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await cq.message.edit_text(
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="roni_admin:open")]]),
+            disable_web_page_preview=True,
+        )
         await cq.answer()
