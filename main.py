@@ -94,6 +94,10 @@ def main():
     _try_register("roni_portal")             # core portal UI + text blocks
     _try_register("roni_portal_age")         # age verification + AV admin
 
+    # ✅ NSFW session booking + availability (YOU REMOVED THESE BEFORE — NEED THEM)
+    _try_register("nsfw_text_session_availability")
+    _try_register("nsfw_text_session_booking")
+
     # Help panel (buttons -> env text)
     _try_register("help_panel")              # help:open + pages
 
