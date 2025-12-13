@@ -1,6 +1,7 @@
 # handlers/roni_portal.py
 import logging
 import os
+import json
 
 from pyrogram import Client, filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -26,14 +27,60 @@ def _age_key(user_id: int) -> str:
 
 
 def is_age_verified(user_id: int | None) -> bool:
+    """Source of truth:
+    1) Per-user flag AGE_OK:{id} in active MenuStore
+    2) AGE_OK_LIST in active MenuStore
+    3) Legacy JSON file (MENU_STORE_PATH/data/menus.json): per-user key or list
+    """
     if not user_id:
         return False
     if user_id == RONI_OWNER_ID:
         return True
+
+    # 1) Active backend: per-user flag
     try:
-        return bool(store.get_menu(_age_key(user_id)))
+        if store.get_menu(_age_key(user_id)):
+            return True
     except Exception:
-        return False
+        pass
+
+    # 2) Active backend: list key
+    try:
+        raw = store.get_menu("AGE_OK_LIST")
+        if raw:
+            lst = json.loads(raw)
+            if isinstance(lst, list):
+                for x in lst:
+                    if isinstance(x, int) and x == user_id:
+                        return True
+                    if isinstance(x, dict) and x.get("user_id") == user_id:
+                        return True
+    except Exception:
+        pass
+
+    # 3) Legacy file fallback (helps if deploy switched backends)
+    try:
+        path = os.getenv("MENU_STORE_PATH", "data/menus.json")
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        # legacy per-user key
+        if data.get(_age_key(user_id)):
+            return True
+
+        raw = data.get("AGE_OK_LIST")
+        if raw:
+            legacy = json.loads(raw)
+            if isinstance(legacy, list):
+                for x in legacy:
+                    if isinstance(x, int) and x == user_id:
+                        return True
+                    if isinstance(x, dict) and x.get("user_id") == user_id:
+                        return True
+    except Exception:
+        pass
+
+    return False
 
 
 def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
@@ -79,7 +126,7 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔥 Edit Teaser/Promo Text", callback_data="roni_admin:edit_teaser")],
             [InlineKeyboardButton("😈 Edit Succubus Sanctuary", callback_data="roni_admin:edit_sanctuary")],
             [InlineKeyboardButton("🗓 NSFW availability (Roni)", callback_data="nsfw_avail:open")],
-            # This is handled in roni_portal_age.py:
+            # ✅ This MUST go to roni_portal_age.py handler
             [InlineKeyboardButton("✅ Age-Verified List", callback_data="roni_admin:age_list")],
             [InlineKeyboardButton("⬅ Back to Assistant", callback_data="roni_portal:home")],
         ]
@@ -207,7 +254,7 @@ def register(app: Client) -> None:
 
     @app.on_callback_query(filters.regex(r"^roni_portal:age$"))
     async def roni_age_cb(_, cq: CallbackQuery):
-        # roni_portal_age.py handles the actual verification UI + confirm
+        # roni_portal_age.py handles the verification UI + confirm
         await cq.answer()
 
     @app.on_callback_query(filters.regex(r"^roni_admin:open$"))
@@ -282,6 +329,5 @@ def register(app: Client) -> None:
         else:
             await m.reply_text("Saved 💕", reply_markup=_admin_keyboard(), disable_web_page_preview=True)
 
-    # NOTE: We intentionally do NOT define roni_admin:age_list here.
-    # That callback belongs to handlers/roni_portal_age.py.
-
+    # ✅ IMPORTANT: We DO NOT define roni_admin:age_list here anymore.
+    # That callback is owned by handlers/roni_portal_age.py so it shows the real list.
