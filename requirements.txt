@@ -17,3 +17,5 @@ stripe==7.11.0
 # Packaging
 setuptools>=65.0.0
 wheel>=0.38.4
+
+tzdata
