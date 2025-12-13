@@ -1,8 +1,5 @@
-# utils/nsfw_store.py
 import json
 import os
-import time
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 DATA_DIR = os.getenv("DATA_DIR", "data")
@@ -30,12 +27,17 @@ def _ensure_dir() -> None:
 def _load() -> Dict[str, Any]:
     _ensure_dir()
     if not os.path.exists(NSFW_STORE_PATH):
-        return {"availability": {}, "bookings": []}
+        return {"availability": {"blocks": {}, "allowed": {}}, "bookings": []}
     try:
         with open(NSFW_STORE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f) or {"availability": {}, "bookings": []}
+            data = json.load(f) or {}
+        data.setdefault("availability", {})
+        data["availability"].setdefault("blocks", {})
+        data["availability"].setdefault("allowed", {})
+        data.setdefault("bookings", [])
+        return data
     except Exception:
-        return {"availability": {}, "bookings": []}
+        return {"availability": {"blocks": {}, "allowed": {}}, "bookings": []}
 
 
 def _save(data: Dict[str, Any]) -> None:
@@ -61,12 +63,12 @@ def get_business_hours_for_weekday(weekday: int) -> Tuple[str, str]:
     return BUSINESS_HOURS.get(weekday, ("09:00", "22:00"))
 
 
+# ────────────── BLOCKS (UNAVAILABLE) ──────────────
+
 def get_blocks_for_date(date_yyyymmdd: str) -> List[Tuple[str, str]]:
-    """
-    Returns list of (start_hhmm, end_hhmm) blocks for that date.
-    """
     data = _load()
-    blocks = (data.get("availability", {}).get("blocks", {}) or {}).get(date_yyyymmdd, []) or []
+    blocks_map = (data.get("availability", {}).get("blocks", {}) or {})
+    blocks = blocks_map.get(date_yyyymmdd, []) or []
     out: List[Tuple[str, str]] = []
     for b in blocks:
         s = b.get("start")
@@ -86,8 +88,7 @@ def set_blocks_for_date(date_yyyymmdd: str, blocks: List[Tuple[str, str]]) -> No
 
 def clear_blocks_for_date(date_yyyymmdd: str) -> None:
     data = _load()
-    avail = data.setdefault("availability", {})
-    blocks_map = avail.setdefault("blocks", {})
+    blocks_map = data.setdefault("availability", {}).setdefault("blocks", {})
     blocks_map.pop(date_yyyymmdd, None)
     _save(data)
 
@@ -98,11 +99,82 @@ def is_blocked(date_yyyymmdd: str, start_hhmm: str, end_hhmm: str) -> bool:
     for s, e in get_blocks_for_date(date_yyyymmdd):
         s2 = _hhmm_to_min(s)
         e2 = _hhmm_to_min(e)
-        # overlap
         if s1 < e2 and s2 < e1:
             return True
     return False
 
+
+# ────────────── ALLOWED WINDOWS (AVAILABLE OVERRIDES) ──────────────
+# If allowed windows exist for a date, booking times MUST fall within them.
+
+def get_allowed_for_date(date_yyyymmdd: str) -> List[Tuple[str, str]]:
+    data = _load()
+    allowed_map = (data.get("availability", {}).get("allowed", {}) or {})
+    allowed = allowed_map.get(date_yyyymmdd, []) or []
+    out: List[Tuple[str, str]] = []
+    for w in allowed:
+        s = w.get("start")
+        e = w.get("end")
+        if s and e:
+            out.append((s, e))
+    return out
+
+
+def set_allowed_for_date(date_yyyymmdd: str, windows: List[Tuple[str, str]]) -> None:
+    data = _load()
+    allowed_map = data.setdefault("availability", {}).setdefault("allowed", {})
+    allowed_map[date_yyyymmdd] = [{"start": s, "end": e} for (s, e) in windows]
+    _save(data)
+
+
+def clear_allowed_for_date(date_yyyymmdd: str) -> None:
+    data = _load()
+    allowed_map = data.setdefault("availability", {}).setdefault("allowed", {})
+    allowed_map.pop(date_yyyymmdd, None)
+    _save(data)
+
+
+def add_allowed_window(date_yyyymmdd: str, start_hhmm: str, end_hhmm: str) -> None:
+    windows = get_allowed_for_date(date_yyyymmdd)
+    windows.append((start_hhmm, end_hhmm))
+    # normalize: sort & merge overlaps
+    windows = _merge_windows(windows)
+    set_allowed_for_date(date_yyyymmdd, windows)
+
+
+def _merge_windows(windows: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    if not windows:
+        return []
+    ints = sorted([( _hhmm_to_min(s), _hhmm_to_min(e)) for s, e in windows], key=lambda x: x[0])
+    merged: List[Tuple[int, int]] = []
+    for s, e in ints:
+        if not merged:
+            merged.append((s, e))
+            continue
+        ps, pe = merged[-1]
+        if s <= pe:
+            merged[-1] = (ps, max(pe, e))
+        else:
+            merged.append((s, e))
+    return [(_min_to_hhmm(s), _min_to_hhmm(e)) for s, e in merged]
+
+
+def is_within_allowed(date_yyyymmdd: str, start_hhmm: str, end_hhmm: str) -> bool:
+    allowed = get_allowed_for_date(date_yyyymmdd)
+    if not allowed:
+        return True  # no overrides -> allowed by default (business hours will be applied elsewhere)
+    s1 = _hhmm_to_min(start_hhmm)
+    e1 = _hhmm_to_min(end_hhmm)
+    for s, e in allowed:
+        s2 = _hhmm_to_min(s)
+        e2 = _hhmm_to_min(e)
+        # fully contained
+        if s1 >= s2 and e1 <= e2:
+            return True
+    return False
+
+
+# ────────────── BOOKINGS ──────────────
 
 def add_booking(booking: Dict[str, Any]) -> None:
     data = _load()
@@ -124,7 +196,6 @@ def update_booking(booking_id: str, patch: Dict[str, Any]) -> bool:
 def find_latest_booking_for_user(user_id: int, statuses: List[str]) -> Optional[Dict[str, Any]]:
     data = _load()
     bookings = data.get("bookings", []) or []
-    # latest by created_ts
     candidates = [b for b in bookings if b.get("user_id") == user_id and b.get("status") in statuses]
     if not candidates:
         return None
