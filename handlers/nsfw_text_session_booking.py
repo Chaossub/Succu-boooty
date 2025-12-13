@@ -1,9 +1,9 @@
+# handlers/nsfw_text_session_booking.py
 import time
 import uuid
 from datetime import datetime, timedelta
-from typing import List, Tuple
-
 import pytz
+
 from pyrogram import Client, filters
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
@@ -12,87 +12,66 @@ from utils.nsfw_store import (
     TZ,
     add_booking,
     find_latest_booking_for_user,
-    get_allowed_for_date,
     get_business_hours_for_weekday,
     is_blocked,
-    is_within_allowed,
     update_booking,
 )
-
-RONI_MENU_KEY = "RoniPersonalMenu"
-
 
 def _tz():
     return pytz.timezone(TZ)
 
-
-def _la_now() -> datetime:
+def _now():
     return datetime.now(_tz())
 
-
-def _dt_to_yyyymmdd(dt: datetime) -> str:
+def _dt_to_ymd(dt: datetime) -> str:
     return dt.strftime("%Y%m%d")
 
+def _ymd_to_dt(ymd: str) -> datetime:
+    return _tz().localize(datetime(int(ymd[:4]), int(ymd[4:6]), int(ymd[6:])))
 
-def _yyyymmdd_to_local_day(yyyymmdd: str) -> datetime:
-    tz = _tz()
-    return tz.localize(datetime(int(yyyymmdd[0:4]), int(yyyymmdd[4:6]), int(yyyymmdd[6:8]), 0, 0, 0))
+def _pretty_date(dt: datetime) -> str:
+    return dt.strftime("%a %b %d").replace(" 0", " ")
 
-
-def _min_from_hhmm(hhmm: str) -> int:
+def _min(hhmm: str) -> int:
     h, m = hhmm.split(":")
     return int(h) * 60 + int(m)
 
+def _hhmm(m: int) -> str:
+    return f"{m//60:02d}:{m%60:02d}"
 
-def _hhmm_from_min(m: int) -> str:
-    return f"{m // 60:02d}:{m % 60:02d}"
+def _intro_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📖 View Roni’s Menu", callback_data="roni_portal:menu:src=nsfw")],
+        [InlineKeyboardButton("➡️ Continue Booking", callback_data="nsfw_book:start")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="roni_portal:home")],
+    ])
 
+def _duration_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏱ 30 minutes", callback_data="nsfw_book:dur:30")],
+        [InlineKeyboardButton("🕰 1 hour", callback_data="nsfw_book:dur:60")],
+        [InlineKeyboardButton("⬅ Back", callback_data="nsfw_book:open")],
+    ])
 
-def _pretty_date_label(day_dt: datetime) -> str:
-    return day_dt.strftime("%a %b %d").replace(" 0", " ")
-
-
-def _build_booking_intro_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📖 View Roni’s Menu", callback_data="roni_portal:menu:src=nsfw")],
-            [InlineKeyboardButton("➡️ Continue Booking", callback_data="nsfw_book:start")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="roni_portal:home")],
-        ]
-    )
-
-
-def _build_duration_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("⏱ 30 minutes", callback_data="nsfw_book:dur:30")],
-            [InlineKeyboardButton("🕰 1 hour", callback_data="nsfw_book:dur:60")],
-            [InlineKeyboardButton("⬅ Back", callback_data="nsfw_book:open")],
-        ]
-    )
-
-
-def _build_date_picker_kb(duration: int, week: int) -> InlineKeyboardMarkup:
-    tz = _tz()
-    base = _la_now().astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+def _date_picker(duration: int, week: int):
+    base = _now().replace(hour=0, minute=0, second=0, microsecond=0)
     start = base + timedelta(days=week * 7)
 
-    rows: List[List[InlineKeyboardButton]] = []
-    row: List[InlineKeyboardButton] = []
-
+    rows, row = [], []
     for i in range(7):
-        d = (start + timedelta(days=i)).astimezone(tz)
-        ymd = _dt_to_yyyymmdd(d)
-        label = _pretty_date_label(d)
-        # include week so "Back" can return to the same week
-        row.append(InlineKeyboardButton(label, callback_data=f"nsfw_book:day:{duration}:{ymd}:{week}"))
+        d = start + timedelta(days=i)
+        ymd = _dt_to_ymd(d)
+        row.append(InlineKeyboardButton(
+            _pretty_date(d),
+            callback_data=f"nsfw_book:day:{duration}:{ymd}"
+        ))
         if len(row) == 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
 
-    nav: List[InlineKeyboardButton] = []
+    nav = []
     if week > 0:
         nav.append(InlineKeyboardButton("⬅ Prev week", callback_data=f"nsfw_book:daypick:{duration}:{week-1}"))
     nav.append(InlineKeyboardButton("Next week ➡", callback_data=f"nsfw_book:daypick:{duration}:{week+1}"))
@@ -102,241 +81,116 @@ def _build_date_picker_kb(duration: int, week: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="roni_portal:home")])
     return InlineKeyboardMarkup(rows)
 
+def _slots(ymd: str, duration: int):
+    day = _ymd_to_dt(ymd)
+    open_h, close_h = get_business_hours_for_weekday(day.weekday())
 
-def _generate_slots_for_day(ymd: str, duration: int) -> List[str]:
-    """
-    Start times (30-min increments) within:
-      - business hours OR allowed windows (if set for that date)
-    And excluding blocks.
-    """
-    tz = _tz()
-    day_dt = _yyyymmdd_to_local_day(ymd).astimezone(tz)
-    weekday = day_dt.weekday()
+    start = _min(open_h)
+    end = _min(close_h) - duration
 
-    allowed_windows = get_allowed_for_date(ymd)
+    out = []
+    m = start
+    while m <= end:
+        s = _hhmm(m)
+        e = _hhmm(m + duration)
+        if not is_blocked(ymd, s, e):
+            out.append(s)
+        m += 30
+    return out
 
-    candidates: List[Tuple[int, int]] = []
-    if allowed_windows:
-        for s, e in allowed_windows:
-            candidates.append((_min_from_hhmm(s), _min_from_hhmm(e)))
-    else:
-        open_h, close_h = get_business_hours_for_weekday(weekday)
-        candidates.append((_min_from_hhmm(open_h), _min_from_hhmm(close_h)))
-
-    starts: List[str] = []
-
-    for open_min, close_min in candidates:
-        latest_start = close_min - duration
-        m = open_min
-        while m <= latest_start:
-            start_hhmm = _hhmm_from_min(m)
-            end_hhmm = _hhmm_from_min(m + duration)
-
-            # if allowed windows exist, ensure fully contained (extra safety)
-            if not is_within_allowed(ymd, start_hhmm, end_hhmm):
-                m += 30
-                continue
-
-            if not is_blocked(ymd, start_hhmm, end_hhmm):
-                starts.append(start_hhmm)
-            m += 30
-
-    # unique + sorted
-    starts = sorted(set(starts), key=lambda x: _min_from_hhmm(x))
-    return starts
-
-
-def _build_times_kb(duration: int, ymd: str, week: int) -> InlineKeyboardMarkup:
-    starts = _generate_slots_for_day(ymd, duration)
-
+def _times_kb(duration: int, ymd: str):
+    starts = _slots(ymd, duration)
     if not starts:
-        return InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("⬅ Pick a different date", callback_data=f"nsfw_book:daypick:{duration}:{week}")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="roni_portal:home")],
-            ]
-        )
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅ Pick another date", callback_data=f"nsfw_book:daypick:{duration}:0")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="roni_portal:home")],
+        ])
 
-    rows: List[List[InlineKeyboardButton]] = []
-    row: List[InlineKeyboardButton] = []
-
-    for hhmm in starts[:36]:
-        cb = f"nsfw_book:time:{duration}:{ymd}:{week}:{hhmm.replace(':','')}"
-        row.append(InlineKeyboardButton(hhmm, callback_data=cb))
+    rows, row = [], []
+    for s in starts:
+        row.append(InlineKeyboardButton(
+            s,
+            callback_data=f"nsfw_book:time:{duration}:{ymd}:{s.replace(':','')}"
+        ))
         if len(row) == 3:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
 
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data=f"nsfw_book:daypick:{duration}:{week}")])
+    rows.append([InlineKeyboardButton("⬅ Back", callback_data=f"nsfw_book:daypick:{duration}:0")])
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="roni_portal:home")])
     return InlineKeyboardMarkup(rows)
 
-
-def _build_note_kb(booking_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("✍️ Add a note", callback_data=f"nsfw_book:note:{booking_id}")],
-            [InlineKeyboardButton("⏭ Skip", callback_data=f"nsfw_book:skipnote:{booking_id}")],
-        ]
-    )
-
-
-def _final_confirm_text() -> str:
+def _final():
     return (
         "Your session is booked 💞\n"
         "Roni will reach out to you for payment :)\n\n"
-        "You can find current prices anytime in 📖 Roni’s Menu."
+        "You can find current prices in 📖 Roni’s Menu."
     )
 
+def register(app: Client):
 
-def register(app: Client) -> None:
-    @app.on_callback_query(filters.regex(r"^nsfw_book:open$"))
-    async def nsfw_open(_, cq: CallbackQuery):
-        text = (
+    @app.on_callback_query(filters.regex("^nsfw_book:open$"))
+    async def open(_, cq: CallbackQuery):
+        await cq.message.edit_text(
             "💞 <b>Before booking</b>\n"
-            "Please review current prices in 📖 <b>Roni’s Menu</b> first.\n\n"
-            "Texting only — <b>NO MEET UPS</b>.\n\n"
-            "When you’re ready, continue booking below."
+            "Please check 📖 Roni’s Menu for pricing.\n\n"
+            "<b>Texting only — NO meetups.</b>",
+            reply_markup=_intro_kb(),
+            disable_web_page_preview=True,
         )
-        await cq.message.edit_text(text, reply_markup=_build_booking_intro_kb(), disable_web_page_preview=True)
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^nsfw_book:start$"))
-    async def nsfw_start(_, cq: CallbackQuery):
-        await cq.message.edit_text("Choose your session length 💕", reply_markup=_build_duration_kb(), disable_web_page_preview=True)
+    @app.on_callback_query(filters.regex("^nsfw_book:start$"))
+    async def start(_, cq: CallbackQuery):
+        await cq.message.edit_text("Choose session length 💕", reply_markup=_duration_kb())
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^nsfw_book:dur:(30|60)$"))
-    async def nsfw_dur(_, cq: CallbackQuery):
+    @app.on_callback_query(filters.regex("^nsfw_book:dur:(30|60)$"))
+    async def dur(_, cq: CallbackQuery):
         duration = int(cq.data.split(":")[2])
         await cq.message.edit_text(
             "Pick a date 📅 (Los Angeles time)",
-            reply_markup=_build_date_picker_kb(duration, week=0),
-            disable_web_page_preview=True,
+            reply_markup=_date_picker(duration, 0)
         )
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^nsfw_book:daypick:(30|60):\d+$"))
-    async def nsfw_daypick(_, cq: CallbackQuery):
-        _, _, _, dur_s, week_s = cq.data.split(":")
-        duration = int(dur_s)
-        week = int(week_s)
+    @app.on_callback_query(filters.regex("^nsfw_book:daypick:(30|60):\d+$"))
+    async def daypick(_, cq: CallbackQuery):
+        _, _, dur_s, week_s = cq.data.split(":")
         await cq.message.edit_text(
             "Pick a date 📅 (Los Angeles time)",
-            reply_markup=_build_date_picker_kb(duration, week=week),
-            disable_web_page_preview=True,
+            reply_markup=_date_picker(int(dur_s), int(week_s))
         )
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^nsfw_book:day:(30|60):\d{8}:\d+$"))
-    async def nsfw_day(_, cq: CallbackQuery):
-        _, _, _, dur_s, ymd, week_s = cq.data.split(":")
-        duration = int(dur_s)
-        week = int(week_s)
-
-        day_dt = _yyyymmdd_to_local_day(ymd).astimezone(_tz())
-        day_label = day_dt.strftime("%A, %b %d").replace(" 0", " ")
-
-        starts = _generate_slots_for_day(ymd, duration)
-        if not starts:
-            await cq.message.edit_text(
-                f"{day_label}\n\nNo openings for that date. Try another date 💕",
-                reply_markup=_build_times_kb(duration, ymd, week),
-                disable_web_page_preview=True,
-            )
-            await cq.answer()
-            return
-
+    @app.on_callback_query(filters.regex("^nsfw_book:day:(30|60):\d{8}$"))
+    async def day(_, cq: CallbackQuery):
+        _, _, dur_s, ymd = cq.data.split(":")
         await cq.message.edit_text(
-            f"{day_label}\n\nPick a start time (LA) ⏰",
-            reply_markup=_build_times_kb(duration, ymd, week),
-            disable_web_page_preview=True,
+            "Pick a time ⏰",
+            reply_markup=_times_kb(int(dur_s), ymd)
         )
         await cq.answer()
 
-    @app.on_callback_query(filters.regex(r"^nsfw_book:time:(30|60):\d{8}:\d+:\d{4}$"))
-    async def nsfw_time(_, cq: CallbackQuery):
-        _, _, _, dur_s, ymd, week_s, hhmm_compact = cq.data.split(":")
-        duration = int(dur_s)
-        hhmm = f"{hhmm_compact[0:2]}:{hhmm_compact[2:4]}"
-
-        user = cq.from_user
-        user_id = user.id if user else 0
-        username = f"@{user.username}" if user and user.username else ""
-        display_name = (user.first_name or "").strip() if user else ""
-
+    @app.on_callback_query(filters.regex("^nsfw_book:time:(30|60):\d{8}:\d{4}$"))
+    async def timepick(_, cq: CallbackQuery):
+        _, _, dur_s, ymd, hhmm = cq.data.split(":")
+        hhmm = f"{hhmm[:2]}:{hhmm[2:]}"
         booking_id = uuid.uuid4().hex[:10]
-        add_booking(
-            {
-                "booking_id": booking_id,
-                "created_ts": time.time(),
-                "user_id": user_id,
-                "username": username,
-                "display_name": display_name,
-                "date": ymd,
-                "start_time": hhmm,
-                "duration": duration,
-                "note": "",
-                "status": "awaiting_note",
-                "tz": TZ,
-            }
-        )
 
-        await cq.message.edit_text(
-            "Optional 💬\n"
-            "If you’d like, leave a short note about what you’re into or what you’re looking for.\n\n"
-            "Or you can skip this.",
-            reply_markup=_build_note_kb(booking_id),
-            disable_web_page_preview=True,
-        )
+        add_booking({
+            "booking_id": booking_id,
+            "user_id": cq.from_user.id,
+            "date": ymd,
+            "start_time": hhmm,
+            "duration": int(dur_s),
+            "note": "",
+            "status": "pending_payment",
+            "tz": TZ,
+            "created_ts": time.time(),
+        })
+
+        await cq.message.edit_text(_final())
         await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^nsfw_book:note:[0-9a-f]{10}$"))
-    async def nsfw_note_start(_, cq: CallbackQuery):
-        booking_id = cq.data.split(":")[2]
-        store.set_menu(f"NSFW_NOTE_PENDING:{cq.from_user.id}", booking_id)
-
-        await cq.message.edit_text(
-            "Send your note in <b>one message</b> 💕\n\nKeep it short and sweet.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⏭ Skip", callback_data=f"nsfw_book:skipnote:{booking_id}")]]),
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
-
-    @app.on_callback_query(filters.regex(r"^nsfw_book:skipnote:[0-9a-f]{10}$"))
-    async def nsfw_skipnote(_, cq: CallbackQuery):
-        booking_id = cq.data.split(":")[2]
-        store.set_menu(f"NSFW_NOTE_PENDING:{cq.from_user.id}", "")
-        update_booking(booking_id, {"status": "pending_payment"})
-        await cq.message.edit_text(_final_confirm_text(), disable_web_page_preview=True)
-        await cq.answer()
-
-    @app.on_message(filters.private & filters.text, group=-5)
-    async def nsfw_note_capture(_, m: Message):
-        if not m.from_user:
-            return
-
-        user_id = m.from_user.id
-        pending = (store.get_menu(f"NSFW_NOTE_PENDING:{user_id}") or "").strip()
-
-        booking_id = pending
-        if not booking_id:
-            latest = find_latest_booking_for_user(user_id, statuses=["awaiting_note"])
-            if not latest:
-                return
-            booking_id = (latest.get("booking_id") or "").strip()
-            if not booking_id:
-                return
-
-        note = (m.text or "").strip()
-        if not note:
-            return
-
-        if len(note) > 700:
-            note = note[:700]
-
-        store.set_menu(f"NSFW_NOTE_PENDING:{user_id}", "")
-        update_booking(booking_id, {"note": note, "status": "pending_payment"})
-        await m.reply_text(_final_confirm_text(), disable_web_page_preview=True)
