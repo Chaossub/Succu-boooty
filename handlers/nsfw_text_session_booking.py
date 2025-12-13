@@ -1,18 +1,17 @@
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict
+from zoneinfo import ZoneInfo
 
 from pyrogram import Client, filters
-from pyrogram.types import (
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    CallbackQuery,
-)
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 DATA_PATH = "data/nsfw_bookings.json"
 ADMIN_ID = int(os.getenv("OWNER_ID", "6964994611"))
+
+LA_TZ = ZoneInfo("America/Los_Angeles")
 TZ_LABEL = "LA time"
 
 # ────────────── Storage ──────────────
@@ -32,28 +31,106 @@ BOOKINGS: Dict[str, dict] = _load()
 
 # ────────────── Helpers ──────────────
 
-def _fmt(dt: str, tm: str):
-    return f"📅 {dt}\n⏰ {tm} ({TZ_LABEL})"
+def _now_la() -> datetime:
+    return datetime.now(tz=LA_TZ)
+
+def _fmt_date_label(d: datetime) -> str:
+    # "Fri Dec 19"
+    return d.strftime("%a %b %d").replace(" 0", " ")
+
+def _fmt_full_date(d: datetime) -> str:
+    # "Friday, December 19"
+    return d.strftime("%A, %B %d").replace(" 0", " ")
+
+def _fmt(dt_label: str, tm: str) -> str:
+    return f"📅 {dt_label}\n⏰ {tm} ({TZ_LABEL})"
 
 def _back_to_assistant_kb():
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")]]
     )
 
+def _menu_or_back_kb(back_cb: str):
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📖 View prices (Roni’s Menu)", callback_data="roni_portal:menu")],
+            [InlineKeyboardButton("⬅ Back", callback_data=back_cb)],
+        ]
+    )
+
+# ────────────── UI Builders ──────────────
+
+def _date_grid_kb(week_offset: int) -> InlineKeyboardMarkup:
+    """
+    Show 7 dates starting from 'today + week_offset*7' in LA time.
+    """
+    start = _now_la().date() + timedelta(days=week_offset * 7)
+    days = [start + timedelta(days=i) for i in range(7)]
+
+    rows = []
+    # 2 columns for first 6, last row single
+    for i in range(0, 6, 2):
+        d1 = datetime(days[i].year, days[i].month, days[i].day, tzinfo=LA_TZ)
+        d2 = datetime(days[i+1].year, days[i+1].month, days[i+1].day, tzinfo=LA_TZ)
+        rows.append([
+            InlineKeyboardButton(_fmt_date_label(d1), callback_data=f"nsfw:book:pickdate:{d1.date().isoformat()}:{week_offset}"),
+            InlineKeyboardButton(_fmt_date_label(d2), callback_data=f"nsfw:book:pickdate:{d2.date().isoformat()}:{week_offset}"),
+        ])
+
+    d7 = datetime(days[6].year, days[6].month, days[6].day, tzinfo=LA_TZ)
+    rows.append([InlineKeyboardButton(_fmt_date_label(d7), callback_data=f"nsfw:book:pickdate:{d7.date().isoformat()}:{week_offset}")])
+
+    nav = []
+    if week_offset > 0:
+        nav.append(InlineKeyboardButton("⬅ Prev week", callback_data=f"nsfw:book:datepage:{week_offset-1}"))
+    nav.append(InlineKeyboardButton("➡ Next week", callback_data=f"nsfw:book:datepage:{week_offset+1}"))
+    rows.append(nav)
+
+    rows.append([
+        InlineKeyboardButton("⬅ Back", callback_data="nsfw_book:open"),
+        InlineKeyboardButton("❌ Cancel", callback_data="roni_portal:home"),
+    ])
+
+    return InlineKeyboardMarkup(rows)
+
+def _time_picker_kb(date_iso: str, week_offset: int) -> InlineKeyboardMarkup:
+    """
+    Preset times (LA). You can expand/replace this later with your availability windows.
+    """
+    # Keeping this sane: start times that fit 30–60 min inside business hours (09:00–22:00)
+    times = ["9:00 AM", "11:00 AM", "1:00 PM", "3:00 PM", "5:00 PM", "7:00 PM", "9:00 PM"]
+
+    rows = []
+    for i in range(0, len(times), 2):
+        row = [InlineKeyboardButton(times[i], callback_data=f"nsfw:book:time:{date_iso}:{times[i]}")]
+        if i + 1 < len(times):
+            row.append(InlineKeyboardButton(times[i+1], callback_data=f"nsfw:book:time:{date_iso}:{times[i+1]}"))
+        rows.append(row)
+
+    rows.append([
+        InlineKeyboardButton("📅 Pick another date", callback_data=f"nsfw:book:datepage:{week_offset}"),
+    ])
+    rows.append([
+        InlineKeyboardButton("⬅ Back", callback_data="nsfw_book:open"),
+        InlineKeyboardButton("❌ Cancel", callback_data="roni_portal:home"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
 # ────────────── Register ──────────────
 
 def register(app: Client):
 
-    # ✅ Entry point (supports both callback styles)
+    # ✅ Entry point (supports BOTH callback styles)
     @app.on_callback_query(filters.regex(r"^(nsfw_book:open|nsfw:book:start)$"))
     async def start_booking(_, cq: CallbackQuery):
         await cq.message.edit_text(
-            "📅 <b>Pick a date to request your private texting session</b>\n\n"
+            "📩 <b>Book a private NSFW texting session</b>\n\n"
             "Prices are listed in 📖 Roni’s Menu.\n"
-            "🚫 <b>No meetups</b> — this is online/texting only.",
+            "🚫 <b>No meetups</b> — this is online/texting only.\n\n"
+            "Tap below to choose a date (LA time).",
             reply_markup=InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("📅 Pick a date", callback_data="nsfw:book:date:0")],
+                    [InlineKeyboardButton("📅 Pick a date", callback_data="nsfw:book:datepage:0")],
                     [InlineKeyboardButton("📖 View prices (Roni’s Menu)", callback_data="roni_portal:menu")],
                     [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
                 ]
@@ -62,57 +139,47 @@ def register(app: Client):
         )
         await cq.answer()
 
-    # Date picker (simple “week offset” pager)
-    @app.on_callback_query(filters.regex(r"^nsfw:book:date:(\d+)$"))
-    async def pick_date(_, cq: CallbackQuery):
-        week = int(cq.matches[0].group(1))
+    # ✅ Date page (7-day grid + next/prev week)
+    @app.on_callback_query(filters.regex(r"^nsfw:book:datepage:(\d+)$"))
+    async def date_page(_, cq: CallbackQuery):
+        week_offset = int(cq.matches[0].group(1))
+        kb = _date_grid_kb(week_offset)
 
-        # For now: just demo dates (you can wire this to your availability system later)
-        # Keeping the callback format stable so "next week" actually works.
-        base_dates = [
-            "Friday, December 19",
-            "Saturday, December 20",
-            "Sunday, December 21",
-            "Monday, December 22",
-        ]
-        date_label = base_dates[week % len(base_dates)]
-
-        kb = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("11:00 AM", callback_data=f"nsfw:book:time:{week}:11:00 AM"),
-                    InlineKeyboardButton("1:00 PM", callback_data=f"nsfw:book:time:{week}:1:00 PM"),
-                ],
-                [
-                    InlineKeyboardButton("➡ Next week", callback_data=f"nsfw:book:date:{week+1}")
-                ],
-                [
-                    InlineKeyboardButton("⬅ Back", callback_data="nsfw_book:open"),
-                    InlineKeyboardButton("❌ Cancel", callback_data="roni_portal:home"),
-                ],
-            ]
-        )
+        start = _now_la().date() + timedelta(days=week_offset * 7)
+        end = start + timedelta(days=6)
 
         await cq.message.edit_text(
-            f"🗓 <b>{date_label}</b>\n\nChoose a time:",
+            f"📅 <b>Pick a date</b> ({TZ_LABEL})\n"
+            f"{start.strftime('%b %d').replace(' 0',' ')} – {end.strftime('%b %d').replace(' 0',' ')}",
             reply_markup=kb,
             disable_web_page_preview=True,
         )
         await cq.answer()
 
-    # Time select
-    @app.on_callback_query(filters.regex(r"^nsfw:book:time:(\d+):(.+)$"))
+    # ✅ Pick a specific date
+    @app.on_callback_query(filters.regex(r"^nsfw:book:pickdate:(\d{4}-\d{2}-\d{2}):(\d+)$"))
+    async def pick_date(_, cq: CallbackQuery):
+        date_iso = cq.matches[0].group(1)
+        week_offset = int(cq.matches[0].group(2))
+
+        d = datetime.fromisoformat(date_iso).replace(tzinfo=LA_TZ)
+        pretty = _fmt_full_date(d)
+
+        await cq.message.edit_text(
+            f"🗓 <b>{pretty}</b>\n\nChoose a time:",
+            reply_markup=_time_picker_kb(date_iso, week_offset),
+            disable_web_page_preview=True,
+        )
+        await cq.answer()
+
+    # ✅ Pick time -> create booking request -> notify admin with Accept/Cancel
+    @app.on_callback_query(filters.regex(r"^nsfw:book:time:(\d{4}-\d{2}-\d{2}):(.+)$"))
     async def pick_time(_, cq: CallbackQuery):
-        week = int(cq.matches[0].group(1))
+        date_iso = cq.matches[0].group(1)
         time_str = cq.matches[0].group(2)
 
-        base_dates = [
-            "Friday, December 19",
-            "Saturday, December 20",
-            "Sunday, December 21",
-            "Monday, December 22",
-        ]
-        date_str = base_dates[week % len(base_dates)]
+        d = datetime.fromisoformat(date_iso).replace(tzinfo=LA_TZ)
+        date_str = _fmt_full_date(d)
 
         booking_id = str(uuid.uuid4())
 
@@ -129,7 +196,7 @@ def register(app: Client):
         }
         _save(BOOKINGS)
 
-        # Notify ADMIN with Accept/Cancel
+        # ADMIN message with Accept/Cancel
         await app.send_message(
             ADMIN_ID,
             (
@@ -149,7 +216,7 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-        # Notify USER (request sent)
+        # USER confirmation (request sent)
         await cq.message.edit_text(
             (
                 "💗 <b>Request sent</b>\n\n"
@@ -186,7 +253,7 @@ def register(app: Client):
         await cq.message.edit_text("✅ Accepted. User was notified 💕")
         await cq.answer()
 
-        # USER accepted message (NO menu button)
+        # USER accepted (NO menu button)
         user_kb = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("💕 Book another", callback_data="nsfw_book:open")],
@@ -225,4 +292,3 @@ def register(app: Client):
                 reply_markup=_back_to_assistant_kb(),
                 disable_web_page_preview=True,
             )
-
