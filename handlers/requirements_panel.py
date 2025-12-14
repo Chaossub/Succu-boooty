@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from typing import List, Set, Dict, Any, Optional, Tuple
 
 from pyrogram import Client, filters
-from pyrogram.enums import ChatType
 from pyrogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
@@ -150,7 +149,6 @@ def _member_doc(user_id: int) -> Dict[str, Any]:
         "is_model": is_model,
         "is_owner": is_owner,
         "reminder_sent": bool(doc.get("reminder_sent", False)),
-        "dm_ready": bool(doc.get("dm_ready", False)),
         "final_warning_sent": bool(doc.get("final_warning_sent", False)),
         "last_updated": doc.get("last_updated"),
     }
@@ -268,10 +266,6 @@ def _admin_kb() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("📡 Scan Group Members", callback_data="reqpanel:scan"),
-                InlineKeyboardButton("📊 Scan & Log Status", callback_data="reqpanel:scan_log"),
-            ],
-            [
-                InlineKeyboardButton("💬 DM-Ready (This Group)", callback_data="reqpanel:dm_ready_group"),
             ],
             [
                 InlineKeyboardButton("💌 Send Reminders (Behind Only)", callback_data="reqpanel:reminders"),
@@ -1005,7 +999,6 @@ def register(app: Client):
                                 "username": username,
                                 "last_updated": datetime.now(timezone.utc),
                             },
-                            "$addToSet": {"groups": gid},
                         },
                         upsert=True,
                     )
@@ -1022,169 +1015,7 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    
-    # ────────────── Scan + log status ──────────────
-
-    @app.on_callback_query(filters.regex("^reqpanel:scan_log$"))
-    async def reqpanel_scan_log_cb(client: Client, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can run scans.", show_alert=True)
-            return
-
-        if not SANCTUARY_GROUP_IDS:
-            await cq.answer("No Sanctuary group IDs configured.", show_alert=True)
-            return
-
-        # Scan members (same as scan button) and also track group membership
-        total_indexed = 0
-        for gid in SANCTUARY_GROUP_IDS:
-            try:
-                async for member in client.get_chat_members(gid):
-                    if member.user.is_bot:
-                        continue
-                    u = member.user
-                    username = (u.username or "").lower() if u.username else None
-                    members_coll.update_one(
-                        {"user_id": u.id},
-                        {
-                            "$set": {
-                                "first_name": u.first_name or "",
-                                "username": username,
-                                "last_updated": datetime.now(timezone.utc),
-                            },
-                            "$addToSet": {"groups": gid},
-                        },
-                        upsert=True,
-                    )
-                    total_indexed += 1
-            except Exception as e:
-                log.warning("requirements_panel: failed scanning group %s: %s", gid, e)
-
-        # Summarize
-        docs = list(members_coll.find())
-        total = len(docs)
-        met = behind = exempt = 0
-
-        for d in docs:
-            uid = d.get("user_id")
-            if not uid:
-                continue
-            md = _member_doc(uid)
-            if md["is_exempt"]:
-                exempt += 1
-            elif md["manual_spend"] >= REQUIRED_MIN_SPEND:
-                met += 1
-            else:
-                behind += 1
-
-        summary = (
-            "📊 <b>Sanctuary Requirements Scan</b>\n\n"
-            f"👥 Total members tracked: <b>{total}</b>\n"
-            f"✅ Requirements met: <b>{met}</b>\n"
-            f"⚠️ Behind: <b>{behind}</b>\n"
-            f"🟢 Exempt (models/owner/exempt): <b>{exempt}</b>\n\n"
-            f"📡 Indexed/updated this run: <b>{total_indexed}</b>\n"
-            f"💵 Minimum required: ${REQUIRED_MIN_SPEND:.2f}"
-        )
-
-        await _log_event(client, f"Scan+log run by {user_id}: indexed {total_indexed} members. Met={met}, Behind={behind}, Exempt={exempt}.")
-        if LOG_GROUP_ID:
-            await _safe_send(client, LOG_GROUP_ID, summary)
-
-        await cq.answer("Scan & log complete ✅", show_alert=True)
-        await _safe_edit_text(
-            cq.message,
-            text="✅ Scan & log complete. Summary sent to the log group.",
-            reply_markup=_admin_kb(),
-            disable_web_page_preview=True,
-        )
-
-    # ────────────── DM-ready list (current group) ──────────────
-
-    
-    # ────────────── DM-ready list (pick group) ──────────────
-
-    @app.on_callback_query(filters.regex("^reqpanel:dm_ready_group$"))
-    async def reqpanel_dm_ready_group_cb(client: Client, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Admins only 💜", show_alert=True)
-            return
-
-        if not SANCTUARY_GROUP_IDS:
-            await cq.answer("No Sanctuary group IDs configured.", show_alert=True)
-            return
-
-        # In DM with the bot, we can't infer which group you mean—so pick one.
-        rows = []
-        for gid in SANCTUARY_GROUP_IDS[:30]:
-            rows.append([InlineKeyboardButton(f"📍 Group {gid}", callback_data=f"reqpanel:dm_ready_gid:{gid}")])
-        rows.append([InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin")])
-        kb = InlineKeyboardMarkup(rows)
-
-        await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text="💬 <b>DM-Ready</b>
-
-Pick which group you want to filter by:",
-            reply_markup=kb,
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex(r"^reqpanel:dm_ready_gid:(-?\d+)$"))
-    async def reqpanel_dm_ready_gid_cb(client: Client, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Admins only 💜", show_alert=True)
-            return
-
-        gid = int((cq.data or "").split(":")[-1])
-
-        cursor = members_coll.find({"dm_ready": True, "groups": gid}).sort("first_name", ASCENDING)
-        docs = list(cursor)
-
-        if not docs:
-            text = (
-                "💬 <b>DM-Ready</b>
-
-"
-                f"Group: <code>{gid}</code>
-
-"
-                "• none found
-
-"
-                "Note: This uses <code>dm_ready=true</code> and requires you to run 📡 Scan Group Members at least once."
-            )
-        else:
-            lines = [
-                "💬 <b>DM-Ready</b>",
-                f"Group: <code>{gid}</code>",
-                ""
-            ]
-            for d in docs[:120]:
-                name = _display_name_for_doc(d)
-                uid = d.get("user_id")
-                lines.append(f"• {name} — <code>{uid}</code>")
-            text = "
-".join(lines)
-
-        await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text=text,
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("⬅ Back", callback_data="reqpanel:dm_ready_group")],
-                    [InlineKeyboardButton("🏠 Admin Panel", callback_data="reqpanel:admin")],
-                ]
-            ),
-            disable_web_page_preview=True,
-        )
-
-# ────────────── Reminder sweeps ──────────────
+    # ────────────── Reminder sweeps ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
     async def reqpanel_reminders_cb(client: Client, cq: CallbackQuery):
