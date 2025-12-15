@@ -1,18 +1,27 @@
 # handlers/dmnow.py
-# /dmnow -> a single deep-link button to the bot (does NOT mark DM-ready; /start does).
-
-import logging
+import os
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
-log = logging.getLogger("handlers.dmnow")
+async def _bot_username(client: Client) -> str:
+    env = (os.getenv("BOT_USERNAME") or "").lstrip("@").strip()
+    if env:
+        return env
+    me = await client.get_me()
+    return (me.username or "").lstrip("@").strip()
 
 def register(app: Client):
-    @app.on_message(filters.command("dmnow"))
-    async def dmnow(client: Client, m: Message):
-        me = await client.get_me()
-        # send a deep-link with a tiny payload "d" to record source (logic lives in /start)
-        url = f"https://t.me/{me.username}?start=d"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💌 Open DM Portal", url=url)]])
-        await m.reply_text("Tap to open your portal:", reply_markup=kb, disable_web_page_preview=True)
-
+    # GROUP: /dmnow should open SuccuBot Sanctuary mode in DMs
+    @app.on_message(filters.command(["dmnow"]) & filters.group)
+    async def dmnow_cmd(client: Client, message: Message):
+        uname = await _bot_username(client)
+        if not uname:
+            await message.reply_text("Set BOT_USERNAME env var to your bot’s username.")
+            return
+        url = f"https://t.me/{uname}?start=portal"
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("💌 DM SuccuBot Now", url=url)]])
+        await message.reply_text(
+            "Tap below to slide into my DMs, cutie 😈",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
