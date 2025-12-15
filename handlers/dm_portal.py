@@ -35,7 +35,7 @@ def register(app: Client):
     """
 
     # ───────────── /dmnow command → DM link button ─────────────
-    @app.on_message(filters.command(["dmnow", "dm_now"]) & filters.group)
+    @app.on_message(filters.command(["dm_now"]) & filters.group)
     async def _cmd_dmnow(client: Client, message: Message):
         url = f"https://t.me/{BOT_USERNAME}?start=group_dm"
 
