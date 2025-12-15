@@ -16,22 +16,19 @@ from utils.menu_store import store
 
 log = logging.getLogger(__name__)
 
-# Roni (owner/admin) Telegram user id
 RONI_OWNER_ID = 6964994611
 
 # Storage keys (MenuStore)
-PENDING_KEY_PREFIX = "AGE_REQ:"          # AGE_REQ:<user_id> -> JSON payload
-PENDING_INDEX_KEY = "RoniAgePendingIndex" # JSON list[int] of user_ids pending review
-AGE_OK_PREFIX = "AGE_OK:"                # AGE_OK:<user_id> -> "1" or JSON
-AGE_INDEX_KEY = "RoniAgeIndex"           # JSON list[int] verified (legacy-compatible)
+PENDING_KEY_PREFIX = "AGE_REQ:"           # AGE_REQ:<user_id> -> JSON payload
+PENDING_INDEX_KEY = "RoniAgePendingIndex" # JSON list[int] pending
+AGE_OK_PREFIX = "AGE_OK:"                 # AGE_OK:<user_id> -> "1" or JSON
+AGE_INDEX_KEY = "RoniAgeIndex"            # JSON list[int] verified (legacy-compatible)
 
-# Simple convo state for private chat (MenuStore)
-STEP_PREFIX = "_AGE_STEP:"               # _AGE_STEP:<user_id> -> "await_photo"
-
+# DM state
+STEP_PREFIX = "_AGE_STEP:"                # _AGE_STEP:<user_id> -> "await_photo"
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
 
 def _jloads(raw: str, default):
     try:
@@ -39,29 +36,23 @@ def _jloads(raw: str, default):
     except Exception:
         return default
 
-
 def _jget(key: str, default):
     raw = store.get_menu(key)
     if not raw:
         return default
     return _jloads(raw, default)
 
-
 def _jset(key: str, obj) -> None:
     store.set_menu(key, json.dumps(obj, ensure_ascii=False))
-
 
 def _step_key(user_id: int) -> str:
     return f"{STEP_PREFIX}{user_id}"
 
-
 def _pending_key(user_id: int) -> str:
     return f"{PENDING_KEY_PREFIX}{user_id}"
 
-
 def _age_ok_key(user_id: int) -> str:
     return f"{AGE_OK_PREFIX}{user_id}"
-
 
 def _get_pending_index() -> list[int]:
     lst = _jget(PENDING_INDEX_KEY, [])
@@ -74,8 +65,7 @@ def _get_pending_index() -> list[int]:
         except Exception:
             pass
     # dedupe preserve order
-    seen = set()
-    dedup = []
+    seen, dedup = set(), []
     for uid in out:
         if uid in seen:
             continue
@@ -83,18 +73,18 @@ def _get_pending_index() -> list[int]:
         dedup.append(uid)
     return dedup
 
-
 def _set_pending_index(uids: list[int]) -> None:
-    # dedupe preserve order
-    seen = set()
-    out = []
+    seen, out = set(), []
     for uid in uids:
+        try:
+            uid = int(uid)
+        except Exception:
+            continue
         if uid in seen:
             continue
         seen.add(uid)
-        out.append(int(uid))
+        out.append(uid)
     _jset(PENDING_INDEX_KEY, out)
-
 
 def _add_pending(uid: int) -> None:
     idx = _get_pending_index()
@@ -102,11 +92,8 @@ def _add_pending(uid: int) -> None:
         idx.append(uid)
         _set_pending_index(idx)
 
-
 def _remove_pending(uid: int) -> None:
-    idx = [x for x in _get_pending_index() if x != uid]
-    _set_pending_index(idx)
-
+    _set_pending_index([x for x in _get_pending_index() if x != uid])
 
 def _get_verified_index() -> list[int]:
     raw = store.get_menu(AGE_INDEX_KEY) or "[]"
@@ -119,9 +106,7 @@ def _get_verified_index() -> list[int]:
             out.append(int(x))
         except Exception:
             pass
-    # dedupe
-    seen = set()
-    dedup = []
+    seen, dedup = set(), []
     for uid in out:
         if uid in seen:
             continue
@@ -129,28 +114,28 @@ def _get_verified_index() -> list[int]:
         dedup.append(uid)
     return dedup
 
-
 def _set_verified_index(uids: list[int]) -> None:
-    seen = set()
-    out = []
+    seen, out = set(), []
     for uid in uids:
+        try:
+            uid = int(uid)
+        except Exception:
+            continue
         if uid in seen:
             continue
         seen.add(uid)
-        out.append(int(uid))
+        out.append(uid)
     store.set_menu(AGE_INDEX_KEY, json.dumps(out))
-
 
 def is_age_verified(user_id: int | None) -> bool:
     if not user_id:
         return False
-    if user_id == RONI_OWNER_ID:
-        return True
+    # NOTE: Do NOT auto-treat owner as "verified" here.
+    # Owner access is handled elsewhere; verification flags should represent reviewed users only.
     try:
         return bool(store.get_menu(_age_ok_key(user_id)))
     except Exception:
         return False
-
 
 def _user_intro_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -160,7 +145,6 @@ def _user_intro_kb() -> InlineKeyboardMarkup:
         ]
     )
 
-
 def _await_photo_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -168,7 +152,6 @@ def _await_photo_kb() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("⬅ Back", callback_data="roni_age:back")],
         ]
     )
-
 
 def _pending_user_text() -> str:
     return (
@@ -180,14 +163,12 @@ def _pending_user_text() -> str:
         "After you send it, Roni will review and approve/deny or ask for more info."
     )
 
-
 def _already_pending_text() -> str:
     return (
         "⏳ <b>Age Verification Pending</b>\n\n"
         "I already have your verification photo submitted.\n"
         "Please wait for Roni to review it. 💜"
     )
-
 
 def _approved_text() -> str:
     return (
@@ -196,7 +177,6 @@ def _approved_text() -> str:
         "🚫 <b>NO meetups</b> — online/texting only."
     )
 
-
 def _denied_text() -> str:
     return (
         "❌ <b>Verification denied</b>\n\n"
@@ -204,7 +184,6 @@ def _denied_text() -> str:
         "If you want to try again, tap Age Verify and resubmit with a clearer photo "
         "touching your nose with your pinky."
     )
-
 
 def _moreinfo_text() -> str:
     return (
@@ -216,7 +195,6 @@ def _moreinfo_text() -> str:
         "Tap below when you're ready."
     )
 
-
 def _admin_review_kb(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -225,10 +203,12 @@ def _admin_review_kb(uid: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("❌ Deny", callback_data=f"age_admin:deny:{uid}"),
             ],
             [InlineKeyboardButton("🔁 Ask for more info", callback_data=f"age_admin:moreinfo:{uid}")],
-            [InlineKeyboardButton("📥 Next pending", callback_data="age_admin:next")],
+            [
+                InlineKeyboardButton("🧹 Reset this user", callback_data=f"age_admin:reset:{uid}"),
+                InlineKeyboardButton("📥 Next pending", callback_data="age_admin:next"),
+            ],
         ]
     )
-
 
 def _admin_next_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -238,6 +218,21 @@ def _admin_next_kb() -> InlineKeyboardMarkup:
         ]
     )
 
+def _admin_reset_all_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⚠️ YES, reset ALL verifications", callback_data="age_admin:reset_all_confirm")],
+            [InlineKeyboardButton("⬅ Cancel", callback_data="roni_admin:open")],
+        ]
+    )
+
+def _admin_reset_user_kb(uid: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("⚠️ YES, reset this user", callback_data=f"age_admin:reset_confirm:{uid}")],
+            [InlineKeyboardButton("⬅ Cancel", callback_data="roni_admin:open")],
+        ]
+    )
 
 async def _notify_admin(app: Client, payload: dict) -> None:
     uid = int(payload["user_id"])
@@ -268,11 +263,31 @@ async def _notify_admin(app: Client, payload: dict) -> None:
     except Exception as e:
         log.exception("Failed to notify admin about age request: %s", e)
 
+def _remove_verified(uid: int) -> None:
+    # Clear AGE_OK flag
+    try:
+        store.set_menu(_age_ok_key(uid), "")
+    except Exception:
+        pass
+    # Remove from verified index
+    ids = [x for x in _get_verified_index() if x != uid]
+    _set_verified_index(ids)
+
+def _clear_pending(uid: int) -> None:
+    try:
+        store.set_menu(_pending_key(uid), "")
+    except Exception:
+        pass
+    _remove_pending(uid)
+    try:
+        store.set_menu(_step_key(uid), "")
+    except Exception:
+        pass
 
 def register(app: Client) -> None:
-    log.info("✅ handlers.roni_portal_age (photo flow) registered")
+    log.info("✅ handlers.roni_portal_age (photo + admin review) registered")
 
-    # Entry point from Roni assistant main menu
+    # Entry from Roni assistant menu
     @app.on_callback_query(filters.regex(r"^roni_portal:age$"))
     async def age_entry(_, cq: CallbackQuery):
         if cq.message and cq.message.chat and cq.message.chat.type != ChatType.PRIVATE:
@@ -284,34 +299,63 @@ def register(app: Client) -> None:
             await cq.answer()
             return
 
-        # If already verified, tell them
-        if is_age_verified(uid):
-            await cq.message.edit_text(_approved_text(), reply_markup=InlineKeyboardMarkup(
+        # Owner: show admin-ish info screen (NO auto-verify)
+        if uid == RONI_OWNER_ID:
+            pending = len(_get_pending_index())
+            verified = len(_get_verified_index())
+            text = (
+                "🧾 <b>Age Verification Admin</b>\n\n"
+                f"Pending requests: <b>{pending}</b>\n"
+                f"Verified users: <b>{verified}</b>\n\n"
+                "Use the Roni Admin panel buttons to review pending requests or view lists."
+            )
+            kb = InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("🔥 Teaser & Promo Channels", callback_data="roni_portal:teaser")],
-                    [InlineKeyboardButton("💞 Book a private NSFW texting session", callback_data="nsfw_book:open")],
-                    [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
+                    [InlineKeyboardButton("🧾 Pending requests", callback_data="roni_admin:age_pending")],
+                    [InlineKeyboardButton("✅ Verified list", callback_data="roni_admin:age_list")],
+                    [InlineKeyboardButton("🧹 Reset ALL verifications", callback_data="age_admin:reset_all")],
+                    [InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")],
                 ]
-            ), disable_web_page_preview=True)
+            )
+            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
             await cq.answer()
             return
 
-        # If pending, tell them
-        pending = store.get_menu(_pending_key(uid))
-        if pending:
-            await cq.message.edit_text(_already_pending_text(),
-                                       reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")]]),
-                                       disable_web_page_preview=True)
+        # Already verified?
+        if is_age_verified(uid):
+            await cq.message.edit_text(
+                _approved_text(),
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [InlineKeyboardButton("🔥 Teaser & Promo Channels", callback_data="roni_portal:teaser")],
+                        [InlineKeyboardButton("💞 Book a private NSFW texting session", callback_data="nsfw_book:open")],
+                        [InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")],
+                    ]
+                ),
+                disable_web_page_preview=True,
+            )
+            await cq.answer()
+            return
+
+        # Pending?
+        if store.get_menu(_pending_key(uid)):
+            await cq.message.edit_text(
+                _already_pending_text(),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")]]),
+                disable_web_page_preview=True,
+            )
             await cq.answer()
             return
 
         await cq.message.edit_text(_pending_user_text(), reply_markup=_user_intro_kb(), disable_web_page_preview=True)
         await cq.answer()
 
-    # Begin submission: set state to await photo
     @app.on_callback_query(filters.regex(r"^roni_age:begin$"))
     async def age_begin(_, cq: CallbackQuery):
         uid = cq.from_user.id
+        if uid == RONI_OWNER_ID:
+            await cq.answer("Admin does not submit verification 💜", show_alert=True)
+            return
         store.set_menu(_step_key(uid), "await_photo")
         await cq.message.edit_text(
             "📸 <b>Send your verification photo now</b>\n\n"
@@ -336,23 +380,23 @@ def register(app: Client) -> None:
     @app.on_callback_query(filters.regex(r"^roni_age:back$"))
     async def age_back(_, cq: CallbackQuery):
         uid = cq.from_user.id
-        # back to instructions, keep them able to start again
         store.set_menu(_step_key(uid), "")
         await cq.message.edit_text(_pending_user_text(), reply_markup=_user_intro_kb(), disable_web_page_preview=True)
         await cq.answer()
 
-    # Photo receiver in DM
+    # Receive photo in DM
     @app.on_message(filters.private & filters.photo)
     async def age_photo_receive(_, m: Message):
         if not m.from_user:
             return
         uid = m.from_user.id
+        if uid == RONI_OWNER_ID:
+            return
 
         step = store.get_menu(_step_key(uid)) or ""
         if step != "await_photo":
             return
 
-        # pick highest resolution photo
         photo = m.photo
         if not photo:
             return
@@ -367,11 +411,8 @@ def register(app: Client) -> None:
             "status": "pending",
         }
 
-        # store + index
         _jset(_pending_key(uid), payload)
         _add_pending(uid)
-
-        # clear state
         store.set_menu(_step_key(uid), "")
 
         await m.reply_text(
@@ -383,7 +424,7 @@ def register(app: Client) -> None:
 
         await _notify_admin(app, payload)
 
-    # Admin: view next pending
+    # Admin: next pending
     @app.on_callback_query(filters.regex(r"^age_admin:next$"))
     async def admin_next(_, cq: CallbackQuery):
         if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
@@ -413,37 +454,46 @@ def register(app: Client) -> None:
         await cq.answer("Opening next pending…")
         await _notify_admin(app, payload)
 
-    # Admin: approve/deny/moreinfo
-    @app.on_callback_query(filters.regex(r"^age_admin:(approve|deny|moreinfo):(\d+)$"))
+    # Admin actions approve/deny/moreinfo/reset
+    @app.on_callback_query(filters.regex(r"^age_admin:(approve|deny|moreinfo|reset):(\d+)$"))
     async def admin_action(_, cq: CallbackQuery):
         if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
             await cq.answer("Only Roni 💜", show_alert=True)
             return
 
-        action, uid_s = cq.data.split(":")[1], cq.data.split(":")[2]
-        uid = int(uid_s)
+        parts = (cq.data or "").split(":")
+        if len(parts) != 3:
+            await cq.answer("Bad callback.", show_alert=True)
+            return
+
+        action = parts[1]
+        uid = int(parts[2])
 
         payload = _jget(_pending_key(uid), {})
+        # reset can work even if not pending
+        if action == "reset":
+            await cq.message.reply_text(
+                f"Reset age verification for <code>{uid}</code>?\n\nThis will:\n• remove verified status\n• clear pending request (if any)\n• force re-submit photo",
+                reply_markup=_admin_reset_user_kb(uid),
+                disable_web_page_preview=True,
+            )
+            await cq.answer()
+            return
+
         if not payload:
             await cq.answer("Request not found (maybe already handled).", show_alert=True)
             _remove_pending(uid)
             return
 
         if action == "approve":
-            # mark verified
             store.set_menu(_age_ok_key(uid), "1")
+            ids = _get_verified_index()
+            if uid not in ids:
+                ids.append(uid)
+                _set_verified_index(ids)
 
-            # legacy verified index
-            verified_ids = _get_verified_index()
-            if uid not in verified_ids:
-                verified_ids.append(uid)
-                _set_verified_index(verified_ids)
+            _clear_pending(uid)
 
-            # remove pending
-            store.set_menu(_pending_key(uid), "")
-            _remove_pending(uid)
-
-            # notify user
             try:
                 await app.send_message(uid, _approved_text(), disable_web_page_preview=True)
             except Exception:
@@ -451,20 +501,13 @@ def register(app: Client) -> None:
 
             await cq.answer("Approved ✅", show_alert=True)
             try:
-                await cq.message.edit_caption(
-                    (cq.message.caption or "") + "\n\n✅ <b>APPROVED</b>",
-                    reply_markup=_admin_next_kb(),
-                )
+                await cq.message.edit_caption((cq.message.caption or "") + "\n\n✅ <b>APPROVED</b>", reply_markup=_admin_next_kb())
             except Exception:
-                try:
-                    await cq.message.edit_text("✅ Approved.", reply_markup=_admin_next_kb())
-                except Exception:
-                    pass
+                pass
             return
 
         if action == "deny":
-            store.set_menu(_pending_key(uid), "")
-            _remove_pending(uid)
+            _clear_pending(uid)
 
             try:
                 await app.send_message(uid, _denied_text(), disable_web_page_preview=True)
@@ -473,24 +516,16 @@ def register(app: Client) -> None:
 
             await cq.answer("Denied ❌", show_alert=True)
             try:
-                await cq.message.edit_caption(
-                    (cq.message.caption or "") + "\n\n❌ <b>DENIED</b>",
-                    reply_markup=_admin_next_kb(),
-                )
+                await cq.message.edit_caption((cq.message.caption or "") + "\n\n❌ <b>DENIED</b>", reply_markup=_admin_next_kb())
             except Exception:
-                try:
-                    await cq.message.edit_text("❌ Denied.", reply_markup=_admin_next_kb())
-                except Exception:
-                    pass
+                pass
             return
 
         if action == "moreinfo":
-            # keep request pending but reset their step so next photo replaces it
             payload["status"] = "moreinfo"
             payload["moreinfo_at"] = _now_iso()
             _jset(_pending_key(uid), payload)
 
-            # tell user to resend; set state
             store.set_menu(_step_key(uid), "await_photo")
             try:
                 await app.send_message(
@@ -509,67 +544,228 @@ def register(app: Client) -> None:
 
             await cq.answer("Requested more info 🔁", show_alert=True)
             try:
-                await cq.message.edit_caption(
-                    (cq.message.caption or "") + "\n\n🔁 <b>MORE INFO REQUESTED</b>",
-                    reply_markup=_admin_next_kb(),
-                )
+                await cq.message.edit_caption((cq.message.caption or "") + "\n\n🔁 <b>MORE INFO REQUESTED</b>", reply_markup=_admin_next_kb())
             except Exception:
-                try:
-                    await cq.message.edit_text("🔁 More info requested.", reply_markup=_admin_next_kb())
-                except Exception:
-                    pass
+                pass
             return
 
-    # Admin: list verified (legacy)
-    @app.on_callback_query(filters.regex(r"^roni_admin:age_list$"))
+    # Confirm reset specific user
+    @app.on_callback_query(filters.regex(r"^age_admin:reset_confirm:(\d+)$"))
+    async def admin_reset_confirm(_, cq: CallbackQuery):
+        if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer("Only Roni 💜", show_alert=True)
+            return
+        uid = int((cq.data or "").split(":")[-1])
+
+        _remove_verified(uid)
+        _clear_pending(uid)
+
+        try:
+            await app.send_message(
+                uid,
+                "🧹 Your age verification was reset.\n\nPlease tap ✅ Age Verify and submit a new photo (nose + pinky).",
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+
+        await cq.answer("Reset ✅", show_alert=True)
+        try:
+            await cq.message.edit_text(f"✅ Reset completed for <code>{uid}</code>.", reply_markup=_admin_next_kb(), disable_web_page_preview=True)
+        except Exception:
+            pass
+
+    # Admin: reset all entry
+    @app.on_callback_query(filters.regex(r"^age_admin:reset_all$"))
+    async def admin_reset_all(_, cq: CallbackQuery):
+        if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer("Only Roni 💜", show_alert=True)
+            return
+        await cq.answer()
+        await cq.message.edit_text(
+            "⚠️ <b>Reset ALL age verifications?</b>\n\n"
+            "This will remove verified status for everyone and clear all pending requests.\n"
+            "Everyone will have to re-submit a verification photo.\n\n"
+            "Are you sure?",
+            reply_markup=_admin_reset_all_kb(),
+            disable_web_page_preview=True,
+        )
+
+    @app.on_callback_query(filters.regex(r"^age_admin:reset_all_confirm$"))
+    async def admin_reset_all_confirm(_, cq: CallbackQuery):
+        if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer("Only Roni 💜", show_alert=True)
+            return
+
+        # Reset indexes
+        verified_ids = _get_verified_index()
+        pending_ids = _get_pending_index()
+
+        # Clear AGE_OK flags for verified ids only (best we can do with MenuStore)
+        for uid in verified_ids:
+            try:
+                store.set_menu(_age_ok_key(uid), "")
+            except Exception:
+                pass
+
+        _set_verified_index([])
+        _set_pending_index([])
+
+        # Clear pending payloads
+        for uid in pending_ids:
+            try:
+                store.set_menu(_pending_key(uid), "")
+                store.set_menu(_step_key(uid), "")
+            except Exception:
+                pass
+
+        await cq.answer("Reset ALL ✅", show_alert=True)
+        await cq.message.edit_text(
+            "✅ <b>All age verifications were reset.</b>\n\n"
+            "Everyone will need to re-submit their verification photo.",
+            reply_markup=_admin_next_kb(),
+            disable_web_page_preview=True,
+        )
+
+
+    # Admin: verified list (paged) + reset buttons
+    @app.on_callback_query(filters.regex(r"^roni_admin:age_list(?::(\d+))?$"))
     async def admin_verified_list(_, cq: CallbackQuery):
         if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
             await cq.answer("Only Roni 💜", show_alert=True)
             return
 
-        ids = _get_verified_index()
-        if not ids:
-            text = "✅ <b>Age-Verified Users</b>\n\n• none yet"
-        else:
-            lines = ["✅ <b>Age-Verified Users</b>\n"]
-            for uid in ids[-80:]:
-                lines.append(f"• <code>{uid}</code>")
-            text = "\n".join(lines)
+        parts = (cq.data or "").split(":")
+        page = 0
+        if len(parts) == 3:
+            try:
+                page = max(0, int(parts[2]))
+            except Exception:
+                page = 0
 
-        await cq.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="roni_admin:open")]]),
-            disable_web_page_preview=True,
-        )
+        ids = _get_verified_index()
+        total = len(ids)
+        page_size = 20
+        max_page = max(0, (total - 1) // page_size) if total else 0
+        if page > max_page:
+            page = max_page
+
+        if total == 0:
+            text = "✅ <b>Age-Verified Users</b>\n\n• none yet"
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="roni_admin:open")]])
+            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+            await cq.answer()
+            return
+
+        start = page * page_size
+        end = min(total, start + page_size)
+        slice_ids = ids[start:end]
+
+        lines = [f"✅ <b>Age-Verified Users</b>  (Page {page+1}/{max_page+1})\n"]
+        for uid in slice_ids:
+            lines.append(f"• <code>{uid}</code>")
+        lines.append(f"\nTotal verified: <b>{total}</b>")
+
+        rows = []
+        for uid in slice_ids:
+            rows.append([InlineKeyboardButton(f"🧹 Reset {uid}", callback_data=f"age_admin:reset:{uid}")])
+
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("⬅ Prev", callback_data=f"roni_admin:age_list:{page-1}"))
+        if page < max_page:
+            nav_row.append(InlineKeyboardButton("Next ➡", callback_data=f"roni_admin:age_list:{page+1}"))
+        if nav_row:
+            rows.append(nav_row)
+
+        rows.append([InlineKeyboardButton("⬅ Back", callback_data="roni_admin:open")])
+
+        await cq.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
         await cq.answer()
 
-    # Admin: list pending
-    @app.on_callback_query(filters.regex(r"^roni_admin:age_pending$"))
+
+    # Admin: pending list (paged)
+    @app.on_callback_query(filters.regex(r"^roni_admin:age_pending(?::(\d+))?$"))
     async def admin_pending_list(_, cq: CallbackQuery):
         if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
             await cq.answer("Only Roni 💜", show_alert=True)
             return
 
-        idx = _get_pending_index()
-        if not idx:
-            text = "📭 <b>No pending age-verification requests.</b>"
-        else:
-            lines = ["🧾 <b>Pending Age-Verification Requests</b>\n"]
-            for uid in idx[-80:]:
-                p = _jget(_pending_key(uid), {})
-                uname = p.get("username") or ""
-                name = p.get("name") or "User"
-                lines.append(f"• {name} {f'(@{uname})' if uname else ''} — <code>{uid}</code>")
-            text = "\n".join(lines)
+        parts = (cq.data or "").split(":")
+        page = 0
+        if len(parts) == 3:
+            try:
+                page = max(0, int(parts[2]))
+            except Exception:
+                page = 0
 
-        await cq.message.edit_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(
+        idx = _get_pending_index()
+        total = len(idx)
+        page_size = 20
+        max_page = max(0, (total - 1) // page_size) if total else 0
+        if page > max_page:
+            page = max_page
+
+        if total == 0:
+            text = "📭 <b>No pending age-verification requests.</b>"
+            kb = InlineKeyboardMarkup(
                 [
                     [InlineKeyboardButton("📥 Next pending", callback_data="age_admin:next")],
                     [InlineKeyboardButton("⬅ Back", callback_data="roni_admin:open")],
                 ]
-            ),
+            )
+            await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+            await cq.answer()
+            return
+
+        start = page * page_size
+        end = min(total, start + page_size)
+        slice_ids = idx[start:end]
+
+        lines = [f"🧾 <b>Pending Age-Verification Requests</b>  (Page {page+1}/{max_page+1})\n"]
+        rows = [[InlineKeyboardButton("📥 Next pending", callback_data="age_admin:next")]]
+
+        for uid in slice_ids:
+            p = _jget(_pending_key(uid), {})
+            uname = p.get("username") or ""
+            name = p.get("name") or "User"
+            lines.append(f"• {name} {f'(@{uname})' if uname else ''} — <code>{uid}</code>")
+            rows.append([InlineKeyboardButton(f"🧹 Reset {uid}", callback_data=f"age_admin:reset:{uid}")])
+
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("⬅ Prev", callback_data=f"roni_admin:age_pending:{page-1}"))
+        if page < max_page:
+            nav_row.append(InlineKeyboardButton("Next ➡", callback_data=f"roni_admin:age_pending:{page+1}"))
+        if nav_row:
+            rows.append(nav_row)
+
+        rows.append([InlineKeyboardButton("⬅ Back", callback_data="roni_admin:open")])
+
+        await cq.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
+        await cq.answer()
+
+    # Admin DM commands    # Admin DM commands
+    @app.on_message(filters.private & filters.user(RONI_OWNER_ID) & filters.command(["age_reset", "age_reset_user"]))
+    async def cmd_age_reset(_, m: Message):
+        parts = (m.text or "").split()
+        if len(parts) < 2:
+            await m.reply_text("Usage: /age_reset <user_id>")
+            return
+        try:
+            uid = int(parts[1])
+        except ValueError:
+            await m.reply_text("That doesn't look like a user_id.")
+            return
+        _remove_verified(uid)
+        _clear_pending(uid)
+        await m.reply_text(f"✅ Reset completed for <code>{uid}</code>.", disable_web_page_preview=True)
+
+    @app.on_message(filters.private & filters.user(RONI_OWNER_ID) & filters.command(["age_reset_all"]))
+    async def cmd_age_reset_all(_, m: Message):
+        await m.reply_text(
+            "⚠️ This will reset ALL age verifications.\n\n"
+            "Tap to confirm:",
+            reply_markup=_admin_reset_all_kb(),
             disable_web_page_preview=True,
         )
-        await cq.answer()
