@@ -21,12 +21,12 @@ OPEN_ACCESS_KEY = "RoniOpenAccessText"
 TEASER_TEXT_KEY = "RoniTeaserChannelsText"
 SANCTUARY_TEXT_KEY = "RoniSanctuaryText"
 
-# legacy list key (from your working zip)
-AGE_INDEX_KEY = "RoniAgeIndex"
+AGE_OK_PREFIX = "AGE_OK:"
+AGE_INDEX_KEY = "RoniAgeIndex"  # legacy list
 
 
 def _age_key(user_id: int) -> str:
-    return f"AGE_OK:{user_id}"
+    return f"{AGE_OK_PREFIX}{user_id}"
 
 
 def is_age_verified(user_id: int | None) -> bool:
@@ -35,14 +35,13 @@ def is_age_verified(user_id: int | None) -> bool:
     if user_id == RONI_OWNER_ID:
         return True
 
-    # ✅ source of truth: per-user key exists (works for "1" or JSON string)
     try:
         if store.get_menu(_age_key(user_id)):
             return True
     except Exception:
         pass
 
-    # ✅ legacy fallback: RoniAgeIndex contains user_id
+    # legacy fallback index
     try:
         raw = store.get_menu(AGE_INDEX_KEY) or "[]"
         ids = json.loads(raw)
@@ -95,6 +94,7 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🔥 Edit Teaser/Promo Text", callback_data="roni_admin:edit_teaser")],
             [InlineKeyboardButton("😈 Edit Succubus Sanctuary", callback_data="roni_admin:edit_sanctuary")],
             [InlineKeyboardButton("🗓 NSFW availability (Roni)", callback_data="nsfw_avail:open")],
+            [InlineKeyboardButton("🧾 Pending age verifications", callback_data="roni_admin:age_pending")],
             [InlineKeyboardButton("✅ Age-Verified List", callback_data="roni_admin:age_list")],
             [InlineKeyboardButton("⬅ Back to Assistant", callback_data="roni_portal:home")],
         ]
@@ -111,7 +111,7 @@ def _assistant_welcome_text(user_id: int | None) -> str:
         )
     return (
         "Welcome to Roni’s personal assistant. 💗\n\n"
-        "If you want access to Roni’s NSFW links and booking options, tap ✅ <b>Age Verify</b> to confirm you’re 18+. ❤️‍🔥\n\n"
+        "To unlock NSFW booking + teaser links, tap ✅ <b>Age Verify</b> and submit the required photo.\n\n"
         "🚫 <b>NO meetups</b> — online/texting only."
     )
 
@@ -200,7 +200,7 @@ def register(app: Client) -> None:
     async def roni_teaser_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id if cq.from_user else None
         if user_id != RONI_OWNER_ID and not (user_id and is_age_verified(user_id)):
-            await cq.answer("You’ll need to complete age verification first 💕", show_alert=True)
+            await cq.answer("You’ll need to complete photo age verification first 💕", show_alert=True)
             return
         teaser_text = store.get_menu(TEASER_TEXT_KEY) or (os.getenv("RONI_TEASER_CHANNELS_TEXT") or "Coming soon 💕")
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="roni_portal:home")]])
@@ -221,3 +221,4 @@ def register(app: Client) -> None:
             disable_web_page_preview=True,
         )
         await cq.answer()
+
