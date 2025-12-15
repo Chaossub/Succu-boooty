@@ -33,7 +33,7 @@ def is_age_verified(user_id: int | None) -> bool:
     if not user_id:
         return False
     if user_id == RONI_OWNER_ID:
-        return True  # Owner always has access to teaser/booking; verification is for users only.
+        return True
 
     try:
         if store.get_menu(_age_key(user_id)):
@@ -41,6 +41,7 @@ def is_age_verified(user_id: int | None) -> bool:
     except Exception:
         pass
 
+    # legacy fallback
     try:
         raw = store.get_menu(AGE_INDEX_KEY) or "[]"
         ids = json.loads(raw)
@@ -58,7 +59,7 @@ def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("📖 Roni’s Menu", callback_data="roni_portal:menu")])
     rows.append([InlineKeyboardButton("💌 Book Roni", url=f"https://t.me/{RONI_USERNAME}")])
 
-    # Booking is age-locked for normal users, always visible to owner
+    # Only show NSFW booking button if verified (or owner)
     if user_id and is_age_verified(user_id):
         rows.append([InlineKeyboardButton("💞 Book a private NSFW texting session", callback_data="nsfw_book:open")])
 
@@ -70,11 +71,11 @@ def _roni_main_keyboard(user_id: int | None = None) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("🌸 Open Access", callback_data="roni_portal:open_access")])
     rows.append([InlineKeyboardButton("😈 Succubus Sanctuary", callback_data="roni_portal:sanctuary")])
 
-    # Teaser is age-locked for users, but always available to owner
+    # 🔒 IMPORTANT: Do NOT show teaser/promo button at all unless verified (or owner)
     if user_id and is_age_verified(user_id):
         rows.append([InlineKeyboardButton("🔥 Teaser & Promo Channels", callback_data="roni_portal:teaser")])
 
-    # Age verify (single entry point; no bypass/test)
+    # Age verify entry point (visible to everyone)
     rows.append([InlineKeyboardButton("✅ Age Verify", callback_data="roni_portal:age")])
 
     rows.append([InlineKeyboardButton("😈 Models & Creators — Tap Here", url=f"https://t.me/{RONI_USERNAME}")])
@@ -116,7 +117,7 @@ def _assistant_welcome_text(user_id: int | None) -> str:
 
 
 def register(app: Client) -> None:
-    log.info("✅ handlers.roni_portal registered")
+    log.info("✅ handlers.roni_portal registered (teaser hidden unless verified)")
 
     @app.on_message(filters.command("roni_portal"))
     async def roni_portal_command(_, m: Message):
@@ -163,7 +164,7 @@ def register(app: Client) -> None:
     async def roni_tip_coming_cb(_, cq: CallbackQuery):
         await cq.answer("Roni’s Stripe tip link is coming soon 💕", show_alert=True)
 
-    @app.on_callback_query(filters.regex(r"^roni_portal:menu"))
+    @app.on_callback_query(filters.regex(r"^roni_portal:menu$"))
     async def roni_menu_cb(_, cq: CallbackQuery):
         menu_text = store.get_menu(RONI_MENU_KEY)
         text = f"📖 <b>Roni’s Menu</b>\n\n{menu_text}" if menu_text else (
@@ -199,6 +200,7 @@ def register(app: Client) -> None:
     async def roni_teaser_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id if cq.from_user else None
         if user_id != RONI_OWNER_ID and not (user_id and is_age_verified(user_id)):
+            # Even if someone somehow hits the callback, block it.
             await cq.answer("You’ll need to complete photo age verification first 💕", show_alert=True)
             return
         teaser_text = store.get_menu(TEASER_TEXT_KEY) or (os.getenv("RONI_TEASER_CHANNELS_TEXT") or "Coming soon 💕")
