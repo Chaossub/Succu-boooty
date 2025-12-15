@@ -661,6 +661,55 @@ def register(app: Client) -> None:
         end = min(total, start + page_size)
         slice_ids = ids[start:end]
 
+        # Resolve names/usernames best-effort
+        name_map = {}
+        try:
+            users = await app.get_users(slice_ids)
+            if not isinstance(users, list):
+                users = [users]
+            for u in users:
+                try:
+                    uid = int(u.id)
+                    uname = (u.username or "")
+                    fname = (u.first_name or "User")
+                    name_map[uid] = (fname, uname)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        lines = [f"✅ <b>Age-Verified Users</b>  (Page {page+1}/{max_page+1})\n"]
+        rows = []
+
+        for uid in slice_ids:
+            fname, uname = name_map.get(uid, ("User", ""))
+            label = f"{fname} " + (f"(@{uname})" if uname else "")
+            lines.append(f"• {label} — <code>{uid}</code>")
+
+            btn_label = f"🧹 Reset {fname[:18]} ({uid})"
+            rows.append([InlineKeyboardButton(btn_label, callback_data=f"age_admin:reset:{uid}")])
+
+        lines.append(f"\nTotal verified: <b>{total}</b>")
+
+        nav_row = []
+        if page > 0:
+            nav_row.append(InlineKeyboardButton("⬅ Prev", callback_data=f"roni_admin:age_list:{page-1}"))
+        if page < max_page:
+            nav_row.append(InlineKeyboardButton("Next ➡", callback_data=f"roni_admin:age_list:{page+1}"))
+        if nav_row:
+            rows.append(nav_row)
+
+        rows.append([InlineKeyboardButton("⬅ Back", callback_data="roni_admin:open")])
+
+        await cq.message.edit_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows), disable_web_page_preview=True)
+        await cq.answer()
+
+            return
+
+        start = page * page_size
+        end = min(total, start + page_size)
+        slice_ids = ids[start:end]
+
         lines = [f"✅ <b>Age-Verified Users</b>  (Page {page+1}/{max_page+1})\n"]
         for uid in slice_ids:
             lines.append(f"• <code>{uid}</code>")
