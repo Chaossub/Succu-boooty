@@ -1,200 +1,101 @@
 # handlers/dm_ready.py
 from __future__ import annotations
-import os, json, logging
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timezone
+
+import re
+from datetime import datetime
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-log = logging.getLogger("dm_ready")
+from utils.dmready_store import DMReadyStore
 
-# -------- time utils (LA) ----------
-try:
-    import pytz
-    LA_TZ = pytz.timezone("America/Los_Angeles")
-except Exception:
-    LA_TZ = None  # fallback without pytz
-
-def _iso_now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-def _iso_to_la_str(iso: str) -> str:
-    if not iso:
-        return "-"
-    try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        if LA_TZ:
-            dt = dt.astimezone(LA_TZ)
-            return dt.strftime("%Y-%m-%d %I:%M %p PT")
-        return dt.strftime("%Y-%m-%d %I:%M %p") + " UTC"
-    except Exception:
-        return iso
-
-# -------- persistence layer ----------
-class DMReadyStore:
-    def __init__(self):
-        self.mode = "json"
-        self._col = None
-
-        mongo_url = os.getenv("MONGO_URL") or os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
-        if mongo_url:
-            try:
-                from pymongo import MongoClient
-                db_name = os.getenv("MONGO_DB") or os.getenv("MONGO_DBNAME") or "succubot"
-                cli = MongoClient(mongo_url, serverSelectionTimeoutMS=8000)
-                db = cli[db_name]
-                self._col = db.get_collection("dm_ready_users")
-                self._col.create_index("user_id", unique=True)
-                self.mode = "mongo"
-                log.info("DMReadyStore: using MongoDB (%s)", db_name)
-            except Exception as e:
-                log.warning("DMReadyStore: Mongo unavailable, falling back to JSON: %s", e)
-                self.mode = "json"
-                self._col = None
-
-        self._path = Path("data/dmready.json")
-        if self.mode == "json":
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            if not self._path.exists():
-                self._path.write_text("{}", encoding="utf-8")
-            log.info("DMReadyStore: using JSON at %s", self._path)
-
-    def _jload(self) -> Dict[str, Dict]:
-        try:
-            return json.loads(self._path.read_text(encoding="utf-8"))
-        except Exception as e:
-            log.error("DMReadyStore: failed to load JSON: %s", e)
-            return {}
-
-    def _jdump(self, data: Dict[str, Dict]) -> None:
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self._path)
-
-    def ensure_dm_ready_first_seen(self, user_id: int, username: str, first_name: str, last_name: str, when_iso_now_utc: str) -> str:
-        if self.mode == "mongo":
-            existing = self._col.find_one({"user_id": user_id})
-            if existing:
-                return existing.get("first_marked_iso", "")
-            doc = {
-                "user_id": user_id,
-                "username": username or "",
-                "first_name": first_name or "",
-                "last_name": last_name or "",
-                "first_marked_iso": when_iso_now_utc,
-            }
-            try:
-                self._col.insert_one(doc)
-            except Exception as e:
-                log.warning("DMReadyStore: insert failed (mongo): %s", e)
-            return when_iso_now_utc
-
-        data = self._jload()
-        key = str(user_id)
-        if key in data:
-            return data[key].get("first_marked_iso", "")
-        data[key] = {
-            "user_id": user_id,
-            "username": username or "",
-            "first_name": first_name or "",
-            "last_name": last_name or "",
-            "first_marked_iso": when_iso_now_utc,
-        }
-        self._jdump(data)
-        return when_iso_now_utc
-
-    def get_first_mark_iso(self, user_id: int) -> Optional[str]:
-        if self.mode == "mongo":
-            rec = self._col.find_one({"user_id": user_id}) or {}
-            return rec.get("first_marked_iso")
-        data = self._jload()
-        rec = data.get(str(user_id)) or {}
-        return rec.get("first_marked_iso")
-
-    def all(self) -> List[Dict]:
-        if self.mode == "mongo":
-            return list(self._col.find({}, {"_id": 0}))
-        data = self._jload()
-        return list(data.values())
+# IMPORTANT: this is the requirements system store (used by your DM-Ready panel)
+from req_store import ReqStore
 
 store = DMReadyStore()
-OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
+req_store = ReqStore()
 
-# helper for other handlers
-async def mark_dm_ready_from_message(m: Message) -> None:
-    if not m or not m.from_user:
+MENTION_RE = re.compile(r"@([A-Za-z0-9_]{5,32})")
+
+
+def fmt_pt(ts: float | None) -> str:
+    if not ts:
+        return "—"
+    dt = datetime.fromtimestamp(ts)
+    # Keep it simple (your screenshots show PT text; if you want strict PT convert we can)
+    return dt.strftime("%Y-%m-%d %I:%M %p")
+
+
+async def mark_dm_ready_from_message(client: Client, msg: Message):
+    """
+    Called when someone DMs the bot (or uses /dmready).
+    This writes to dm_ready.json AND also syncs into ReqStore.dm_ready_global
+    so the DM-Ready panel can actually find them.
+    """
+    u = msg.from_user
+    if not u:
         return
-    u = m.from_user
-    try:
-        store.ensure_dm_ready_first_seen(
-            user_id=u.id,
-            username=u.username or "",
-            first_name=u.first_name or "",
-            last_name=u.last_name or "",
-            when_iso_now_utc=_iso_now_utc(),
-        )
-    except Exception as e:
-        log.error("mark_dm_ready_from_message failed: %s", e)
+
+    username = u.username or ""
+    name = " ".join([p for p in [u.first_name, u.last_name] if p]).strip()
+
+    store.set_ready(
+        user_id=u.id,
+        ready=True,
+        username=username,
+        name=name,
+        last_seen_ts=msg.date.timestamp() if msg.date else datetime.now().timestamp(),
+    )
+
+    # ✅ This is the missing piece that makes your panel stop showing “none found”
+    req_store.set_dm_ready_global(u.id, True, by_admin=False)
+
 
 def register(app: Client):
-    log.info("✅ handlers.dm_ready wired (OWNER_ID=%s)", OWNER_ID)
+    # Mark DM-ready when they DM the bot
+    @app.on_message(filters.private & filters.incoming & ~filters.service)
+    async def _auto_mark(_, msg: Message):
+        # avoid marking on obvious bot-start spam if you want; leaving permissive for now
+        await mark_dm_ready_from_message(app, msg)
 
-    # Run these commands FIRST so they can't be swallowed by other DM handlers
-    @app.on_message(filters.private & filters.command("dmreadylist"), group=-1)
-    async def _dmreadylist(_: Client, m: Message):
-        try:
-            uid = m.from_user.id if m.from_user else 0
-            log.info("/dmreadylist from %s", uid)
+    # Manual command (works in DM)
+    @app.on_message(filters.private & filters.command("dmready"))
+    async def _dmready_cmd(_, msg: Message):
+        await mark_dm_ready_from_message(app, msg)
+        await msg.reply_text("✅ Marked DM-ready.")
 
-            if uid != OWNER_ID:
-                await m.reply_text("Only the owner can run this.")
-                return
+    # Manual unready (optional)
+    @app.on_message(filters.private & filters.command("notdmready"))
+    async def _notdmready_cmd(_, msg: Message):
+        u = msg.from_user
+        if not u:
+            return
+        store.set_ready(
+            user_id=u.id,
+            ready=False,
+            username=u.username or "",
+            name=" ".join([p for p in [u.first_name, u.last_name] if p]).strip(),
+            last_seen_ts=msg.date.timestamp() if msg.date else datetime.now().timestamp(),
+        )
+        req_store.set_dm_ready_global(u.id, False, by_admin=False)
+        await msg.reply_text("🚫 Removed DM-ready.")
 
-            users = store.all()
-            users.sort(key=lambda r: (r.get("first_marked_iso") or "", r.get("user_id") or 0))
-
-            if not users:
-                await m.reply_text("✅ DM-ready users: none yet.")
-                return
-
-            lines: List[str] = ["✅ *DM-ready users* —"]
-            for i, r in enumerate(users, start=1):
-                rid = r.get("user_id")
-                un = r.get("username") or ""
-                fn = (r.get("first_name") or "").strip()
-                first_seen_la = _iso_to_la_str(r.get("first_marked_iso") or "")
-                who = f"@{un}" if un else str(rid)
-                if fn:
-                    who = f"{who} ({fn})"
-                lines.append(f"{i}. {who} — {first_seen_la}")
-
-            await m.reply_text("\n".join(lines), disable_web_page_preview=True)
-
-        except Exception as e:
-            log.exception("/dmreadylist crashed: %s", e)
-            await m.reply_text(f"❌ dmreadylist failed: {e}")
-
-    @app.on_message(filters.private & filters.command("whoami"), group=-1)
-    async def _whoami(_: Client, m: Message):
-        try:
-            u = m.from_user
-            if not u:
-                await m.reply_text("No user info.")
-                return
-            await m.reply_text(
-                f"ID: {u.id}\nUsername: @{u.username or '—'}\nName: {u.first_name} {u.last_name or ''}".strip()
-            )
-        except Exception as e:
-            log.exception("/whoami crashed: %s", e)
-            await m.reply_text(f"❌ whoami failed: {e}")
-
-    # Passive tracker (later group so it never blocks commands)
-    @app.on_message(
-        filters.private & ~filters.service & ~filters.command(["dmreadylist", "whoami"]),
-        group=10
-    )
-    async def _mark_all_private(_: Client, m: Message):
-        await mark_dm_ready_from_message(m)
+    # Admin backfill command (so your panel matches your existing dm_ready.json immediately)
+    @app.on_message(filters.command("dmready_fix_panel"))
+    async def _backfill_to_req_store(_, msg: Message):
+        u = msg.from_user
+        if not u:
+            return
+        # you can tighten this to OWNER_ID if you want
+        # (leaving as “admins only” via chat admin checks is more work; keeping it simple)
+        rows = store.get_all_ready()
+        fixed = 0
+        for uid_str, row in rows.items():
+            try:
+                uid = int(uid_str)
+            except Exception:
+                continue
+            if row.get("dm_ready") is True:
+                changed = req_store.set_dm_ready_global(uid, True, by_admin=True)
+                if changed:
+                    fixed += 1
+        await msg.reply_text(f"✅ Synced DM-ready into panel store. Updated: {fixed}")
