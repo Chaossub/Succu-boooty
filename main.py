@@ -1,9 +1,7 @@
 # main.py
 import os
 import logging
-from typing import Set
-import importlib
-import traceback
+from typing import Set, Optional
 
 from pyrogram import Client, filters
 from pyrogram.enums import ParseMode
@@ -25,7 +23,7 @@ FIND_MODELS_TEXT = os.getenv("FIND_MODELS_TEXT", "Nothing here yet 💕")
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
 
-def _parse_id_list(val: str | None) -> Set[int]:
+def _parse_id_list(val: Optional[str]) -> Set[int]:
     if not val:
         return set()
     out: Set[int] = set()
@@ -52,24 +50,27 @@ app = Client(
 )
 
 
-def _try_register(module_path: str, name: str | None = None):
+def _try_register(module_path: str, *, critical: bool = False):
     """
-    Import handlers.<module_path> and call register(app).
-    IMPORTANT: If it fails, we log a full traceback so nothing "dies silently".
+    Imports handlers.<module_path> and calls register(app).
+    If critical=True, crash on failure so we don't "silently" lose buttons.
     """
     mod_name = f"handlers.{module_path}"
-    label = name or module_path
     try:
-        mod = importlib.import_module(mod_name)
-        reg = getattr(mod, "register", None)
-        if callable(reg):
-            reg(app)
+        mod = __import__(mod_name, fromlist=["register"])
+        if hasattr(mod, "register"):
+            mod.register(app)
             log.info("✅ Registered %s", mod_name)
         else:
-            log.warning("⚠️ %s has no register(app)", mod_name)
-    except Exception as e:
-        log.error("❌ FAILED to import/register %s (%s): %s", mod_name, label, e)
-        log.error("TRACE:\n%s", traceback.format_exc())
+            msg = f"{mod_name} has no register()"
+            if critical:
+                raise RuntimeError(msg)
+            log.warning(msg)
+    except Exception:
+        # FULL traceback so you can see exactly what broke
+        log.exception("❌ FAILED registering %s", mod_name)
+        if critical:
+            raise
 
 
 def main():
@@ -82,39 +83,35 @@ def main():
     )
 
     # Warm-up / optional
-    _try_register("hi")  # /hi (warm-up)
+    _try_register("hi")
 
-    # Core panels & menus (this contains /start; DON'T add another /start here)
-    _try_register("panels")  # Menus picker + home
+    # Core panels & menus (contains /start; DON'T add another /start elsewhere)
+    _try_register("panels", critical=True)
 
     # Contact Admins & DM helpers
-    _try_register("contact_admins")  # contact_admins:open + anon flow
+    _try_register("contact_admins")
     _try_register("dm_admin")
-    _try_register("dm_ready")
+    _try_register("dm_ready", critical=True)          # DM-ready tracking + panel compatibility fix
     _try_register("dm_ready_admin")
+    _try_register("dmnow", critical=True)             # /dmnow = sanctuary mode (KEEP WORKING)
+    _try_register("portal_cmd", critical=True)        # /portal = Roni assistant DM button (DO NOT CONFLICT)
 
-    # IMPORTANT: keep these separate so /portal and /dmnow don’t collide.
-    _try_register("dmnow")       # /dmnow → sanctuary mode DM button (ONLY)
-    _try_register("dm_portal")   # legacy shim (keep, but dmnow is now its own handler)
-    _try_register("portal_cmd")  # /portal → DM button (assistant)
-
-    # Summon commands (/summonall, /summon)
+    # Summon commands
     _try_register("summon")
 
-    # ⭐ Roni personal assistant portal
-    _try_register("roni_portal")      # core portal UI + text blocks
-    _try_register("roni_portal_age")  # age verification + AV admin
+    # ⭐ Roni assistant
+    _try_register("roni_portal", critical=True)
+    _try_register("roni_portal_age", critical=True)
 
-    # ✅ NSFW availability + booking
-    # These names MUST match your handler filenames:
-    _try_register("nsfw_availability")         # nsfw_av:open + block/unblock
-    _try_register("nsfw_text_session_booking") # nsfw_book:open booking flow
+    # ✅ NSFW booking + availability
+    _try_register("nsfw_text_session_availability", critical=True)
+    _try_register("nsfw_text_session_booking", critical=True)
 
     # Help panel
-    _try_register("help_panel")  # help:open + pages
+    _try_register("help_panel", critical=True)
 
     # Menus persistence/creation
-    _try_register("menu")  # (mongo or json)
+    _try_register("menu")
     _try_register("createmenu")
 
     # Moderation / warnings
@@ -125,32 +122,34 @@ def main():
     _try_register("schedulemsg")
 
     # Flyers
-    _try_register("flyer")  # /addflyer /flyer /listflyers /deleteflyer /textflyer
+    _try_register("flyer")
     _try_register("flyer_scheduler")
 
     # ⭐ Requirements panel
-    _try_register("requirements_panel")
+    _try_register("requirements_panel", critical=True)
 
-    # 🔻 Give both schedulers the running loop so they can post from their threads
+    # Give schedulers the running loop so they can post from threads
     try:
         from handlers import flyer_scheduler as _fs
         _fs.set_main_loop(app.loop)
         log.info("✅ Set main loop for flyer_scheduler")
-    except Exception as e:
-        log.warning("Could not set main loop for flyer_scheduler: %s", e)
+    except Exception:
+        log.exception("Could not set main loop for flyer_scheduler")
 
     try:
         from handlers import schedulemsg as _sm
         _sm.set_main_loop(app.loop)
         log.info("✅ Set main loop for schedulemsg")
-    except Exception as e:
-        log.warning("Could not set main loop for schedulemsg: %s", e)
+    except Exception:
+        log.exception("Could not set main loop for schedulemsg")
 
     # Safety: if panels didn’t provide the “models_elsewhere:open” page, handle it here.
     @app.on_callback_query(filters.regex("^models_elsewhere:open$"))
     async def _models_elsewhere_cb(_, cq: CallbackQuery):
         text = FIND_MODELS_TEXT or "Nothing here yet 💕"
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="panels:root")]])
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("⬅ Back", callback_data="panels:root")]]
+        )
         try:
             await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
         finally:
