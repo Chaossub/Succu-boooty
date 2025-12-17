@@ -91,7 +91,8 @@ def main():
     # Contact Admins & DM helpers
     _try_register("contact_admins")
     _try_register("dm_admin")
-    _try_register("dm_ready", critical=True)          # DM-ready tracking + panel compatibility fix
+    _try_register("dm_ready", critical=True)          # DM-ready tracking
+    _try_register("dmready_bridge", critical=True)    # ✅ bridge DM-ready -> requirements_members.dm_ready
     _try_register("dm_ready_admin")
     _try_register("dmnow", critical=True)             # /dmnow = sanctuary mode (KEEP WORKING)
     _try_register("portal_cmd", critical=True)        # /portal = Roni assistant DM button (DO NOT CONFLICT)
