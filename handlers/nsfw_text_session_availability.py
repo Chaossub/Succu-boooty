@@ -45,15 +45,18 @@ def _ensure_day(d: str) -> dict:
 def _save_day(obj: dict) -> None:
     store.set_menu(_key(obj["date"]), _jdumps(obj))
 
+def _week_start_monday(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
 def _week_kb(week_start: date) -> InlineKeyboardMarkup:
+    days=[week_start+timedelta(days=i) for i in range(7)]
     rows=[]
-    for i in range(0, 7, 2):
-        d1 = week_start + timedelta(days=i)
-        d2 = week_start + timedelta(days=i+1)
+    for i in range(0, 6, 2):
         rows.append([
-            InlineKeyboardButton(d1.strftime("%a %b %d"), callback_data=f"nsfw_av:day:{d1:%Y-%m-%d}"),
-            InlineKeyboardButton(d2.strftime("%a %b %d"), callback_data=f"nsfw_av:day:{d2:%Y-%m-%d}"),
+            InlineKeyboardButton(days[i].strftime("%a %b %d"), callback_data=f"nsfw_av:day:{days[i]:%Y-%m-%d}"),
+            InlineKeyboardButton(days[i+1].strftime("%a %b %d"), callback_data=f"nsfw_av:day:{days[i+1]:%Y-%m-%d}"),
         ])
+    rows.append([InlineKeyboardButton(days[6].strftime("%a %b %d"), callback_data=f"nsfw_av:day:{days[6]:%Y-%m-%d}")])
     rows.append([
         InlineKeyboardButton("⬅ Prev week", callback_data=f"nsfw_av:week:{(week_start-timedelta(days=7)):%Y-%m-%d}"),
         InlineKeyboardButton("Next week ➡", callback_data=f"nsfw_av:week:{(week_start+timedelta(days=7)):%Y-%m-%d}"),
@@ -62,47 +65,53 @@ def _week_kb(week_start: date) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 def register(app: Client):
-    log.info("✅ nsfw_availability handler registered")
+    log.info("✅ nsfw_availability registered (with legacy callback aliases)")
+
+    async def _open_week(cq: CallbackQuery, start_date: date):
+        week_start=_week_start_monday(start_date)
+        await cq.message.edit_text(
+            "🗓️ <b>NSFW Availability</b> (LA time)\n\nPick a day (Mon–Sun):\n"
+            f"Week of <b>{week_start.strftime('%B %d')}</b> → <b>{(week_start+timedelta(days=6)).strftime('%B %d')}</b>",
+            reply_markup=_week_kb(week_start),
+            disable_web_page_preview=True,
+        )
+        await cq.answer()
 
     @app.on_callback_query(filters.regex(r"^nsfw_av:open$"))
     async def av_open(_, cq: CallbackQuery):
         if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
-            await cq.answer("Only Roni 💜", show_alert=True)
-            return
-        ws = _today_la()
-        await cq.message.edit_text(
-            "🗓️ <b>NSFW Availability</b> (LA time)\n\nPick a day:",
-            reply_markup=_week_kb(ws),
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
+            await cq.answer("Only Roni 💜", show_alert=True); return
+        await _open_week(cq, _today_la())
+
+    # ✅ legacy callback aliases so your existing button still works
+    @app.on_callback_query(filters.regex(r"^(nsfw_availability:open|nsfw_text_session_availability:open|nsfw_text_session_availability_open|nsfw_avail:open)$"))
+    async def av_open_alias(_, cq: CallbackQuery):
+        if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
+            await cq.answer("Only Roni 💜", show_alert=True); return
+        await _open_week(cq, _today_la())
 
     @app.on_callback_query(filters.regex(r"^nsfw_av:week:(\d{4}-\d{2}-\d{2})$"))
     async def av_week(_, cq: CallbackQuery):
         if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
-            await cq.answer("Only Roni 💜", show_alert=True)
-            return
-        d = (cq.data or "").split(":")[-1]
-        ws = datetime.strptime(d, "%Y-%m-%d").date()
-        await cq.message.edit_text(
-            "🗓️ <b>NSFW Availability</b> (LA time)\n\nPick a day:",
-            reply_markup=_week_kb(ws),
-            disable_web_page_preview=True,
-        )
-        await cq.answer()
+            await cq.answer("Only Roni 💜", show_alert=True); return
+        d=(cq.data or "").split(":")[-1]
+        await _open_week(cq, datetime.strptime(d, "%Y-%m-%d").date())
 
     @app.on_callback_query(filters.regex(r"^nsfw_av:day:(\d{4}-\d{2}-\d{2})$"))
     async def av_day(_, cq: CallbackQuery):
         if not cq.from_user or cq.from_user.id != RONI_OWNER_ID:
-            await cq.answer("Only Roni 💜", show_alert=True)
-            return
-        d = (cq.data or "").split(":")[-1]
-        obj = _ensure_day(d)
-        _save_day(obj)  # ensure stored
-        dt = datetime.strptime(d, "%Y-%m-%d").date()
+            await cq.answer("Only Roni 💜", show_alert=True); return
+        d=(cq.data or "").split(":")[-1]
+        obj=_ensure_day(d)
+        _save_day(obj)
+        dt=datetime.strptime(d, "%Y-%m-%d").date()
         await cq.message.edit_text(
-            f"🗓️ <b>{dt.strftime('%A, %B %d')}</b> (LA time)\n\n(Buttons for times are in your existing build; this confirms handler is firing.)",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back to days", callback_data=f"nsfw_av:week:{d}")]]),
+            f"🗓️ <b>{dt.strftime('%A, %B %d')}</b> (LA time)\n\n"
+            "This proves the button is wired. Next step is your block/unblock grid.",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅ Back to week", callback_data=f"nsfw_av:week:{d}")],
+                [InlineKeyboardButton("⬅ Back to Roni Admin", callback_data="roni_admin:open")],
+            ]),
             disable_web_page_preview=True,
         )
         await cq.answer()
