@@ -1,196 +1,170 @@
-# handlers/dmready_bridge.py
-"""
-Bridge DM-ready tracking into the Requirements Panel DB WITHOUT touching dm_ready.py.
-
-Fixes:
-- PyMongo Collection can't be used in bool checks (if not coll -> coll is None)
-- Passive mirror marks requirements_members.dm_ready = True for DMing users
-- /dmreadysync backfills existing DM-ready store into requirements_members
-"""
-
-from __future__ import annotations
-
-import os
+import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+import os
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-log = logging.getLogger("dmready_bridge")
+log = logging.getLogger(__name__)
 
-OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "0")) or 0)
+# Owner (defaults to your ID)
+OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))
 
-MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
+# Optional: legacy local JSON file (some setups used this)
+DMREADY_JSON = os.getenv("DMREADY_JSON", "dm_ready.json")
 
-_DB_NAME = "Succubot"
-_MEMBERS_COLL = "requirements_members"
+# Mongo (Requirements panel collection)
+MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or os.getenv("MONGOURL") or ""
+MONGO_DB = os.getenv("MONGO_DB") or os.getenv("MONGO_DBNAME") or "Succubot"
+MEMBERS_COLL_NAME = os.getenv("REQ_MEMBERS_COLL", "requirements_members")
+
+# How often to auto-sync (minutes)
+AUTO_SYNC_MINUTES = int(os.getenv("DMREADY_AUTO_SYNC_MINUTES", "5"))
 
 
-def _utc_now_dt():
-    return datetime.now(timezone.utc)
+def _safe_json_load(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
 
 
 def _get_members_coll():
     """
-    Returns pymongo collection or None.
-    If Mongo is temporarily unavailable (ReplicaSetNoPrimary), return None safely.
+    Returns a pymongo Collection or None.
+    Kept isolated so this file doesn't crash the bot if Mongo is down.
     """
     if not MONGO_URI:
         return None
     try:
-        from pymongo import MongoClient, ASCENDING
+        from pymongo import MongoClient  # local import (avoid hard dependency on startup failures)
 
-        mongo = MongoClient(MONGO_URI)
-        db = mongo[_DB_NAME]
-        coll = db[_MEMBERS_COLL]
-        # Safe/harmless if already exists; might fail if no primary -> handled by except
-        coll.create_index([("user_id", ASCENDING)], unique=True)
-        return coll
-    except Exception:
-        log.exception("dmready_bridge: failed to init Mongo / create index")
+        client = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=5000,
+            connectTimeoutMS=5000,
+            socketTimeoutMS=5000,
+        )
+        db = client[MONGO_DB]
+        return db[MEMBERS_COLL_NAME]
+    except Exception as e:
+        log.warning("dmready_bridge: Mongo not available for requirements_members (%s)", e)
         return None
 
 
-def _upsert_dm_ready(coll, user_id: int, username: str, first_name: str, last_name: str) -> bool:
-    if coll is None:
-        return False
+def _collect_dmready_user_ids() -> List[int]:
+    """
+    Collect DM-ready users from:
+    1) handlers.dm_ready store (Mongo-backed DMReadyStore) if available
+    2) req_store DM-ready (if used)
+    3) legacy dm_ready.json (if present)
+    """
+    uids: set[int] = set()
 
-    set_fields = {"dm_ready": True, "last_updated": _utc_now_dt()}
+    # 1) handlers.dm_ready store
+    try:
+        from handlers.dm_ready import store as dm_store  # type: ignore
 
-    if username:
-        set_fields["username"] = username
+        for item in dm_store.all():
+            uid = int(item.get("user_id") or 0)
+            if uid:
+                uids.add(uid)
+    except Exception:
+        pass
 
-    name = (first_name or "").strip()
-    if last_name:
-        name = (name + " " + last_name.strip()).strip()
-    if name:
-        set_fields["first_name"] = name
+    # 2) req_store (some older builds)
+    try:
+        from req_store import ReqStore  # type: ignore
 
-    coll.update_one(
-        {"user_id": user_id},
-        {"$set": set_fields, "$setOnInsert": {"user_id": user_id}},
-        upsert=True,
-    )
-    return True
+        rs = ReqStore()
+        uids.update(rs.get_dm_ready_global())
+    except Exception:
+        pass
+
+    # 3) legacy local JSON
+    legacy = _safe_json_load(DMREADY_JSON)
+    raw_uids = legacy.get("dm_ready_users") or legacy.get("users") or []
+    if isinstance(raw_uids, list):
+        for x in raw_uids:
+            try:
+                uids.add(int(x))
+            except Exception:
+                continue
+    elif isinstance(raw_uids, dict):
+        for k, v in raw_uids.items():
+            try:
+                if v:
+                    uids.add(int(k))
+            except Exception:
+                continue
+
+    return sorted(uids)
+
+
+async def _mirror_into_requirements_members(members_coll) -> int:
+    """
+    For every DM-ready user, set dm_ready=True in requirements_members.
+    Returns number of updated docs.
+    """
+    if members_coll is None:
+        return 0
+
+    dm_uids = _collect_dmready_user_ids()
+    if not dm_uids:
+        return 0
+
+    updated = 0
+    now = datetime.utcnow()
+    try:
+        for uid in dm_uids:
+            res = members_coll.update_one(
+                {"user_id": uid},
+                {"$set": {"dm_ready": True, "dm_ready_synced_at": now}},
+                upsert=False,
+            )
+            if getattr(res, "modified_count", 0) or getattr(res, "matched_count", 0):
+                updated += 1
+    except Exception as e:
+        log.warning("dmready_bridge: sync failed (%s)", e)
+
+    return updated
 
 
 def register(app: Client):
-    log.info("✅ handlers.dmready_bridge wired (OWNER_ID=%s)", OWNER_ID)
+    """
+    Call register(app) from main.py.
+    """
+    log.info("✅ handlers.dmready_bridge wired (OWNER_ID=%s, auto_sync=%sm)", OWNER_ID, AUTO_SYNC_MINUTES)
 
-    @app.on_message(filters.private & filters.command("dmreadysync"), group=-1)
-    async def _dmreadysync(_: Client, m: Message):
-        uid = m.from_user.id if m.from_user else 0
-        if uid != OWNER_ID:
-            await m.reply_text("Only the owner can run this.")
+    members_coll = _get_members_coll()
+
+    async def _sync_and_reply(msg: Optional[Message] = None):
+        n = await _mirror_into_requirements_members(members_coll)
+        if msg:
+            await msg.reply_text(f"✅ DM-ready sync complete.\nUpdated/confirmed: <b>{n}</b> users.", quote=True)
+
+    @app.on_message(filters.private & filters.command("dmreadysync"))
+    async def dmreadysync_cmd(_, msg: Message):
+        if not msg.from_user or msg.from_user.id != OWNER_ID:
             return
+        await _sync_and_reply(msg)
 
-        coll = _get_members_coll()
-        if coll is None:
-            await m.reply_text("❌ Mongo not available right now (MONGODB_URI/MONGO_URI failing).")
-            return
-
-        try:
-            from handlers.dm_ready import store as dm_store
-        except Exception as e:
-            log.exception("dmready_bridge: failed importing dm_ready.store")
-            await m.reply_text(f"❌ Could not import dm_ready store: {e}")
-            return
-
-        arg = ""
-        parts = (m.text or "").split(maxsplit=1)
-        if len(parts) > 1:
-            arg = parts[1].strip()
-
-        mode_clear = (arg.lower() == "clear")
-        gid_filter: Optional[int] = None
-        if arg and not mode_clear:
+    async def _auto_loop():
+        # Initial delay so other handlers + Mongo can come up
+        await asyncio.sleep(5)
+        while True:
             try:
-                gid_filter = int(arg)
-            except ValueError:
-                await m.reply_text("Usage:\n/dmreadysync\n/dmreadysync <group_id>\n/dmreadysync clear")
-                return
+                await _mirror_into_requirements_members(members_coll)
+            except Exception:
+                pass
+            await asyncio.sleep(max(60, AUTO_SYNC_MINUTES * 60))
 
-        dm_users = dm_store.all() or []
-        dm_ids = {int(r.get("user_id")) for r in dm_users if r.get("user_id") is not None}
-
-        marked = 0
-        skipped = 0
-
-        if gid_filter is None:
-            for r in dm_users:
-                rid = r.get("user_id")
-                if rid is None:
-                    continue
-                ok = _upsert_dm_ready(
-                    coll,
-                    int(rid),
-                    r.get("username") or "",
-                    r.get("first_name") or "",
-                    r.get("last_name") or "",
-                )
-                if ok:
-                    marked += 1
-                else:
-                    skipped += 1
-        else:
-            indexed = list(coll.find({"groups": gid_filter}, {"user_id": 1}))
-            indexed_ids = {int(d.get("user_id")) for d in indexed if d.get("user_id") is not None}
-            target_ids = dm_ids.intersection(indexed_ids)
-
-            for rid in target_ids:
-                rec = next((x for x in dm_users if int(x.get("user_id", -1)) == rid), {}) or {}
-                ok = _upsert_dm_ready(
-                    coll,
-                    rid,
-                    rec.get("username") or "",
-                    rec.get("first_name") or "",
-                    rec.get("last_name") or "",
-                )
-                if ok:
-                    marked += 1
-                else:
-                    skipped += 1
-
-        cleared = 0
-        if mode_clear:
-            res = coll.update_many(
-                {"dm_ready": True, "user_id": {"$nin": list(dm_ids)}},
-                {"$set": {"dm_ready": False, "last_updated": _utc_now_dt()}},
-            )
-            cleared = int(getattr(res, "modified_count", 0) or 0)
-
-        msg = (
-            "✅ DM-Ready sync complete.\n"
-            f"Marked: {marked}\n"
-            f"Skipped: {skipped}"
-        )
-        if gid_filter is not None:
-            msg += f"\nScoped to group: {gid_filter}"
-        if mode_clear:
-            msg += f"\nCleared (not DM-ready anymore): {cleared}"
-
-        await m.reply_text(msg)
-
-    @app.on_message(filters.private & ~filters.service, group=11)
-    async def _mirror_dm_ready(_: Client, m: Message):
-        try:
-            if not m.from_user:
-                return
-
-            coll = _get_members_coll()
-            if coll is None:
-                return
-
-            u = m.from_user
-            _upsert_dm_ready(
-                coll,
-                user_id=u.id,
-                username=u.username or "",
-                first_name=u.first_name or "",
-                last_name=u.last_name or "",
-            )
-        except Exception:
-            log.exception("dmready_bridge: passive mirror failed")
+    # Fire-and-forget periodic sync
+    try:
+        app.loop.create_task(_auto_loop())
+    except Exception:
+        asyncio.get_event_loop().create_task(_auto_loop())
