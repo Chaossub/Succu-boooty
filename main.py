@@ -134,6 +134,9 @@ def main():
     # Requirements panel
     _try_register("requirements_panel", critical=True)
 
+    # ✅ NEW: Manual kick sweep handler (separate file so requirements_panel stays smaller)
+    _try_register("kick_requirements")
+
     # Give schedulers the running loop (if those modules exist)
     try:
         from handlers import flyer_scheduler as _fs
