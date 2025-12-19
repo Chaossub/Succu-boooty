@@ -1,170 +1,89 @@
-import asyncio
-import json
-import logging
+# handlers/dmready_bridge.py
 import os
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+import logging
+from typing import Optional
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-log = logging.getLogger(__name__)
+log = logging.getLogger("dmready_bridge")
 
-# Owner (defaults to your ID)
-OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))
+OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
-# Optional: legacy local JSON file (some setups used this)
-DMREADY_JSON = os.getenv("DMREADY_JSON", "dm_ready.json")
-
-# Mongo (Requirements panel collection)
-MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI") or os.getenv("MONGOURL") or ""
-MONGO_DB = os.getenv("MONGO_DB") or os.getenv("MONGO_DBNAME") or "Succubot"
-MEMBERS_COLL_NAME = os.getenv("REQ_MEMBERS_COLL", "requirements_members")
-
-# How often to auto-sync (minutes)
-AUTO_SYNC_MINUTES = int(os.getenv("DMREADY_AUTO_SYNC_MINUTES", "5"))
-
-
-def _safe_json_load(path: str) -> Dict[str, Any]:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except Exception:
-        return {}
+# Requirements panel uses db="Succubot" and coll="requirements_members"
+MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 
 
 def _get_members_coll():
-    """
-    Returns a pymongo Collection or None.
-    Kept isolated so this file doesn't crash the bot if Mongo is down.
-    """
     if not MONGO_URI:
         return None
     try:
-        from pymongo import MongoClient  # local import (avoid hard dependency on startup failures)
-
-        client = MongoClient(
-            MONGO_URI,
-            serverSelectionTimeoutMS=5000,
-            connectTimeoutMS=5000,
-            socketTimeoutMS=5000,
-        )
-        db = client[MONGO_DB]
-        return db[MEMBERS_COLL_NAME]
+        from pymongo import MongoClient
+        mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)
+        db = mongo["Succubot"]
+        return db["requirements_members"]
     except Exception as e:
-        log.warning("dmready_bridge: Mongo not available for requirements_members (%s)", e)
+        log.warning("dmready_bridge: could not connect to mongo for requirements_members: %s", e)
         return None
 
 
-def _collect_dmready_user_ids() -> List[int]:
+def _upsert_dm_ready_flag(user_id: int) -> None:
     """
-    Collect DM-ready users from:
-    1) handlers.dm_ready store (Mongo-backed DMReadyStore) if available
-    2) req_store DM-ready (if used)
-    3) legacy dm_ready.json (if present)
+    Mirror DM-ready status into requirements_members.
+    We only set dm_ready=True (never auto-unset).
     """
-    uids: set[int] = set()
+    coll = _get_members_coll()
+    if coll is None:
+        return
 
-    # 1) handlers.dm_ready store
     try:
-        from handlers.dm_ready import store as dm_store  # type: ignore
-
-        for item in dm_store.all():
-            uid = int(item.get("user_id") or 0)
-            if uid:
-                uids.add(uid)
-    except Exception:
-        pass
-
-    # 2) req_store (some older builds)
-    try:
-        from req_store import ReqStore  # type: ignore
-
-        rs = ReqStore()
-        uids.update(rs.get_dm_ready_global())
-    except Exception:
-        pass
-
-    # 3) legacy local JSON
-    legacy = _safe_json_load(DMREADY_JSON)
-    raw_uids = legacy.get("dm_ready_users") or legacy.get("users") or []
-    if isinstance(raw_uids, list):
-        for x in raw_uids:
-            try:
-                uids.add(int(x))
-            except Exception:
-                continue
-    elif isinstance(raw_uids, dict):
-        for k, v in raw_uids.items():
-            try:
-                if v:
-                    uids.add(int(k))
-            except Exception:
-                continue
-
-    return sorted(uids)
-
-
-async def _mirror_into_requirements_members(members_coll) -> int:
-    """
-    For every DM-ready user, set dm_ready=True in requirements_members.
-    Returns number of updated docs.
-    """
-    if members_coll is None:
-        return 0
-
-    dm_uids = _collect_dmready_user_ids()
-    if not dm_uids:
-        return 0
-
-    updated = 0
-    now = datetime.utcnow()
-    try:
-        for uid in dm_uids:
-            res = members_coll.update_one(
-                {"user_id": uid},
-                {"$set": {"dm_ready": True, "dm_ready_synced_at": now}},
-                upsert=False,
-            )
-            if getattr(res, "modified_count", 0) or getattr(res, "matched_count", 0):
-                updated += 1
+        coll.update_one(
+            {"user_id": user_id},
+            {"$set": {"dm_ready": True}},
+            upsert=True,
+        )
     except Exception as e:
-        log.warning("dmready_bridge: sync failed (%s)", e)
-
-    return updated
+        log.warning("dmready_bridge: update_one failed for user_id=%s: %s", user_id, e)
 
 
 def register(app: Client):
-    """
-    Call register(app) from main.py.
-    """
-    log.info("✅ handlers.dmready_bridge wired (OWNER_ID=%s, auto_sync=%sm)", OWNER_ID, AUTO_SYNC_MINUTES)
+    log.info("✅ handlers.dmready_bridge wired (OWNER_ID=%s)", OWNER_ID)
 
-    members_coll = _get_members_coll()
+    # Passive mirror: whenever someone DMs the bot, dm_ready.py marks them.
+    # We ALSO mirror into requirements_members so the Requirements Panel can show them.
+    @app.on_message(filters.private & ~filters.service, group=11)
+    async def _mirror_on_private_message(_: Client, m: Message):
+        try:
+            if not m.from_user:
+                return
+            _upsert_dm_ready_flag(m.from_user.id)
+        except Exception as e:
+            log.warning("dmready_bridge: mirror on private message failed: %s", e)
 
-    async def _sync_and_reply(msg: Optional[Message] = None):
-        n = await _mirror_into_requirements_members(members_coll)
-        if msg:
-            await msg.reply_text(f"✅ DM-ready sync complete.\nUpdated/confirmed: <b>{n}</b> users.", quote=True)
-
-    @app.on_message(filters.private & filters.command("dmreadysync"))
-    async def dmreadysync_cmd(_, msg: Message):
-        if not msg.from_user or msg.from_user.id != OWNER_ID:
+    # Owner tool: force a one-time full sync from dm_ready store into requirements_members
+    @app.on_message(filters.private & filters.command("dmreadysync"), group=-1)
+    async def _dmreadysync(_: Client, m: Message):
+        if not m.from_user or m.from_user.id != OWNER_ID:
+            await m.reply_text("Only the owner can run this.")
             return
-        await _sync_and_reply(msg)
 
-    async def _auto_loop():
-        # Initial delay so other handlers + Mongo can come up
-        await asyncio.sleep(5)
-        while True:
-            try:
-                await _mirror_into_requirements_members(members_coll)
-            except Exception:
-                pass
-            await asyncio.sleep(max(60, AUTO_SYNC_MINUTES * 60))
+        try:
+            # Import your existing store without modifying it
+            from handlers.dm_ready import store as dm_store
 
-    # Fire-and-forget periodic sync
-    try:
-        app.loop.create_task(_auto_loop())
-    except Exception:
-        asyncio.get_event_loop().create_task(_auto_loop())
+            users = dm_store.all()
+            if not users:
+                await m.reply_text("✅ dmreadysync: no DM-ready users found in dm_ready store.")
+                return
+
+            count = 0
+            for u in users:
+                uid = u.get("user_id")
+                if isinstance(uid, int):
+                    _upsert_dm_ready_flag(uid)
+                    count += 1
+
+            await m.reply_text(f"✅ dmreadysync complete: mirrored {count} users into requirements_members.dm_ready=true")
+        except Exception as e:
+            log.exception("dmready_bridge: dmreadysync failed: %s", e)
+            await m.reply_text(f"❌ dmreadysync failed: {e}")
