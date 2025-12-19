@@ -1159,27 +1159,62 @@ def register(app: Client):
 
         gid = int((cq.data or "").split(":")[-1])
 
-        cursor = members_coll.find({"dm_ready": True, "groups": gid}).sort("first_name", ASCENDING)
-        docs = list(cursor)
+        # Pull everyone we know is in this group (from Scan Group Members),
+        # then split into DM-ready vs NOT DM-ready.
+        all_docs = list(members_coll.find({"groups": gid}).sort("first_name", ASCENDING))
 
-        if not docs:
+        ready_docs = [d for d in all_docs if d.get("dm_ready") is True]
+        not_ready_docs = [d for d in all_docs if d.get("dm_ready") is not True]
+
+        # If we have no scanned members at all, explain why.
+        if not all_docs:
             text = (
-                f"💬 <b>DM-Ready</b>\n\n"
-                f"Group: <code>{gid}</code>\n\n"
-                "• none found\n\n"
-                "Note: This uses <code>dm_ready=true</code> and requires you to run 📡 Scan Group Members at least once."
+                f"💬 <b>DM Status (This Group)</b>
+
+"
+                f"Group: <code>{gid}</code>
+
+"
+                "• no members found for this group yet
+
+"
+                "Note: Run 📡 <b>Scan Group Members</b> first so the panel knows who is in the group."
             )
         else:
             lines = [
-                "💬 <b>DM-Ready</b>",
+                "💬 <b>DM Status (This Group)</b>",
                 f"Group: <code>{gid}</code>",
-                ""
+                "",
+                f"✅ DM-Ready: <b>{len(ready_docs)}</b>",
             ]
-            for d in docs[:120]:
+
+            # Show DM-ready list (cap to avoid Telegram limits)
+            for d in ready_docs[:80]:
                 name = _display_name_for_doc(d)
                 uid = d.get("user_id")
                 lines.append(f"• {name} — <code>{uid}</code>")
-            text = "\n".join(lines)
+
+            if len(ready_docs) > 80:
+                lines.append(f"…and <b>{len(ready_docs) - 80}</b> more DM-ready.")
+
+            lines.extend([
+                "",
+                f"🚫 NOT DM-Ready: <b>{len(not_ready_docs)}</b>",
+            ])
+
+            for d in not_ready_docs[:80]:
+                name = _display_name_for_doc(d)
+                uid = d.get("user_id")
+                lines.append(f"• {name} — <code>{uid}</code>")
+
+            if len(not_ready_docs) > 80:
+                lines.append(f"…and <b>{len(not_ready_docs) - 80}</b> more not DM-ready.")
+
+            lines.append("")
+            lines.append("Tip: DM-ready comes from <code>dm_ready=true</code> (users who have DM’d the bot).")
+
+            text = "
+".join(lines)
 
         await cq.answer()
         await _safe_edit_text(
