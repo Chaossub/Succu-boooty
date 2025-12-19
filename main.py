@@ -1,111 +1,156 @@
+# main.py
 import os
 import logging
-from typing import Set
+from typing import Set, Optional
 
-from pyrogram import Client, filters
+from pyrogram import Client
 from pyrogram.enums import ParseMode
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("main")
 
 # ────────────── ENV ──────────────
-API_ID   = int(os.getenv("API_ID", "0"))
+API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN= os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+if not all([API_ID, API_HASH, BOT_TOKEN]):
+    raise ValueError("Missing API_ID / API_HASH / BOT_TOKEN")
 
-# Optional (but strongly recommended)
-OWNER_ID = int(os.getenv("OWNER_ID", "6964994611"))
+FIND_MODELS_TEXT = os.getenv("FIND_MODELS_TEXT", "Nothing here yet 💕")
 
-# ────────────── APP ──────────────
+OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
+
+
+def _parse_id_list(val: Optional[str]) -> Set[int]:
+    if not val:
+        return set()
+    out: Set[int] = set()
+    for part in val.replace(" ", "").split(","):
+        if not part:
+            continue
+        try:
+            out.add(int(part))
+        except ValueError:
+            log.warning("main: bad ID in list: %r", part)
+    return out
+
+
+SUPER_ADMINS: Set[int] = _parse_id_list(os.getenv("SUPER_ADMINS"))
+MODELS: Set[int] = _parse_id_list(os.getenv("MODELS"))
+
+# ────────────── BOT INIT ──────────────
 app = Client(
-    "succubot",
+    "SuccuBot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    parse_mode=ParseMode.HTML
+    parse_mode=ParseMode.HTML,
 )
 
-# ────────────── HANDLER LOADER ──────────────
-REGISTERED: Set[str] = set()
 
-def _try_register(module_name: str, critical: bool = False):
+def _try_register(module_path: str, *, critical: bool = False):
     """
-    Import handlers.<module_name> and call register(app) if present.
-    If critical=True, import errors will raise.
+    Imports handlers.<module_path> and calls register(app).
+    If critical=True, crash on failure so we don't silently lose UI.
     """
+    mod_name = f"handlers.{module_path}"
     try:
-        mod = __import__(f"handlers.{module_name}", fromlist=["register"])
+        mod = __import__(mod_name, fromlist=["register"])
         if hasattr(mod, "register"):
             mod.register(app)
-            REGISTERED.add(module_name)
-            log.info("✅ Registered: handlers.%s", module_name)
+            log.info("✅ Registered %s", mod_name)
         else:
-            log.warning("⚠️ handlers.%s has no register(app).", module_name)
-    except Exception as e:
+            msg = f"{mod_name} has no register()"
+            if critical:
+                raise RuntimeError(msg)
+            log.warning(msg)
+    except ModuleNotFoundError:
+        # Optional modules may not exist in this repo — don't crash the bot.
+        log.warning("⚠️ Skipping missing module %s", mod_name)
         if critical:
             raise
-        log.error("❌ Failed to register handlers.%s: %s", module_name, e)
+    except Exception:
+        log.exception("❌ FAILED registering %s", mod_name)
+        if critical:
+            raise
 
-def _set_main_loop_for_scheduler():
-    """
-    Some schedulers need the main asyncio loop (if module exists).
-    """
-    try:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        import handlers.flyer_scheduler as flyer_scheduler
-        flyer_scheduler.MAIN_LOOP = loop
-        log.info("✅ Set MAIN_LOOP for flyer_scheduler")
-    except Exception as e:
-        log.warning("⚠️ Could not set MAIN_LOOP for flyer_scheduler: %s", e)
 
-# ────────────── BASIC COMMANDS ──────────────
-@app.on_message(filters.private & filters.command("start"))
-async def start_cmd(_, msg):
-    await msg.reply_text(
-        "Hi! I’m alive ✅\n\nUse /help to see commands.",
-        disable_web_page_preview=True
-    )
-
-@app.on_message(filters.private & filters.command("help"))
-async def help_cmd(_, msg):
-    await msg.reply_text(
-        "<b>SuccuBot Help</b>\n\n"
-        "• /start\n"
-        "• /help\n\n"
-        "Other features are available via the portal/panels.",
-        disable_web_page_preview=True
-    )
-
-# ────────────── MAIN ──────────────
 def main():
-    log.info("Booting SuccuBot… OWNER_ID=%s", OWNER_ID)
+    log.info("💋 Starting SuccuBot…")
+    log.info(
+        "IDs loaded: OWNER_ID=%s SUPER_ADMINS=%s MODELS=%s",
+        OWNER_ID,
+        SUPER_ADMINS,
+        MODELS,
+    )
 
-    # If you have schedulers that need the main loop:
-    _set_main_loop_for_scheduler()
+    # Optional utilities / safety
+    _try_register("health")
 
-    # Core panels / portal
+    # Core panels & menus (contains /start)
+    _try_register("panels", critical=True)
+
+    # Contact Admins & DM helpers
+    _try_register("contact_admins")
+    _try_register("dm_admin")
+
+    # DM Ready tracking + NEW bridge into requirements_members.dm_ready
+    _try_register("dm_ready", critical=True)
+    _try_register("dmready_bridge", critical=True)
+    _try_register("dm_ready_admin")
+    _try_register("dmnow", critical=True)
+    _try_register("portal_cmd", critical=True)
+
+    # Summon commands
+    _try_register("summon")
+
+    # ⭐ Roni assistant
     _try_register("roni_portal", critical=True)
+    _try_register("roni_portal_age", critical=True)
 
-    # DM-ready + requirements
-    _try_register("dm_ready", critical=True)          # DM-ready tracking + panel compatibility fix
-    _try_register("dmready_bridge")                   # mirrors dm_ready -> requirements_members (fixes DM-ready list)
+    # ✅ NSFW booking + availability
+    _try_register("nsfw_text_session_availability", critical=True)
+    _try_register("nsfw_text_session_booking", critical=True)
+
+    # Help panel
+    _try_register("help_panel", critical=True)
+
+    # Menus persistence/creation
+    _try_register("menu")
+    _try_register("createmenu")
+
+    # Moderation / warnings / fun
+    _try_register("moderation")
+    _try_register("warnings")
+    _try_register("fun")
+
+    # Scheduler (if present)
+    _try_register("schedulemsg")
+
+    # Flyers (optional; your repo doesn’t include these files right now)
+    _try_register("flyer")
+    _try_register("flyer_scheduler")
 
     # Requirements panel
-    _try_register("requirements_panel", critical=False)
+    _try_register("requirements_panel", critical=True)
 
-    # NSFW scheduling (availability + booking)
-    _try_register("nsfw_text_session_availability", critical=False)
-    _try_register("nsfw_text_session_booking", critical=False)
+    # Give schedulers the running loop (if those modules exist)
+    try:
+        from handlers import flyer_scheduler as _fs
+        _fs.set_main_loop(app.loop)
+        log.info("✅ Set main loop for flyer_scheduler")
+    except Exception:
+        log.exception("Could not set main loop for flyer_scheduler")
 
-    # Other optional handlers (safe load)
-    _try_register("flyers", critical=False)
-    _try_register("flyer_scheduler", critical=False)
-    _try_register("schedulemsg", critical=False)
+    try:
+        from handlers import schedulemsg as _sm
+        _sm.set_main_loop(app.loop)
+        log.info("✅ Set main loop for schedulemsg")
+    except Exception:
+        log.exception("Could not set main loop for schedulemsg")
 
-    log.info("Registered handlers: %s", ", ".join(sorted(REGISTERED)) if REGISTERED else "(none)")
     app.run()
+
 
 if __name__ == "__main__":
     main()
