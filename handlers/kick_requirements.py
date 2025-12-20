@@ -1,369 +1,230 @@
 # handlers/kick_requirements.py
-import os
-import io
-import logging
-from datetime import datetime, timezone
-from typing import Optional, Set, List, Dict, Any
 
-from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
-from pymongo import MongoClient, ASCENDING
+import logging
+from typing import Dict, List, Tuple
+
+from pyrogram import Client
+from pyrogram import filters
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 log = logging.getLogger(__name__)
 
-# ────────────── ENV ──────────────
-MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise RuntimeError("MONGODB_URI / MONGO_URI missing")
 
-OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
-REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
+def _display_name(first: str | None, last: str | None, username: str | None, user_id: int) -> str:
+    name = ((first or "") + (" " + last if last else "")).strip()
+    if name:
+        return name
+    if username:
+        return f"@{username}"
+    return str(user_id)
 
 
-def _parse_id_list(val: Optional[str]) -> Set[int]:
-    if not val:
-        return set()
-    out: Set[int] = set()
-    for part in val.replace(" ", "").split(","):
-        if not part:
+async def _get_group_members_map(app: Client, chat_id: int) -> Dict[int, Tuple[str, str, str]]:
+    """user_id -> (first, last, username)"""
+    out: Dict[int, Tuple[str, str, str]] = {}
+    async for m in app.get_chat_members(chat_id):
+        u = m.user
+        if not u:
             continue
-        try:
-            out.add(int(part))
-        except ValueError:
-            pass
+        out[u.id] = (u.first_name or "", u.last_name or "", u.username or "")
     return out
 
 
-SUPER_ADMINS: Set[int] = _parse_id_list(os.getenv("SUPER_ADMINS"))
-MODELS: Set[int] = _parse_id_list(os.getenv("MODELS"))
+def _compute_behind_for_group(member_map: Dict[int, Tuple[str, str, str]], docs_by_uid: Dict[int, dict], *, rp) -> List[Tuple[int, str]]:
+    behind: List[Tuple[int, str]] = []
 
-# Optional: if you want to allow running from DM and picking a group
-def _parse_groups(val: Optional[str]) -> List[int]:
-    if not val:
-        return []
-    out: List[int] = []
-    for part in val.replace(" ", "").split(","):
-        if not part:
+    for uid, (first, last, username) in member_map.items():
+        # Skip bots
+        if username and username.lower().endswith("bot"):
             continue
-        try:
-            out.append(int(part))
-        except ValueError:
-            pass
-    return out
+        # Skip owner / super admins / models (don’t auto-kick staff)
+        if rp._is_owner(uid) or rp._is_super_admin(uid) or rp._is_model(uid):
+            continue
+
+        doc = docs_by_uid.get(uid) or rp._member_doc(uid, username=username, first_name=first, last_name=last)
+
+        if doc.get("is_exempt"):
+            continue
+
+        total = int(doc.get("spend_cents", 0)) + int(doc.get("manual_spend_cents", 0))
+        if total < int(rp.REQUIRED_MIN_SPEND_CENTS):
+            behind.append((uid, _display_name(first, last, username, uid)))
+
+    behind.sort(key=lambda t: t[1].lower())
+    return behind
 
 
-SANCTUARY_GROUP_IDS: List[int] = _parse_groups(os.getenv("SANCTUARY_GROUP_IDS"))
-
-LOG_GROUP_ID: Optional[int] = None
-for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
-    if os.getenv(key):
-        try:
-            LOG_GROUP_ID = int(os.getenv(key))
-            break
-        except ValueError:
-            pass
-
-# ────────────── DB ──────────────
-mongo = MongoClient(MONGO_URI)
-db = mongo["Succubot"]
-members_coll = db["requirements_members"]
-members_coll.create_index([("user_id", ASCENDING)], unique=True)
-
-# ────────────── STATE ──────────────
-# per clicker: {"gid": int, "at": datetime}
-PENDING: Dict[int, Dict[str, Any]] = {}
-
-
-# ────────────── HELPERS ──────────────
-def _is_adminish(uid: int) -> bool:
-    return uid == OWNER_ID or uid in SUPER_ADMINS or uid in MODELS
-
-
-def _label(d: Dict[str, Any]) -> str:
-    uid = d.get("user_id")
-    name = (d.get("first_name") or "").strip() or "Unknown"
-    uname = (d.get("username") or "").strip()
-    if uname:
-        return f"{name} (@{uname}) — <code>{uid}</code>"
-    return f"{name} — <code>{uid}</code>"
-
-
-async def _log(client: Client, text: str):
-    if not LOG_GROUP_ID:
-        return
-    try:
-        await client.send_message(LOG_GROUP_ID, text, disable_web_page_preview=True)
-    except Exception as e:
-        log.warning("kick_requirements: log failed: %s", e)
-
-
-async def _send_long_or_file(client: Client, chat_id: int, title: str, body_html: str):
-    # Telegram safe limit buffer
-    if len(body_html) <= 3500:
-        await client.send_message(chat_id, body_html, disable_web_page_preview=True)
-        return
-
-    plain = (
-        body_html.replace("<b>", "")
-        .replace("</b>", "")
-        .replace("<code>", "")
-        .replace("</code>", "")
-        .replace("<i>", "")
-        .replace("</i>", "")
-    )
-    buf = io.BytesIO(plain.encode("utf-8"))
-    buf.name = "kick_sweep_list.txt"
-    await client.send_document(chat_id, document=buf, caption=title)
-
-
-async def _admin_ids_for_chat(client: Client, chat_id: int) -> Set[int]:
-    ids: Set[int] = set()
-    try:
-        async for m in client.get_chat_members(chat_id, filter="administrators"):
-            if m.user:
-                ids.add(m.user.id)
-    except Exception:
-        # If blocked, we’ll rely on kick failures
-        pass
-    return ids
-
-
-def _kick_candidates(gid: int) -> List[Dict[str, Any]]:
-    """
-    Uses scan-tracked membership: requirements_members.groups contains gid.
-    If you haven't run Scan Group Members, this will be empty.
-    """
-    return list(
-        members_coll.find(
-            {
-                "groups": gid,
-                "is_exempt": {"$ne": True},
-                "manual_spend": {"$lt": REQUIRED_MIN_SPEND},
-            }
-        ).sort("first_name", ASCENDING)
-    )
-
-
-def _actions_kb(gid: int) -> InlineKeyboardMarkup:
+def _menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("🧪 Preview Full List", callback_data=f"reqkick:preview:{gid}")],
-            [
-                InlineKeyboardButton("❌ Cancel", callback_data="reqkick:cancel"),
-                InlineKeyboardButton("🚪 Kick Them", callback_data=f"reqkick:confirm:{gid}"),
-            ],
-            [InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin")],
+            [InlineKeyboardButton("🔍 Preview who would be kicked", callback_data="kickreq:preview")],
+            [InlineKeyboardButton("🧹 Kick now (CONFIRM)", callback_data="kickreq:confirm")],
+            [InlineKeyboardButton("⬅ Back", callback_data="reqpanel:home")],
         ]
     )
 
 
-def _confirm_kb(gid: int) -> InlineKeyboardMarkup:
+def _after_kick_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton("❌ No, go back", callback_data=f"reqkick:open_gid:{gid}"),
-                InlineKeyboardButton("✅ Yes, kick", callback_data=f"reqkick:run:{gid}"),
-            ],
-            [InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin")],
+            [InlineKeyboardButton("⬅ Back to Requirements", callback_data="reqpanel:home")],
         ]
     )
 
 
-def _group_picker_kb() -> InlineKeyboardMarkup:
-    rows = []
-    for gid in SANCTUARY_GROUP_IDS[:30]:
-        rows.append([InlineKeyboardButton(f"📍 Group {gid}", callback_data=f"reqkick:open_gid:{gid}")])
-    rows.append([InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin")])
-    return InlineKeyboardMarkup(rows)
+async def _load_docs_by_uid(rp, user_ids: List[int]) -> Dict[int, dict]:
+    # Mongo "in" query
+    cur = rp.members_coll.find({"user_id": {"$in": user_ids}}, {"_id": 0})
+    out: Dict[int, dict] = {}
+    for d in cur:
+        out[int(d["user_id"])] = d
+    return out
 
 
-# ────────────── REGISTER ──────────────
-def register(app: Client):
-    log.info("✅ handlers.kick_requirements registered (button-only)")
+async def _build_preview(app: Client, rp) -> Tuple[str, Dict[int, List[Tuple[int, str]]]]:
+    group_ids = list(rp.SANCTUARY_GROUP_IDS)
+    if not group_ids:
+        return "⚠️ No SANCTUARY_GROUP_IDS configured.", {}
 
-    # Entry button from requirements_panel: callback_data="reqkick:open"
-    @app.on_callback_query(filters.regex(r"^reqkick:open$"))
-    async def reqkick_open(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else 0
-        if not _is_adminish(uid):
-            await cq.answer("Admins/models only 💜", show_alert=True)
-            return
+    all_member_maps: Dict[int, Dict[int, Tuple[str, str, str]]] = {}
+    all_uids: List[int] = []
 
-        # If clicked inside a group, use that group
-        if cq.message and cq.message.chat and cq.message.chat.id < 0:
-            gid = cq.message.chat.id
-            await cq.answer()
-            await cq.message.edit_text(
-                "🚪 <b>Kick Behind Requirements</b>\n\n"
-                f"Group: <code>{gid}</code>\n"
-                "Choose what you want to do:",
-                reply_markup=_actions_kb(gid),
-                disable_web_page_preview=True,
-            )
-            return
-
-        # Otherwise, allow picking a group from DM if SANCTUARY_GROUP_IDS exists
-        if not SANCTUARY_GROUP_IDS:
-            await cq.answer("Click this inside the group (or set SANCTUARY_GROUP_IDS).", show_alert=True)
-            return
-
-        await cq.answer()
-        await cq.message.edit_text(
-            "🚪 <b>Kick Behind Requirements</b>\n\nPick which group to run the sweep in:",
-            reply_markup=_group_picker_kb(),
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex(r"^reqkick:open_gid:(-?\d+)$"))
-    async def reqkick_open_gid(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else 0
-        if not _is_adminish(uid):
-            await cq.answer("Admins/models only 💜", show_alert=True)
-            return
-
-        gid = int((cq.data or "").split(":")[-1])
-        await cq.answer()
-        await cq.message.edit_text(
-            "🚪 <b>Kick Behind Requirements</b>\n\n"
-            f"Group: <code>{gid}</code>\n"
-            "Choose what you want to do:",
-            reply_markup=_actions_kb(gid),
-            disable_web_page_preview=True,
-        )
-
-    @app.on_callback_query(filters.regex(r"^reqkick:preview:(-?\d+)$"))
-    async def reqkick_preview(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else 0
-        if not _is_adminish(uid):
-            await cq.answer("Admins/models only 💜", show_alert=True)
-            return
-
-        gid = int((cq.data or "").split(":")[-1])
-        docs = _kick_candidates(gid)
-
-        if not docs:
-            await cq.answer("No candidates. Run Scan Group Members first.", show_alert=True)
-            return
-
-        body = (
-            "<b>🧪 Kick Sweep Preview</b>\n"
-            f"Group: <code>{gid}</code>\n"
-            f"Requirement min: <b>${REQUIRED_MIN_SPEND:.2f}</b>\n"
-            f"Candidates: <b>{len(docs)}</b>\n\n"
-            + "\n".join([f"• {_label(d)}" for d in docs])
-        )
-
-        # Send preview to YOUR DM (cleanest). If it fails, fallback to log group
+    for gid in group_ids:
         try:
-            await _send_long_or_file(client, uid, f"Kick preview ({len(docs)})", body)
-            await cq.answer("Sent preview to your DM ✅", show_alert=True)
-        except Exception:
-            target = LOG_GROUP_ID or (cq.message.chat.id if cq.message else uid)
-            await _send_long_or_file(client, target, f"Kick preview ({len(docs)})", body)
-            await cq.answer("Sent preview to log group ✅", show_alert=True)
+            mm = await _get_group_members_map(app, gid)
+        except Exception as e:
+            log.exception("kickreq: failed fetching members for %s", gid)
+            mm = {}
+        all_member_maps[gid] = mm
+        all_uids.extend(mm.keys())
 
-    @app.on_callback_query(filters.regex(r"^reqkick:confirm:(-?\d+)$"))
-    async def reqkick_confirm(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else 0
-        if not _is_adminish(uid):
-            await cq.answer("Admins/models only 💜", show_alert=True)
-            return
+    docs_by_uid = await _load_docs_by_uid(rp, list(set(all_uids)))
 
-        gid = int((cq.data or "").split(":")[-1])
-        docs = _kick_candidates(gid)
+    per_group: Dict[int, List[Tuple[int, str]]] = {}
+    total = 0
 
-        if not docs:
-            await cq.answer("No candidates. Run Scan Group Members first.", show_alert=True)
-            return
+    for gid, mm in all_member_maps.items():
+        behind = _compute_behind_for_group(mm, docs_by_uid, rp=rp)
+        per_group[gid] = behind
+        total += len(behind)
 
-        PENDING[uid] = {"gid": gid, "at": datetime.now(timezone.utc)}
+    lines: List[str] = []
+    lines.append("🧹 <b>Manual Kick (Behind Requirements)</b>")
+    lines.append(f"Minimum required: <b>${rp.REQUIRED_MIN_SPEND_DOLLARS:.2f}</b>")
+    lines.append(f"Groups checked: <b>{len(group_ids)}</b>")
+    lines.append(f"Total behind: <b>{total}</b>")
+    lines.append("")
 
-        await cq.answer()
-        await cq.message.edit_text(
-            "⚠️ <b>Confirm Kick Sweep</b>\n\n"
-            f"Group: <code>{gid}</code>\n"
-            f"Will kick: <b>{len(docs)}</b> members\n\n"
-            "This removes them from the group (ban+unban).",
-            reply_markup=_confirm_kb(gid),
-            disable_web_page_preview=True,
-        )
+    for gid in group_ids:
+        behind = per_group.get(gid, [])
+        lines.append(f"<b>Group {gid}</b> — behind: <b>{len(behind)}</b>")
+        if behind:
+            # show first 25
+            for uid, name in behind[:25]:
+                lines.append(f"• {name} <code>{uid}</code>")
+            if len(behind) > 25:
+                lines.append(f"…and {len(behind) - 25} more")
+        lines.append("")
 
-    @app.on_callback_query(filters.regex(r"^reqkick:cancel$"))
-    async def reqkick_cancel(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else 0
-        PENDING.pop(uid, None)
-        await cq.answer("Canceled.", show_alert=True)
+    return "\n".join(lines).strip(), per_group
 
-    @app.on_callback_query(filters.regex(r"^reqkick:run:(-?\d+)$"))
-    async def reqkick_run(client: Client, cq: CallbackQuery):
-        uid = cq.from_user.id if cq.from_user else 0
-        if not _is_adminish(uid):
-            await cq.answer("Admins/models only 💜", show_alert=True)
-            return
 
-        gid = int((cq.data or "").split(":")[-1])
-        pending = PENDING.get(uid)
-        if not pending or pending.get("gid") != gid:
-            await cq.answer("No confirmed sweep pending. Hit Kick Them again.", show_alert=True)
-            return
+async def _do_kick(app: Client, rp, per_group: Dict[int, List[Tuple[int, str]]]) -> str:
+    group_ids = list(rp.SANCTUARY_GROUP_IDS)
+    kicked_total = 0
+    failed_total = 0
 
-        await cq.answer("Running kick sweep…", show_alert=False)
+    out: List[str] = []
+    out.append("🧹 <b>Kicking behind members…</b>")
 
-        docs = _kick_candidates(gid)
-        admin_ids = await _admin_ids_for_chat(client, gid)
+    for gid in group_ids:
+        behind = per_group.get(gid, [])
+        if not behind:
+            out.append(f"\n<b>Group {gid}</b>: nothing to kick ✅")
+            continue
 
-        kicked: List[str] = []
-        failed: List[str] = []
-        skipped = 0
+        ok: List[str] = []
+        fail: List[str] = []
 
-        for d in docs:
-            target = int(d.get("user_id"))
-            # Hard safety checks
-            if target == OWNER_ID or target in MODELS or target in SUPER_ADMINS:
-                skipped += 1
-                continue
-            if target in admin_ids:
-                skipped += 1
-                continue
-
+        for uid, name in behind:
             try:
-                # Kick = ban then unban
-                await client.ban_chat_member(gid, target)
-                await client.unban_chat_member(gid, target)
-                kicked.append(_label(d))
+                await app.ban_chat_member(gid, uid)
+                await app.unban_chat_member(gid, uid)
+                ok.append(f"• {name} <code>{uid}</code>")
+                kicked_total += 1
             except Exception as e:
-                failed.append(f"{_label(d)} <i>({e.__class__.__name__})</i>")
+                fail.append(f"• {name} <code>{uid}</code> — {e}")
+                failed_total += 1
 
-        PENDING.pop(uid, None)
+        out.append(f"\n<b>Group {gid}</b> — kicked: <b>{len(ok)}</b>, failed: <b>{len(fail)}</b>")
+        if ok:
+            out.append("<b>Kicked:</b>")
+            out.extend(ok[:30])
+            if len(ok) > 30:
+                out.append(f"…and {len(ok)-30} more")
+        if fail:
+            out.append("<b>Failed:</b>")
+            out.extend(fail[:15])
+            if len(fail) > 15:
+                out.append(f"…and {len(fail)-15} more")
 
-        summary = (
-            "🚪 <b>Kick Sweep Complete</b>\n\n"
-            f"Group: <code>{gid}</code>\n"
-            f"✅ Kicked: <b>{len(kicked)}</b>\n"
-            f"❌ Failed: <b>{len(failed)}</b>\n"
-            f"⏭ Skipped (owner/models/admins): <b>{skipped}</b>\n"
-            f"Min spend: <b>${REQUIRED_MIN_SPEND:.2f}</b>\n"
+    out.append("")
+    out.append(f"✅ Done. Kicked: <b>{kicked_total}</b> | Failed: <b>{failed_total}</b>")
+    return "\n".join(out).strip()
+
+
+def register(app: Client):
+    # Lazy import so this module stays small and always uses the live rp config.
+    import handlers.requirements_panel as rp
+
+    @app.on_callback_query(filters.regex(r"^kickreq:menu$"))
+    async def kickreq_menu(_, cq: CallbackQuery):
+        uid = cq.from_user.id
+        if not (rp._is_owner(uid) or rp._is_super_admin(uid)):
+            await cq.answer("Admins only.", show_alert=True)
+            return
+
+        text = (
+            "🧹 <b>Kick Behind (Manual)</b>\n\n"
+            "This will remove members who are currently <b>in your Sanctuary group(s)</b> and are <b>behind</b> the minimum spend.\n"
+            "It will <b>not</b> kick exempt members, models, the owner, or super admins.\n\n"
+            "Tap Preview first to double-check the list, then Confirm to kick."
         )
+        await cq.message.edit_text(text, reply_markup=_menu_kb(), disable_web_page_preview=True)
+        await cq.answer()
 
-        await _log(client, summary)
+    @app.on_callback_query(filters.regex(r"^kickreq:preview$"))
+    async def kickreq_preview(_, cq: CallbackQuery):
+        uid = cq.from_user.id
+        if not (rp._is_owner(uid) or rp._is_super_admin(uid)):
+            await cq.answer("Admins only.", show_alert=True)
+            return
 
-        # Send details to log group (or group if no log group)
-        target_chat = LOG_GROUP_ID or gid
+        text, _per = await _build_preview(app, rp)
+        # Store preview list in the message so confirm can reuse without re-fetching.
+        # (We encode group+uids into callback_data token list is too big; instead re-fetch on confirm.
+        # Preview is still useful for the human.)
+        await cq.message.edit_text(text, reply_markup=_menu_kb(), disable_web_page_preview=True)
+        await cq.answer()
 
-        if kicked:
-            await _send_long_or_file(
-                client,
-                target_chat,
-                f"Kicked ({len(kicked)})",
-                "<b>✅ Kicked</b>\n\n" + "\n".join([f"• {x}" for x in kicked]),
-            )
-        if failed:
-            await _send_long_or_file(
-                client,
-                target_chat,
-                f"Kick failed ({len(failed)})",
-                "<b>❌ Failed</b>\n\n" + "\n".join([f"• {x}" for x in failed]),
-            )
+    @app.on_callback_query(filters.regex(r"^kickreq:confirm$"))
+    async def kickreq_confirm(_, cq: CallbackQuery):
+        uid = cq.from_user.id
+        if not (rp._is_owner(uid) or rp._is_super_admin(uid)):
+            await cq.answer("Admins only.", show_alert=True)
+            return
 
-        # Update the panel message so you see completion right away
-        await cq.message.edit_text(summary, reply_markup=_actions_kb(gid), disable_web_page_preview=True)
+        await cq.answer("Kicking…", show_alert=False)
+
+        # Rebuild fresh to avoid kicking based on stale preview.
+        _text, per_group = await _build_preview(app, rp)
+        result = await _do_kick(app, rp, per_group)
+
+        await cq.message.edit_text(result, reply_markup=_after_kick_kb(), disable_web_page_preview=True)
+
+        # Also log to the log group if configured
+        try:
+            if rp.LOG_CHAT_ID:
+                await app.send_message(rp.LOG_CHAT_ID, f"[Requirements] Manual kick run by {uid}: kicked behind members.")
+        except Exception:
+            log.exception("kickreq: failed logging")
