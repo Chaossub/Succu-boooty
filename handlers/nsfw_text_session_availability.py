@@ -1,337 +1,313 @@
-import json
-import logging
+# handlers/nsfw_text_session_availability.py
+"""
+NSFW Text Session Availability (Roni) — rolling 7-day view + slot toggle blocking.
+
+Fixes:
+- Prevents "button does nothing" caused by Telegram MESSAGE_NOT_MODIFIED when editing the same text/markup.
+- Always answers callback queries (so Telegram UI stops spinning).
+- Shows ONLY future days: today .. today+6 (then Next week / Prev week).
+- Persists blocked time slots per-day in MongoDB if available, otherwise falls back to in-memory.
+- Works with roni_portal button callback_data: "nsfw_avail:open"
+
+Notes:
+- This module only handles AVAILABILITY UI + storage.
+- Booking module should read the same storage (blocked slots) to hide/deny times.
+"""
+
+from __future__ import annotations
+
 import os
-from datetime import datetime, timedelta, time
-from typing import Dict, List, Optional, Tuple
+import logging
+from datetime import datetime, timedelta, date, time
+from typing import Dict, List, Set, Optional, Tuple
 
 import pytz
 from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.errors import MessageNotModified
 
-from utils.menu_store import store
+try:
+    from pymongo import MongoClient
+except Exception:
+    MongoClient = None  # type: ignore
 
 log = logging.getLogger(__name__)
 
-OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
+TZ_NAME = os.getenv("LA_TZ", "America/Los_Angeles")
+TZ = pytz.timezone(TZ_NAME)
 
-LA_TZ = pytz.timezone("America/Los_Angeles")
+RONI_OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
+
+# Slot grid settings (30-minute slots)
 SLOT_MINUTES = 30
 
+# Default working hours for the grid (9:00 AM – 5:30 PM shown on first page; "More" for later)
+DAY_START_HOUR = int(os.getenv("NSFW_DAY_START_HOUR", "9"))   # inclusive
+DAY_END_HOUR = int(os.getenv("NSFW_DAY_END_HOUR", "18"))      # exclusive (18 = 6PM)
+# How many slots to show per page in the "toggle grid"
+SLOTS_PER_PAGE = 16  # 8 rows of 2 buttons = 16 slots
 
-def _jget(key: str, default):
-    try:
-        raw = store.get_menu(key)
-        if not raw:
-            return default
-        return json.loads(raw)
-    except Exception:
-        return default
+# Mongo (optional)
+MONGO_URI = os.getenv("MONGO_URI") or os.getenv("MONGODB_URI")
+MONGO_DB = os.getenv("MONGO_DBNAME", "Succubot")
+MONGO_COLL = os.getenv("NSFW_AVAIL_COLL", "nsfw_availability")
 
+_mongo_coll = None
+_mem_store: Dict[str, Set[str]] = {}  # fallback: {"YYYY-MM-DD": {"09:00", "09:30", ...}}
 
-def _jset(key: str, obj) -> None:
-    try:
-        store.set_menu(key, json.dumps(obj))
-    except Exception:
-        log.exception("Failed saving %s", key)
+def _is_owner(user_id: int) -> bool:
+    return user_id == RONI_OWNER_ID
 
+def _now_la() -> datetime:
+    return datetime.now(TZ)
 
-def _key_day(date_yyyy_mm_dd: str) -> str:
-    # must match nsfw_text_session_availability.py
-    return f"NSFW_AVAIL_DAY:{date_yyyy_mm_dd}"
+def _today_la() -> date:
+    return _now_la().date()
 
+def _date_key(d: date) -> str:
+    return d.strftime("%Y-%m-%d")
 
-def _key_pending() -> str:
-    return "NSFW_BOOKING_REQUESTS"
-
-
-def _today_la() -> datetime:
-    return datetime.now(LA_TZ)
-
-
-def _fmt_day(d: datetime) -> str:
+def _fmt_day(d: date) -> str:
     return d.strftime("%a %b %d")
 
+def _fmt_time_label(hhmm: str) -> str:
+    # "09:00" -> "9:00 AM"
+    hh, mm = hhmm.split(":")
+    t = time(int(hh), int(mm))
+    return datetime.combine(date.today(), t).strftime("%-I:%M %p")
 
-def _parse_hhmm(val: str) -> time:
-    h, m = val.split(":")
-    return time(int(h), int(m))
-
-
-def _time_range_slots(open_t: time, close_t: time) -> List[time]:
-    # slots represent START times
-    start = datetime(2000, 1, 1, open_t.hour, open_t.minute)
-    end = datetime(2000, 1, 1, close_t.hour, close_t.minute)
-    out: List[time] = []
-    cur = start
-    while cur < end:
-        out.append(cur.time())
+def _all_slots_for_day() -> List[str]:
+    slots: List[str] = []
+    start = time(DAY_START_HOUR, 0)
+    end = time(DAY_END_HOUR, 0)
+    cur = datetime.combine(date.today(), start)
+    end_dt = datetime.combine(date.today(), end)
+    while cur < end_dt:
+        slots.append(cur.strftime("%H:%M"))
         cur += timedelta(minutes=SLOT_MINUTES)
-    return out
+    return slots
 
+ALL_SLOTS = _all_slots_for_day()
 
-def _is_slot_blocked(blocked: List[List[str]], slot_start: time, slot_end: time) -> bool:
-    """blocked windows are [["HH:MM","HH:MM"], ...]"""
-    ss = datetime(2000, 1, 1, slot_start.hour, slot_start.minute)
-    se = datetime(2000, 1, 1, slot_end.hour, slot_end.minute)
-    for b0, b1 in blocked:
-        bs = datetime(2000, 1, 1, _parse_hhmm(b0).hour, _parse_hhmm(b0).minute)
-        be = datetime(2000, 1, 1, _parse_hhmm(b1).hour, _parse_hhmm(b1).minute)
-        # overlap
-        if ss < be and se > bs:
-            return True
-    return False
+def _mongo_init():
+    global _mongo_coll
+    if _mongo_coll is not None:
+        return
+    if not (MongoClient and MONGO_URI):
+        _mongo_coll = None
+        return
+    try:
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3500)
+        db = client[MONGO_DB]
+        _mongo_coll = db[MONGO_COLL]
+        _mongo_coll.create_index("day", unique=True)
+        log.info("NSFW availability: Mongo enabled db=%s coll=%s", MONGO_DB, MONGO_COLL)
+    except Exception:
+        log.exception("NSFW availability: Mongo init failed, falling back to memory")
+        _mongo_coll = None
 
+def _load_blocked(day_key: str) -> Set[str]:
+    _mongo_init()
+    if _mongo_coll is None:
+        return set(_mem_store.get(day_key, set()))
+    try:
+        doc = _mongo_coll.find_one({"day": day_key}) or {}
+        blocked = set(doc.get("blocked", []) or [])
+        return blocked
+    except Exception:
+        log.exception("NSFW availability: Mongo read failed, using memory")
+        return set(_mem_store.get(day_key, set()))
 
-def _load_day(date_yyyy_mm_dd: str) -> Dict:
-    """Returns dict with open, close, blocked; provides defaults if empty."""
-    day = _jget(
-        _key_day(date_yyyy_mm_dd),
-        {
-            "open": "09:00",
-            "close": "22:00",
-            "blocked": [],
-        },
-    )
-    if not isinstance(day, dict):
-        day = {"open": "09:00", "close": "22:00", "blocked": []}
-    day.setdefault("open", "09:00")
-    day.setdefault("close", "22:00")
-    day.setdefault("blocked", [])
-    return day
-
-
-def _available_start_times(date_yyyy_mm_dd: str) -> Tuple[time, time, List[time]]:
-    day = _load_day(date_yyyy_mm_dd)
-    open_t = _parse_hhmm(day["open"])
-    close_t = _parse_hhmm(day["close"])
-    blocked = day.get("blocked", []) or []
-
-    starts = []
-    for st in _time_range_slots(open_t, close_t):
-        en_dt = datetime(2000, 1, 1, st.hour, st.minute) + timedelta(minutes=SLOT_MINUTES)
-        en = en_dt.time()
-        if _is_slot_blocked(blocked, st, en):
-            continue
-        # also don't allow the very last slot if it would end after close
-        close_dt = datetime(2000, 1, 1, close_t.hour, close_t.minute)
-        if en_dt > close_dt:
-            continue
-        starts.append(st)
-
-    return open_t, close_t, starts
-
-
-def _week_keyboard(offset_weeks: int) -> InlineKeyboardMarkup:
-    base = _today_la().date() + timedelta(days=offset_weeks * 7)
-
-    rows = []
-    for i in range(7):
-        d = base + timedelta(days=i)
-        # never show past days
-        if d < _today_la().date():
-            continue
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    _fmt_day(datetime.combine(d, time(0, 0)).replace(tzinfo=LA_TZ)),
-                    callback_data=f"nsfw_book:day:{d.isoformat()}",
-                )
-            ]
+def _save_blocked(day_key: str, blocked: Set[str]) -> None:
+    _mongo_init()
+    blocked_list = sorted(blocked)
+    if _mongo_coll is None:
+        _mem_store[day_key] = set(blocked_list)
+        return
+    try:
+        _mongo_coll.update_one(
+            {"day": day_key},
+            {"$set": {"day": day_key, "blocked": blocked_list, "updated_at": datetime.utcnow()}},
+            upsert=True,
         )
+    except Exception:
+        log.exception("NSFW availability: Mongo write failed, storing in memory")
+        _mem_store[day_key] = set(blocked_list)
 
-    nav = []
-    if offset_weeks > 0:
-        nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"nsfw_book:week:{offset_weeks-1}"))
-    nav.append(InlineKeyboardButton("Next ➡", callback_data=f"nsfw_book:week:{offset_weeks+1}"))
-    rows.append(nav)
+async def _safe_edit(cq: CallbackQuery, text: str, kb: InlineKeyboardMarkup) -> None:
+    """
+    Telegram throws MESSAGE_NOT_MODIFIED if you edit with identical content.
+    That looks like "button does nothing" in chat — so we just ignore it.
+    """
+    try:
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+    except MessageNotModified:
+        pass
 
-    rows.append([InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")])
+def _overview_text(page: int) -> str:
+    start = _today_la() + timedelta(days=page * 7)
+    end = start + timedelta(days=6)
+    return (
+        f"🗓️ <b>NSFW Availability (LA time)</b>\n"
+        f"Window: <b>{start.strftime('%b %d')}</b> — <b>{end.strftime('%b %d')}</b>\n\n"
+        f"Tap a day to toggle blocked time slots.\n"
+        f"✅ = available   ⛔ = blocked"
+    )
+
+def _kb_week(page: int) -> InlineKeyboardMarkup:
+    start = _today_la() + timedelta(days=page * 7)
+    rows: List[List[InlineKeyboardButton]] = []
+    for i in range(7):
+        d = start + timedelta(days=i)
+        day_key = _date_key(d)
+        blocked = _load_blocked(day_key)
+        badge = "⛔" if blocked else "✅"
+        rows.append([InlineKeyboardButton(f"{badge} {_fmt_day(d)}", callback_data=f"nsfw_avail:day:{day_key}:p0:w{page}")])
+
+    nav_row: List[InlineKeyboardButton] = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Prev week", callback_data=f"nsfw_avail:week:{page-1}"))
+    nav_row.append(InlineKeyboardButton("Next week ➡️", callback_data=f"nsfw_avail:week:{page+1}"))
+    rows.append(nav_row)
+    rows.append([InlineKeyboardButton("⬅️ Back to Roni Admin", callback_data="roni_portal:admin")])
     return InlineKeyboardMarkup(rows)
 
+def _day_text(day_key: str, page: int, week_page: int) -> str:
+    d = datetime.strptime(day_key, "%Y-%m-%d").date()
+    blocked = _load_blocked(day_key)
+    return (
+        f"🧩 <b>Block time slots</b>\n"
+        f"Day: <b>{d.strftime('%A, %B %d')} (LA time)</b>\n"
+        f"Blocked: <b>{len(blocked)}</b>\n\n"
+        f"Tap a slot to toggle:\n"
+        f"✅ = available   ⛔ = blocked"
+    )
 
-def _times_keyboard(date_yyyy_mm_dd: str, offset: int = 0) -> InlineKeyboardMarkup:
-    _, _, starts = _available_start_times(date_yyyy_mm_dd)
+def _kb_day(day_key: str, slot_page: int, week_page: int) -> InlineKeyboardMarkup:
+    blocked = _load_blocked(day_key)
 
-    per_page = 12  # 6 rows x 2 cols
-    page = starts[offset : offset + per_page]
+    start_idx = slot_page * SLOTS_PER_PAGE
+    end_idx = min(len(ALL_SLOTS), start_idx + SLOTS_PER_PAGE)
+    slice_slots = ALL_SLOTS[start_idx:end_idx]
 
     rows: List[List[InlineKeyboardButton]] = []
-    for i in range(0, len(page), 2):
-        row = []
-        for t in page[i : i + 2]:
-            label = datetime(2000, 1, 1, t.hour, t.minute).strftime("%I:%M %p").lstrip("0")
-            row.append(
-                InlineKeyboardButton(
-                    f"🕒 {label}",
-                    callback_data=f"nsfw_book:time:{date_yyyy_mm_dd}:{t.strftime('%H:%M')}",
-                )
-            )
+    # two columns
+    for i in range(0, len(slice_slots), 2):
+        row: List[InlineKeyboardButton] = []
+        for s in slice_slots[i:i+2]:
+            is_blocked = s in blocked
+            emoji = "⛔" if is_blocked else "✅"
+            row.append(InlineKeyboardButton(f"{emoji} {_fmt_time_label(s)}", callback_data=f"nsfw_avail:toggle:{day_key}:{s}:p{slot_page}:w{week_page}"))
         rows.append(row)
 
+    # paging for more times
     nav: List[InlineKeyboardButton] = []
-    if offset > 0:
-        nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"nsfw_book:times:{date_yyyy_mm_dd}:{max(0, offset - per_page)}"))
-    if offset + per_page < len(starts):
-        nav.append(InlineKeyboardButton("More ➡", callback_data=f"nsfw_book:times:{date_yyyy_mm_dd}:{offset + per_page}"))
+    if start_idx > 0:
+        nav.append(InlineKeyboardButton("⬅️ Earlier", callback_data=f"nsfw_avail:day:{day_key}:p{slot_page-1}:w{week_page}"))
+    if end_idx < len(ALL_SLOTS):
+        nav.append(InlineKeyboardButton("More ➡️", callback_data=f"nsfw_avail:day:{day_key}:p{slot_page+1}:w{week_page}"))
     if nav:
         rows.append(nav)
 
-    rows.append([InlineKeyboardButton("⬅ Back to week", callback_data="nsfw_book:week:0")])
-    rows.append([InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")])
+    rows.append([
+        InlineKeyboardButton("⛔ Block all day", callback_data=f"nsfw_avail:blockall:{day_key}:w{week_page}"),
+        InlineKeyboardButton("🧹 Clear blocks", callback_data=f"nsfw_avail:clear:{day_key}:w{week_page}"),
+    ])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"nsfw_avail:week:{week_page}")])
 
     return InlineKeyboardMarkup(rows)
 
+def register(app: Client) -> None:
+    log.info("✅ handlers.nsfw_text_session_availability registered (rolling 7-day + slot toggles)")
 
-def _duration_keyboard(date_yyyy_mm_dd: str, hhmm: str) -> InlineKeyboardMarkup:
-    mins = [30, 60, 90, 120]
-    rows = []
-    for m in mins:
-        label = f"{m}m" if m < 60 else f"{m//60}h" if m % 60 == 0 else f"{m//60}h {m%60}m"
-        rows.append([InlineKeyboardButton(label, callback_data=f"nsfw_book:confirm:{date_yyyy_mm_dd}:{hhmm}:{m}")])
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:open$"))
+    async def nsfw_avail_open(_, cq: CallbackQuery):
+        await cq.answer()
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
+        text = _overview_text(page=0)
+        kb = _kb_week(page=0)
+        await _safe_edit(cq, text, kb)
 
-    rows.append([InlineKeyboardButton("⬅ Pick a different time", callback_data=f"nsfw_book:day:{date_yyyy_mm_dd}")])
-    rows.append([InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")])
-    return InlineKeyboardMarkup(rows)
-
-
-def _render_week_text(offset_weeks: int) -> str:
-    base = _today_la().date() + timedelta(days=offset_weeks * 7)
-    start = base
-    end = base + timedelta(days=6)
-    return (
-        "💗 <b>Book a private NSFW texting session</b>\n\n"
-        f"Pick a day (LA time):\n<b>{start.strftime('%b %d')}</b> — <b>{end.strftime('%b %d')}</b>"
-    )
-
-
-def _render_day_text(date_yyyy_mm_dd: str) -> str:
-    d = datetime.strptime(date_yyyy_mm_dd, "%Y-%m-%d").date()
-    day = _load_day(date_yyyy_mm_dd)
-
-    open_t, close_t, starts = _available_start_times(date_yyyy_mm_dd)
-    open_label = datetime(2000, 1, 1, open_t.hour, open_t.minute).strftime("%H:%M")
-    close_label = datetime(2000, 1, 1, close_t.hour, close_t.minute).strftime("%H:%M")
-
-    return (
-        f"🗓️ <b>{d.strftime('%A, %B %d')} (LA time)</b>\n"
-        f"Open: <b>{open_label}</b> · Close: <b>{close_label}</b>\n\n"
-        f"Available start times: <b>{len(starts)}</b>\n"
-        "Pick a start time:" 
-    )
-
-
-def _render_duration_text(date_yyyy_mm_dd: str, hhmm: str) -> str:
-    d = datetime.strptime(date_yyyy_mm_dd, "%Y-%m-%d").date()
-    label = datetime.strptime(hhmm, "%H:%M").strftime("%I:%M %p").lstrip("0")
-    return (
-        f"🗓️ <b>{d.strftime('%A, %B %d')}</b>\n"
-        f"Start: <b>{label}</b>\n\n"
-        "Choose a duration:" 
-    )
-
-
-def _is_admin(user_id: int) -> bool:
-    return user_id == OWNER_ID
-
-
-def register(app: Client):
-    @app.on_callback_query(filters.regex(r"^nsfw_book:"))
-    async def _on_cb(_, cq: CallbackQuery):
-        data = cq.data or ""
-
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:week:\d+$"))
+    async def nsfw_avail_week(_, cq: CallbackQuery):
+        await cq.answer()
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
         try:
-            if data == "nsfw_book:open" or data.startswith("nsfw_book:week:"):
-                off = 0
-                if data.startswith("nsfw_book:week:"):
-                    off = int(data.split(":")[-1])
-                await cq.message.edit_text(
-                    _render_week_text(off),
-                    reply_markup=_week_keyboard(off),
-                    disable_web_page_preview=True,
-                )
-                await cq.answer()
-                return
-
-            if data.startswith("nsfw_book:day:"):
-                date_yyyy_mm_dd = data.split(":", 2)[-1]
-                await cq.message.edit_text(
-                    _render_day_text(date_yyyy_mm_dd),
-                    reply_markup=_times_keyboard(date_yyyy_mm_dd, 0),
-                    disable_web_page_preview=True,
-                )
-                await cq.answer()
-                return
-
-            if data.startswith("nsfw_book:times:"):
-                _, _, date_yyyy_mm_dd, off_s = data.split(":", 3)
-                await cq.message.edit_reply_markup(reply_markup=_times_keyboard(date_yyyy_mm_dd, int(off_s)))
-                await cq.answer()
-                return
-
-            if data.startswith("nsfw_book:time:"):
-                _, _, date_yyyy_mm_dd, hhmm = data.split(":", 3)
-                await cq.message.edit_text(
-                    _render_duration_text(date_yyyy_mm_dd, hhmm),
-                    reply_markup=_duration_keyboard(date_yyyy_mm_dd, hhmm),
-                    disable_web_page_preview=True,
-                )
-                await cq.answer()
-                return
-
-            if data.startswith("nsfw_book:confirm:"):
-                _, _, date_yyyy_mm_dd, hhmm, mins_s = data.split(":", 4)
-                mins = int(mins_s)
-
-                # store request
-                req = {
-                    "user_id": cq.from_user.id,
-                    "user_name": cq.from_user.first_name,
-                    "username": cq.from_user.username,
-                    "date": date_yyyy_mm_dd,
-                    "time": hhmm,
-                    "duration_minutes": mins,
-                    "requested_at": datetime.utcnow().isoformat() + "Z",
-                }
-                pending = _jget(_key_pending(), [])
-                if not isinstance(pending, list):
-                    pending = []
-                pending.append(req)
-                _jset(_key_pending(), pending)
-
-                pretty_time = datetime.strptime(hhmm, "%H:%M").strftime("%I:%M %p").lstrip("0")
-                msg = (
-                    "📩 <b>New NSFW texting booking request</b>\n\n"
-                    f"From: <b>{cq.from_user.first_name}</b>"
-                )
-                if cq.from_user.username:
-                    msg += f" (@{cq.from_user.username})"
-                msg += (
-                    f"\nUser ID: <code>{cq.from_user.id}</code>\n"
-                    f"When (LA): <b>{date_yyyy_mm_dd}</b> at <b>{pretty_time}</b>\n"
-                    f"Duration: <b>{mins} minutes</b>\n\n"
-                    "Reply to the user directly if you want to confirm details."
-                )
-
-                try:
-                    await app.send_message(OWNER_ID, msg, disable_web_page_preview=True)
-                except Exception:
-                    log.exception("Failed to notify owner about booking request")
-
-                await cq.message.edit_text(
-                    "✅ Request sent!\n\nRoni will reach out to confirm availability and payment details.",
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")]]
-                    ),
-                    disable_web_page_preview=True,
-                )
-                await cq.answer("Sent!")
-                return
-
+            page = int(cq.data.split(":")[-1])
         except Exception:
-            log.exception("nsfw booking callback failed: %s", data)
-            try:
-                await cq.answer("Something went wrong", show_alert=True)
-            except Exception:
-                pass
+            page = 0
+        text = _overview_text(page=page)
+        kb = _kb_week(page=page)
+        await _safe_edit(cq, text, kb)
 
-    log.info("✅ nsfw_text_session_booking registered (availability-aware)")
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:day:\d{4}-\d{2}-\d{2}:p\d+:w\d+$"))
+    async def nsfw_avail_day(_, cq: CallbackQuery):
+        await cq.answer()
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
+        # nsfw_avail:day:YYYY-MM-DD:p0:w0
+        parts = cq.data.split(":")
+        day_key = parts[2]
+        slot_page = int(parts[3][1:])
+        week_page = int(parts[4][1:])
+        text = _day_text(day_key, slot_page, week_page)
+        kb = _kb_day(day_key, slot_page, week_page)
+        await _safe_edit(cq, text, kb)
+
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:toggle:\d{4}-\d{2}-\d{2}:\d{2}:\d{2}:p\d+:w\d+$"))
+    async def nsfw_avail_toggle(_, cq: CallbackQuery):
+        await cq.answer()
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
+        # nsfw_avail:toggle:YYYY-MM-DD:HH:MM:p0:w0
+        parts = cq.data.split(":")
+        day_key = parts[2]
+        hhmm = f"{parts[3]}:{parts[4]}"
+        slot_page = int(parts[5][1:])
+        week_page = int(parts[6][1:])
+
+        blocked = _load_blocked(day_key)
+        if hhmm in blocked:
+            blocked.remove(hhmm)
+        else:
+            blocked.add(hhmm)
+        _save_blocked(day_key, blocked)
+
+        text = _day_text(day_key, slot_page, week_page)
+        kb = _kb_day(day_key, slot_page, week_page)
+        await _safe_edit(cq, text, kb)
+
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:blockall:\d{4}-\d{2}-\d{2}:w\d+$"))
+    async def nsfw_avail_blockall(_, cq: CallbackQuery):
+        await cq.answer()
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
+        parts = cq.data.split(":")
+        day_key = parts[2]
+        week_page = int(parts[3][1:])
+        blocked = set(ALL_SLOTS)
+        _save_blocked(day_key, blocked)
+        text = _day_text(day_key, 0, week_page)
+        kb = _kb_day(day_key, 0, week_page)
+        await _safe_edit(cq, text, kb)
+
+    @app.on_callback_query(filters.regex(r"^nsfw_avail:clear:\d{4}-\d{2}-\d{2}:w\d+$"))
+    async def nsfw_avail_clear(_, cq: CallbackQuery):
+        await cq.answer()
+        if not _is_owner(cq.from_user.id):
+            await cq.answer("Only Roni can use this 💜", show_alert=True)
+            return
+        parts = cq.data.split(":")
+        day_key = parts[2]
+        week_page = int(parts[3][1:])
+        _save_blocked(day_key, set())
+        text = _day_text(day_key, 0, week_page)
+        kb = _kb_day(day_key, 0, week_page)
+        await _safe_edit(cq, text, kb)
