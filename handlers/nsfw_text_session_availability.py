@@ -1,18 +1,3 @@
-# handlers/nsfw_text_session_availability.py
-"""
-NSFW Text Session Availability (Roni) — rolling 7-day view + slot toggle blocking.
-
-Fixes:
-- Prevents "button does nothing" caused by Telegram MESSAGE_NOT_MODIFIED when editing the same text/markup.
-- Always answers callback queries (so Telegram UI stops spinning).
-- Shows ONLY future days: today .. today+6 (then Next week / Prev week).
-- Persists blocked time slots per-day in MongoDB if available, otherwise falls back to in-memory.
-- Works with roni_portal button callback_data: "nsfw_avail:open"
-
-Notes:
-- This module only handles AVAILABILITY UI + storage.
-- Booking module should read the same storage (blocked slots) to hide/deny times.
-"""
 
 from __future__ import annotations
 
@@ -169,7 +154,10 @@ def _kb_week(page: int) -> InlineKeyboardMarkup:
         nav_row.append(InlineKeyboardButton("⬅️ Prev week", callback_data=f"nsfw_avail:week:{page-1}"))
     nav_row.append(InlineKeyboardButton("Next week ➡️", callback_data=f"nsfw_avail:week:{page+1}"))
     rows.append(nav_row)
-    rows.append([InlineKeyboardButton("⬅️ Back to Roni Admin", callback_data="roni_portal:admin")])
+    # Return to the actual admin panel callback handled in handlers/roni_portal.py
+    # (roni_admin:open). Previously this pointed to a non-existent callback
+    # (roni_portal:admin) which made the button appear to "do nothing".
+    rows.append([InlineKeyboardButton("⬅️ Back to Roni Admin", callback_data="roni_admin:open")])
     return InlineKeyboardMarkup(rows)
 
 def _day_text(day_key: str, page: int, week_page: int) -> str:
