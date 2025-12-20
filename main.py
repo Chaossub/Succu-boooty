@@ -65,7 +65,6 @@ def _try_register(module_path: str, *, critical: bool = False):
                 raise RuntimeError(msg)
             log.warning(msg)
     except ModuleNotFoundError:
-        # Optional modules may not exist in this repo — don't crash the bot.
         log.warning("⚠️ Skipping missing module %s", mod_name)
         if critical:
             raise
@@ -94,7 +93,7 @@ def main():
     _try_register("contact_admins")
     _try_register("dm_admin")
 
-    # DM Ready tracking + NEW bridge into requirements_members.dm_ready
+    # DM Ready tracking + bridge
     _try_register("dm_ready", critical=True)
     _try_register("dmready_bridge", critical=True)
     _try_register("dm_ready_admin")
@@ -108,7 +107,7 @@ def main():
     _try_register("roni_portal", critical=True)
     _try_register("roni_portal_age", critical=True)
 
-    # ✅ NSFW booking + availability
+    # ✅ NSFW booking + availability (UPDATED)
     _try_register("nsfw_text_session_availability", critical=True)
     _try_register("nsfw_text_session_booking", critical=True)
 
@@ -127,30 +126,27 @@ def main():
     # Scheduler (if present)
     _try_register("schedulemsg")
 
-    # Flyers (optional; your repo doesn’t include these files right now)
+    # Flyers (optional)
     _try_register("flyer")
     _try_register("flyer_scheduler")
 
     # Requirements panel
     _try_register("requirements_panel", critical=True)
 
-    # ✅ NEW: Manual kick sweep handler (separate file so requirements_panel stays smaller)
-    _try_register("kick_requirements")
-
-    # Give schedulers the running loop (if those modules exist)
+    # Give schedulers the running loop (only if modules exist)
     try:
-        from handlers import flyer_scheduler as _fs
+        from handlers import flyer_scheduler as _fs  # type: ignore
         _fs.set_main_loop(app.loop)
         log.info("✅ Set main loop for flyer_scheduler")
     except Exception:
-        log.exception("Could not set main loop for flyer_scheduler")
+        log.info("flyer_scheduler not present or no set_main_loop() — skipping")
 
     try:
-        from handlers import schedulemsg as _sm
+        from handlers import schedulemsg as _sm  # type: ignore
         _sm.set_main_loop(app.loop)
         log.info("✅ Set main loop for schedulemsg")
     except Exception:
-        log.exception("Could not set main loop for schedulemsg")
+        log.info("schedulemsg missing set_main_loop() — skipping")
 
     app.run()
 
