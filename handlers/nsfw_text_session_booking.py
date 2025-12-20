@@ -1,48 +1,21 @@
-
-# handlers/nsfw_text_session_booking.py
-"""
-NSFW Text Session Booking (User-facing)
-
-- Shows rolling 7-day date picker (LA time) starting TODAY.
-- For chosen day, shows available start times as 30-min buttons
-  and REMOVES blocked slots from availability.
-- "Back to Roni Assistant" always returns to Roni assistant home panel.
-"""
-
-from __future__ import annotations
-
 import json
 import logging
-from datetime import datetime, date, timedelta
+import os
+from datetime import datetime, timedelta, time
 from typing import Dict, List, Optional, Tuple
 
 import pytz
 from pyrogram import Client, filters
-from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 from utils.menu_store import store
 
 log = logging.getLogger(__name__)
 
-OWNER_ID = int(__import__("os").environ.get("OWNER_ID", __import__("os").environ.get("BOT_OWNER_ID", "6964994611")))
+OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
+
 LA_TZ = pytz.timezone("America/Los_Angeles")
-
-DEFAULT_OPEN = "09:00"
-DEFAULT_CLOSE = "22:00"
 SLOT_MINUTES = 30
-SLOTS_PER_PAGE = 24
-
-
-def _today_la() -> date:
-    return datetime.now(LA_TZ).date()
-
-
-def _dstr(d: date) -> str:
-    return d.strftime("%Y-%m-%d")
-
-
-def _avail_key(owner_id: int, d: date) -> str:
-    return f"NSFW_AVAIL:{owner_id}:{_dstr(d)}"
 
 
 def _jget(key: str, default):
@@ -55,189 +28,310 @@ def _jget(key: str, default):
         return default
 
 
-def _parse_hhmm(s: str) -> datetime:
-    return datetime.strptime(s, "%H:%M")
+def _jset(key: str, obj) -> None:
+    try:
+        store.set_menu(key, json.dumps(obj))
+    except Exception:
+        log.exception("Failed saving %s", key)
 
 
-def _iter_slots(open_hhmm: str, close_hhmm: str) -> List[str]:
-    o = _parse_hhmm(open_hhmm)
-    c = _parse_hhmm(close_hhmm)
-    dt = datetime(2000, 1, 1, o.hour, o.minute)
-    end = datetime(2000, 1, 1, c.hour, c.minute)
-    out = []
-    while dt < end:
-        out.append(dt.strftime("%H:%M"))
-        dt += timedelta(minutes=SLOT_MINUTES)
+def _key_day(date_yyyy_mm_dd: str) -> str:
+    # must match nsfw_text_session_availability.py
+    return f"NSFW_AVAIL_DAY:{date_yyyy_mm_dd}"
+
+
+def _key_pending() -> str:
+    return "NSFW_BOOKING_REQUESTS"
+
+
+def _today_la() -> datetime:
+    return datetime.now(LA_TZ)
+
+
+def _fmt_day(d: datetime) -> str:
+    return d.strftime("%a %b %d")
+
+
+def _parse_hhmm(val: str) -> time:
+    h, m = val.split(":")
+    return time(int(h), int(m))
+
+
+def _time_range_slots(open_t: time, close_t: time) -> List[time]:
+    # slots represent START times
+    start = datetime(2000, 1, 1, open_t.hour, open_t.minute)
+    end = datetime(2000, 1, 1, close_t.hour, close_t.minute)
+    out: List[time] = []
+    cur = start
+    while cur < end:
+        out.append(cur.time())
+        cur += timedelta(minutes=SLOT_MINUTES)
     return out
 
 
-def _load_day(d: date) -> Dict:
-    key = _avail_key(OWNER_ID, d)
-    obj = _jget(key, None)
-    if not isinstance(obj, dict):
-        obj = {"open": DEFAULT_OPEN, "close": DEFAULT_CLOSE, "blocked": []}
-    obj.setdefault("open", DEFAULT_OPEN)
-    obj.setdefault("close", DEFAULT_CLOSE)
-    obj.setdefault("blocked", [])
-    if not isinstance(obj["blocked"], list):
-        obj["blocked"] = []
-    obj["blocked"] = sorted({str(x) for x in obj["blocked"]})
-    return obj
+def _is_slot_blocked(blocked: List[List[str]], slot_start: time, slot_end: time) -> bool:
+    """blocked windows are [["HH:MM","HH:MM"], ...]"""
+    ss = datetime(2000, 1, 1, slot_start.hour, slot_start.minute)
+    se = datetime(2000, 1, 1, slot_end.hour, slot_end.minute)
+    for b0, b1 in blocked:
+        bs = datetime(2000, 1, 1, _parse_hhmm(b0).hour, _parse_hhmm(b0).minute)
+        be = datetime(2000, 1, 1, _parse_hhmm(b1).hour, _parse_hhmm(b1).minute)
+        # overlap
+        if ss < be and se > bs:
+            return True
+    return False
 
 
-def _render_roni_assistant_home(cq_or_msg):
-    """
-    Return user to Roni assistant home panel.
-    We try to call handlers.roni_portal.render_home if it exists.
-    Otherwise we fall back to telling them to /start.
-    """
-    try:
-        from handlers import roni_portal as rp  # type: ignore
-        if hasattr(rp, "send_portal_home"):
-            return rp.send_portal_home(cq_or_msg)
-        if hasattr(rp, "show_portal"):
-            return rp.show_portal(cq_or_msg)
-        if hasattr(rp, "render_home"):
-            # expect (app, message/callback)
-            return rp.render_home  # caller will use
-    except Exception:
-        pass
-    return None
-
-
-def _week_panel(start: date) -> Tuple[str, InlineKeyboardMarkup]:
-    today = _today_la()
-    if start < today:
-        start = today
-    end = start + timedelta(days=6)
-
-    text = (
-        f"💗 <b>Book a private NSFW texting session</b>\n"
-        f"Pick a day (LA time):\n"
-        f"<b>{start.strftime('%b %d')}</b> — <b>{end.strftime('%b %d')}</b>"
+def _load_day(date_yyyy_mm_dd: str) -> Dict:
+    """Returns dict with open, close, blocked; provides defaults if empty."""
+    day = _jget(
+        _key_day(date_yyyy_mm_dd),
+        {
+            "open": "09:00",
+            "close": "22:00",
+            "blocked": [],
+        },
     )
+    if not isinstance(day, dict):
+        day = {"open": "09:00", "close": "22:00", "blocked": []}
+    day.setdefault("open", "09:00")
+    day.setdefault("close", "22:00")
+    day.setdefault("blocked", [])
+    return day
+
+
+def _available_start_times(date_yyyy_mm_dd: str) -> Tuple[time, time, List[time]]:
+    day = _load_day(date_yyyy_mm_dd)
+    open_t = _parse_hhmm(day["open"])
+    close_t = _parse_hhmm(day["close"])
+    blocked = day.get("blocked", []) or []
+
+    starts = []
+    for st in _time_range_slots(open_t, close_t):
+        en_dt = datetime(2000, 1, 1, st.hour, st.minute) + timedelta(minutes=SLOT_MINUTES)
+        en = en_dt.time()
+        if _is_slot_blocked(blocked, st, en):
+            continue
+        # also don't allow the very last slot if it would end after close
+        close_dt = datetime(2000, 1, 1, close_t.hour, close_t.minute)
+        if en_dt > close_dt:
+            continue
+        starts.append(st)
+
+    return open_t, close_t, starts
+
+
+def _week_keyboard(offset_weeks: int) -> InlineKeyboardMarkup:
+    base = _today_la().date() + timedelta(days=offset_weeks * 7)
+
+    rows = []
+    for i in range(7):
+        d = base + timedelta(days=i)
+        # never show past days
+        if d < _today_la().date():
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    _fmt_day(datetime.combine(d, time(0, 0)).replace(tzinfo=LA_TZ)),
+                    callback_data=f"nsfw_book:day:{d.isoformat()}",
+                )
+            ]
+        )
+
+    nav = []
+    if offset_weeks > 0:
+        nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"nsfw_book:week:{offset_weeks-1}"))
+    nav.append(InlineKeyboardButton("Next ➡", callback_data=f"nsfw_book:week:{offset_weeks+1}"))
+    rows.append(nav)
+
+    rows.append([InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _times_keyboard(date_yyyy_mm_dd: str, offset: int = 0) -> InlineKeyboardMarkup:
+    _, _, starts = _available_start_times(date_yyyy_mm_dd)
+
+    per_page = 12  # 6 rows x 2 cols
+    page = starts[offset : offset + per_page]
 
     rows: List[List[InlineKeyboardButton]] = []
-    cur = start
-    while cur <= end:
-        rows.append([InlineKeyboardButton(cur.strftime("%a %b %d"), callback_data=f"nsfw_bk:day:{_dstr(cur)}:0")])
-        cur += timedelta(days=1)
-
-    rows.append([
-        InlineKeyboardButton("Next ➡️", callback_data=f"nsfw_bk:week:{_dstr(start + timedelta(days=7))}"),
-    ])
-    rows.append([InlineKeyboardButton("⬅️ Back to Roni Assistant", callback_data="roni_portal:home")])
-    return text, InlineKeyboardMarkup(rows)
-
-
-def _day_panel(d: date, page: int = 0) -> Tuple[str, InlineKeyboardMarkup]:
-    obj = _load_day(d)
-    blocked = set(obj["blocked"])
-    all_slots = _iter_slots(obj["open"], obj["close"])
-    avail = [s for s in all_slots if s not in blocked]
-
-    text = (
-        f"🗓️ <b>{d.strftime('%A, %B %d')} (LA time)</b>\n"
-        f"Open: <b>{obj['open']}</b> · Close: <b>{obj['close']}</b>\n\n"
-        f"Available slots: <b>{len(avail)}</b>\n"
-        f"Pick a start time:"
-    )
-
-    page = max(0, page)
-    start_i = page * SLOTS_PER_PAGE
-    end_i = min(len(avail), start_i + SLOTS_PER_PAGE)
-    view = avail[start_i:end_i]
-
-    rows: List[List[InlineKeyboardButton]] = []
-    for i in range(0, len(view), 2):
+    for i in range(0, len(page), 2):
         row = []
-        for s in view[i:i+2]:
-            human = datetime.strptime(s, "%H:%M").strftime("%-I:%M %p")
-            row.append(InlineKeyboardButton(f"🕒 {human}", callback_data=f"nsfw_bk:slot:{_dstr(d)}:{s}"))
+        for t in page[i : i + 2]:
+            label = datetime(2000, 1, 1, t.hour, t.minute).strftime("%I:%M %p").lstrip("0")
+            row.append(
+                InlineKeyboardButton(
+                    f"🕒 {label}",
+                    callback_data=f"nsfw_book:time:{date_yyyy_mm_dd}:{t.strftime('%H:%M')}",
+                )
+            )
         rows.append(row)
 
-    pager: List[InlineKeyboardButton] = []
-    if start_i > 0:
-        pager.append(InlineKeyboardButton("⬅️ More", callback_data=f"nsfw_bk:day:{_dstr(d)}:{page-1}"))
-    if end_i < len(avail):
-        pager.append(InlineKeyboardButton("More ➡️", callback_data=f"nsfw_bk:day:{_dstr(d)}:{page+1}"))
-    if pager:
-        rows.append(pager)
+    nav: List[InlineKeyboardButton] = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton("⬅ Prev", callback_data=f"nsfw_book:times:{date_yyyy_mm_dd}:{max(0, offset - per_page)}"))
+    if offset + per_page < len(starts):
+        nav.append(InlineKeyboardButton("More ➡", callback_data=f"nsfw_book:times:{date_yyyy_mm_dd}:{offset + per_page}"))
+    if nav:
+        rows.append(nav)
 
-    rows.append([InlineKeyboardButton("⬅️ Back to week", callback_data=f"nsfw_bk:week:{_dstr(_today_la())}")])
-    rows.append([InlineKeyboardButton("⬅️ Back to Roni Assistant", callback_data="roni_portal:home")])
+    rows.append([InlineKeyboardButton("⬅ Back to week", callback_data="nsfw_book:week:0")])
+    rows.append([InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")])
 
-    return text, InlineKeyboardMarkup(rows)
-
-
-@Client.on_message(filters.command("book_nsfw") & filters.private)
-async def _cmd(app: Client, msg: Message):
-    text, kb = _week_panel(_today_la())
-    await msg.reply_text(text, reply_markup=kb, disable_web_page_preview=True)
+    return InlineKeyboardMarkup(rows)
 
 
-@Client.on_callback_query(filters.regex(r"^nsfw_bk:week:"))
-async def _cb_week(app: Client, cq: CallbackQuery):
-    _, _, dstr = cq.data.split(":", 2)
-    try:
-        start = datetime.strptime(dstr, "%Y-%m-%d").date()
-    except Exception:
-        start = _today_la()
-    text, kb = _week_panel(start)
-    await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
-    await cq.answer()
+def _duration_keyboard(date_yyyy_mm_dd: str, hhmm: str) -> InlineKeyboardMarkup:
+    mins = [30, 60, 90, 120]
+    rows = []
+    for m in mins:
+        label = f"{m}m" if m < 60 else f"{m//60}h" if m % 60 == 0 else f"{m//60}h {m%60}m"
+        rows.append([InlineKeyboardButton(label, callback_data=f"nsfw_book:confirm:{date_yyyy_mm_dd}:{hhmm}:{m}")])
+
+    rows.append([InlineKeyboardButton("⬅ Pick a different time", callback_data=f"nsfw_book:day:{date_yyyy_mm_dd}")])
+    rows.append([InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")])
+    return InlineKeyboardMarkup(rows)
 
 
-@Client.on_callback_query(filters.regex(r"^nsfw_bk:day:"))
-async def _cb_day(app: Client, cq: CallbackQuery):
-    parts = cq.data.split(":")
-    dstr = parts[2]
-    page = int(parts[3]) if len(parts) >= 4 else 0
-    d = datetime.strptime(dstr, "%Y-%m-%d").date()
-    text, kb = _day_panel(d, page=page)
-    await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
-    await cq.answer()
-
-
-@Client.on_callback_query(filters.regex(r"^nsfw_bk:slot:"))
-async def _cb_slot(app: Client, cq: CallbackQuery):
-    # nsfw_bk:slot:YYYY-MM-DD:HH:MM
-    _, _, dstr, hhmm = cq.data.split(":")
-    d = datetime.strptime(dstr, "%Y-%m-%d").date()
-    obj = _load_day(d)
-    blocked = set(obj["blocked"])
-    if hhmm in blocked:
-        return await cq.answer("That time is blocked.", show_alert=True)
-
-    # Here you'd normally proceed to booking confirmation / collecting duration/payment.
-    # For now we simply acknowledge and tell the user to DM.
-    human = datetime.strptime(hhmm, "%H:%M").strftime("%-I:%M %p")
-    await cq.answer()
-    await cq.message.edit_text(
-        f"✅ <b>Requested:</b> {d.strftime('%A, %B %d')} at <b>{human}</b> (LA time)\n\n"
-        f"Please DM Roni to confirm & complete booking. 💕",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬅️ Back to times", callback_data=f"nsfw_bk:day:{dstr}:0")],
-            [InlineKeyboardButton("⬅️ Back to Roni Assistant", callback_data="roni_portal:home")],
-        ]),
-        disable_web_page_preview=True,
+def _render_week_text(offset_weeks: int) -> str:
+    base = _today_la().date() + timedelta(days=offset_weeks * 7)
+    start = base
+    end = base + timedelta(days=6)
+    return (
+        "💗 <b>Book a private NSFW texting session</b>\n\n"
+        f"Pick a day (LA time):\n<b>{start.strftime('%b %d')}</b> — <b>{end.strftime('%b %d')}</b>"
     )
 
 
-# Back to Roni Assistant (works from anywhere)
-@Client.on_callback_query(filters.regex(r"^roni_portal:home$"))
-async def _cb_back_to_portal(app: Client, cq: CallbackQuery):
-    # Try to call into roni_portal to render home; otherwise fallback
-    try:
-        from handlers import roni_portal as rp  # type: ignore
-        if hasattr(rp, "send_portal_home"):
-            await rp.send_portal_home(app, cq.message, cq.from_user.id)
-            return await cq.answer()
-    except Exception:
-        pass
-    await cq.answer()
-    await cq.message.edit_text("⬅️ Use /start to return to the main menu.")
+def _render_day_text(date_yyyy_mm_dd: str) -> str:
+    d = datetime.strptime(date_yyyy_mm_dd, "%Y-%m-%d").date()
+    day = _load_day(date_yyyy_mm_dd)
+
+    open_t, close_t, starts = _available_start_times(date_yyyy_mm_dd)
+    open_label = datetime(2000, 1, 1, open_t.hour, open_t.minute).strftime("%H:%M")
+    close_label = datetime(2000, 1, 1, close_t.hour, close_t.minute).strftime("%H:%M")
+
+    return (
+        f"🗓️ <b>{d.strftime('%A, %B %d')} (LA time)</b>\n"
+        f"Open: <b>{open_label}</b> · Close: <b>{close_label}</b>\n\n"
+        f"Available start times: <b>{len(starts)}</b>\n"
+        "Pick a start time:" 
+    )
+
+
+def _render_duration_text(date_yyyy_mm_dd: str, hhmm: str) -> str:
+    d = datetime.strptime(date_yyyy_mm_dd, "%Y-%m-%d").date()
+    label = datetime.strptime(hhmm, "%H:%M").strftime("%I:%M %p").lstrip("0")
+    return (
+        f"🗓️ <b>{d.strftime('%A, %B %d')}</b>\n"
+        f"Start: <b>{label}</b>\n\n"
+        "Choose a duration:" 
+    )
+
+
+def _is_admin(user_id: int) -> bool:
+    return user_id == OWNER_ID
 
 
 def register(app: Client):
-    log.info("✅ nsfw_text_session_booking registered (respects blocked slots + back to portal)")
+    @app.on_callback_query(filters.regex(r"^nsfw_book:"))
+    async def _on_cb(_, cq: CallbackQuery):
+        data = cq.data or ""
+
+        try:
+            if data == "nsfw_book:open" or data.startswith("nsfw_book:week:"):
+                off = 0
+                if data.startswith("nsfw_book:week:"):
+                    off = int(data.split(":")[-1])
+                await cq.message.edit_text(
+                    _render_week_text(off),
+                    reply_markup=_week_keyboard(off),
+                    disable_web_page_preview=True,
+                )
+                await cq.answer()
+                return
+
+            if data.startswith("nsfw_book:day:"):
+                date_yyyy_mm_dd = data.split(":", 2)[-1]
+                await cq.message.edit_text(
+                    _render_day_text(date_yyyy_mm_dd),
+                    reply_markup=_times_keyboard(date_yyyy_mm_dd, 0),
+                    disable_web_page_preview=True,
+                )
+                await cq.answer()
+                return
+
+            if data.startswith("nsfw_book:times:"):
+                _, _, date_yyyy_mm_dd, off_s = data.split(":", 3)
+                await cq.message.edit_reply_markup(reply_markup=_times_keyboard(date_yyyy_mm_dd, int(off_s)))
+                await cq.answer()
+                return
+
+            if data.startswith("nsfw_book:time:"):
+                _, _, date_yyyy_mm_dd, hhmm = data.split(":", 3)
+                await cq.message.edit_text(
+                    _render_duration_text(date_yyyy_mm_dd, hhmm),
+                    reply_markup=_duration_keyboard(date_yyyy_mm_dd, hhmm),
+                    disable_web_page_preview=True,
+                )
+                await cq.answer()
+                return
+
+            if data.startswith("nsfw_book:confirm:"):
+                _, _, date_yyyy_mm_dd, hhmm, mins_s = data.split(":", 4)
+                mins = int(mins_s)
+
+                # store request
+                req = {
+                    "user_id": cq.from_user.id,
+                    "user_name": cq.from_user.first_name,
+                    "username": cq.from_user.username,
+                    "date": date_yyyy_mm_dd,
+                    "time": hhmm,
+                    "duration_minutes": mins,
+                    "requested_at": datetime.utcnow().isoformat() + "Z",
+                }
+                pending = _jget(_key_pending(), [])
+                if not isinstance(pending, list):
+                    pending = []
+                pending.append(req)
+                _jset(_key_pending(), pending)
+
+                pretty_time = datetime.strptime(hhmm, "%H:%M").strftime("%I:%M %p").lstrip("0")
+                msg = (
+                    "📩 <b>New NSFW texting booking request</b>\n\n"
+                    f"From: <b>{cq.from_user.first_name}</b>"
+                )
+                if cq.from_user.username:
+                    msg += f" (@{cq.from_user.username})"
+                msg += (
+                    f"\nUser ID: <code>{cq.from_user.id}</code>\n"
+                    f"When (LA): <b>{date_yyyy_mm_dd}</b> at <b>{pretty_time}</b>\n"
+                    f"Duration: <b>{mins} minutes</b>\n\n"
+                    "Reply to the user directly if you want to confirm details."
+                )
+
+                try:
+                    await app.send_message(OWNER_ID, msg, disable_web_page_preview=True)
+                except Exception:
+                    log.exception("Failed to notify owner about booking request")
+
+                await cq.message.edit_text(
+                    "✅ Request sent!\n\nRoni will reach out to confirm availability and payment details.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("⬅ Back to Roni Assistant", callback_data="roni_portal:home")]]
+                    ),
+                    disable_web_page_preview=True,
+                )
+                await cq.answer("Sent!")
+                return
+
+        except Exception:
+            log.exception("nsfw booking callback failed: %s", data)
+            try:
+                await cq.answer("Something went wrong", show_alert=True)
+            except Exception:
+                pass
+
+    log.info("✅ nsfw_text_session_booking registered (availability-aware)")
