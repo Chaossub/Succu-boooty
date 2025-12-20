@@ -281,6 +281,9 @@ def _admin_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("⚠️ Send Final Warnings", callback_data="reqpanel:final_warnings"),
             ],
             [
+                InlineKeyboardButton("🧹 Kick Behind (Manual)", callback_data="kickreq:menu"),
+            ],
+            [
                 InlineKeyboardButton("⬅ Back to Requirements Menu", callback_data="reqpanel:home"),
             ],
         ]
