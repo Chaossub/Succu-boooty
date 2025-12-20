@@ -49,10 +49,7 @@ app = Client(
 
 
 def _try_register(module_path: str, *, critical: bool = False):
-    """
-    Imports handlers.<module_path> and calls register(app).
-    If critical=True, crash on failure so we don't silently lose UI.
-    """
+    """Imports handlers.<module_path> and calls register(app)."""
     mod_name = f"handlers.{module_path}"
     try:
         mod = __import__(mod_name, fromlist=["register"])
@@ -93,7 +90,7 @@ def main():
     _try_register("contact_admins")
     _try_register("dm_admin")
 
-    # DM Ready tracking + bridge
+    # DM Ready tracking
     _try_register("dm_ready", critical=True)
     _try_register("dmready_bridge", critical=True)
     _try_register("dm_ready_admin")
@@ -107,7 +104,7 @@ def main():
     _try_register("roni_portal", critical=True)
     _try_register("roni_portal_age", critical=True)
 
-    # ✅ NSFW booking + availability (UPDATED)
+    # ✅ NSFW booking + availability
     _try_register("nsfw_text_session_availability", critical=True)
     _try_register("nsfw_text_session_booking", critical=True)
 
@@ -130,23 +127,24 @@ def main():
     _try_register("flyer")
     _try_register("flyer_scheduler")
 
-    # Requirements panel
+    # Requirements panel + manual kick helper
     _try_register("requirements_panel", critical=True)
+    _try_register("kick_requirements", critical=True)
 
-    # Give schedulers the running loop (only if modules exist)
+    # Give schedulers the running loop (if those modules exist)
     try:
-        from handlers import flyer_scheduler as _fs  # type: ignore
+        from handlers import flyer_scheduler as _fs
         _fs.set_main_loop(app.loop)
         log.info("✅ Set main loop for flyer_scheduler")
     except Exception:
-        log.info("flyer_scheduler not present or no set_main_loop() — skipping")
+        log.exception("Could not set main loop for flyer_scheduler")
 
     try:
-        from handlers import schedulemsg as _sm  # type: ignore
+        from handlers import schedulemsg as _sm
         _sm.set_main_loop(app.loop)
         log.info("✅ Set main loop for schedulemsg")
     except Exception:
-        log.info("schedulemsg missing set_main_loop() — skipping")
+        log.exception("Could not set main loop for schedulemsg")
 
     app.run()
 
