@@ -1,3 +1,18 @@
+# handlers/nsfw_text_session_availability.py
+"""
+NSFW Text Session Availability (Roni) — rolling 7-day view + slot toggle blocking.
+
+Fixes:
+- Prevents "button does nothing" caused by Telegram MESSAGE_NOT_MODIFIED when editing the same text/markup.
+- Always answers callback queries (so Telegram UI stops spinning).
+- Shows ONLY future days: today .. today+6 (then Next week / Prev week).
+- Persists blocked time slots per-day in MongoDB if available, otherwise falls back to in-memory.
+- Works with roni_portal button callback_data: "nsfw_avail:open"
+
+Notes:
+- This module only handles AVAILABILITY UI + storage.
+- Booking module should read the same storage (blocked slots) to hide/deny times.
+"""
 
 from __future__ import annotations
 
@@ -28,7 +43,7 @@ SLOT_MINUTES = 30
 
 # Default working hours for the grid (9:00 AM – 5:30 PM shown on first page; "More" for later)
 DAY_START_HOUR = int(os.getenv("NSFW_DAY_START_HOUR", "9"))   # inclusive
-DAY_END_HOUR = int(os.getenv("NSFW_DAY_END_HOUR", "18"))      # exclusive (18 = 6PM)
+DAY_END_HOUR = int(os.getenv("NSFW_DAY_END_HOUR", "22"))  # end hour (LA time), default 22:00
 # How many slots to show per page in the "toggle grid"
 SLOTS_PER_PAGE = 16  # 8 rows of 2 buttons = 16 slots
 
@@ -154,9 +169,6 @@ def _kb_week(page: int) -> InlineKeyboardMarkup:
         nav_row.append(InlineKeyboardButton("⬅️ Prev week", callback_data=f"nsfw_avail:week:{page-1}"))
     nav_row.append(InlineKeyboardButton("Next week ➡️", callback_data=f"nsfw_avail:week:{page+1}"))
     rows.append(nav_row)
-    # Return to the actual admin panel callback handled in handlers/roni_portal.py
-    # (roni_admin:open). Previously this pointed to a non-existent callback
-    # (roni_portal:admin) which made the button appear to "do nothing".
     rows.append([InlineKeyboardButton("⬅️ Back to Roni Admin", callback_data="roni_admin:open")])
     return InlineKeyboardMarkup(rows)
 
