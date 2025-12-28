@@ -1,5 +1,3 @@
-# handlers/requirements_panel.py
-
 import os
 import logging
 import random
@@ -1255,124 +1253,230 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
 # ────────────── Reminder sweeps ──────────────
 
-    @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
-    async def reqpanel_reminders_cb(client: Client, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can send reminders.", show_alert=True)
+    
+
+    # ────────────── Reminder / Final-warning DM picker (buttons only) ──────────────
+    def _pick_key(action: str, admin_id: int) -> str:
+        return f"pick:{action}:{admin_id}"
+
+    def _compute_targets(action: str):
+        # action: "reminder" or "final"
+        docs = list(members_coll.find({}))
+        targets = []
+        for raw in docs:
+            md = _member_doc(raw)
+            if md.get("exempt"):
+                continue
+            if md.get("manual_spend", 0) >= REQUIRED_MIN_SPEND:
+                continue
+            # for reminders: only "behind" (not met) — same as above
+            targets.append(md)
+        # sort by spend asc then name
+        targets.sort(key=lambda m: (m.get("manual_spend", 0), (m.get("name") or "").lower()))
+        return targets
+
+    def _render_pick(action: str, admin_id: int, *, page: int = 0):
+        st = _load_state(admin_id)
+        key = _pick_key(action, admin_id)
+        pstate = st.get(key) or {}
+        targets = pstate.get("targets") or _compute_targets(action)
+        selected = set(pstate.get("selected") or [])
+        per_page = 10
+        max_page = max(0, (len(targets) - 1) // per_page) if targets else 0
+        page = max(0, min(page, max_page))
+
+        pstate["targets"] = targets
+        pstate["selected"] = list(selected)
+        pstate["page"] = page
+        st[key] = pstate
+        _save_state(admin_id, st)
+
+        title = "💌 Send Reminders (Behind Only)" if action == "reminder" else "⚠️ Send Final Warnings (Not Met)"
+        lines = [
+            f"<b>{title}</b>",
+            f"Minimum required: <b>${REQUIRED_MIN_SPEND:.2f}</b>",
+            "",
+        ]
+        if not targets:
+            lines.append("✅ Nobody is behind right now.")
+        else:
+            lines.append(f"Behind members: <b>{len(targets)}</b>")
+            lines.append(f"Selected: <b>{len(selected)}</b>")
+            lines.append("")
+            lines.append("Tap members to toggle selection. Then choose <b>Send Selected</b> or <b>Send All</b>.")
+
+        kb_rows = []
+
+        # member buttons
+        start = page * per_page
+        end = start + per_page
+        for md in targets[start:end]:
+            uid = md["user_id"]
+            on = "✅" if uid in selected else "⬜️"
+            label = f"{on} {_fmt_user(md)} — ${md.get('manual_spend', 0):.2f}"
+            kb_rows.append([InlineKeyboardButton(label, callback_data=f"reqpick:{action}:toggle:{uid}")])
+
+        # paging
+        if targets and max_page > 0:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"reqpick:{action}:page:{page-1}"))
+            nav.append(InlineKeyboardButton(f"Page {page+1}/{max_page+1}", callback_data="reqpick:noop"))
+            if page < max_page:
+                nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"reqpick:{action}:page:{page+1}"))
+            kb_rows.append(nav)
+
+        # actions
+        kb_rows.append([
+            InlineKeyboardButton("✅ Send Selected", callback_data=f"reqpick:{action}:send_selected"),
+            InlineKeyboardButton("📣 Send All", callback_data=f"reqpick:{action}:send_all"),
+        ])
+        kb_rows.append([InlineKeyboardButton("⬅️ Back to Requirements Menu", callback_data="reqpanel:admin")])
+
+        return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
+
+    async def _send_dms_for_action(app: Client, cq: CallbackQuery, *, action: str, only_selected: bool):
+        admin_id = cq.from_user.id
+        st = _load_state(admin_id)
+        key = _pick_key(action, admin_id)
+        pstate = st.get(key) or {}
+        targets = pstate.get("targets") or _compute_targets(action)
+        selected = set(pstate.get("selected") or [])
+
+        if not targets:
+            await cq.answer("Nobody is behind right now.", show_alert=True)
             return
 
-        docs = members_coll.find(
-            {
-                "is_exempt": {"$ne": True},
-                "manual_spend": {"$lt": REQUIRED_MIN_SPEND},
-                "reminder_sent": {"$ne": True},
-            }
-        )
+        if only_selected:
+            send_list = [m for m in targets if m["user_id"] in selected]
+            if not send_list:
+                await cq.answer("Select at least one member first.", show_alert=True)
+                return
+        else:
+            send_list = targets
 
-        sent_list: List[str] = []
-        failed_list: List[str] = []
-        skipped = 0
+        # quick progress note
+        await cq.answer("Sending…", show_alert=False)
 
-        for d in docs:
-            uid = d.get("user_id")
-            if not uid:
-                continue
+        ok = []
+        fail = []
+        for md in send_list:
+            uid = md["user_id"]
+            if action == "reminder":
+                msg = random.choice(REMINDER_MSGS)
+                flag_field = "reminder_sent"
+            else:
+                msg = random.choice(FINAL_WARNING_MSGS)
+                flag_field = "final_warning_sent"
 
-            if uid == OWNER_ID or uid in MODELS:
-                skipped += 1
-                continue
+            sent, reason = await _try_send_dm(app, uid, msg)
+            if sent:
+                ok.append(md)
+                members_coll.update_one({"_id": md["_id"]}, {"$set": {flag_field: True}})
+            else:
+                fail.append((md, reason))
 
-            name = d.get("first_name") or "there"
-            msg = random.choice(REMINDER_MSGS).format(name=name)
+        # summary to admin chat
+        title = "Reminders" if action == "reminder" else "Final Warnings"
+        summary_lines = [
+            f"<b>{title} sent</b>",
+            f"✅ Success: <b>{len(ok)}</b>",
+            f"❌ Failed: <b>{len(fail)}</b>",
+        ]
+        if ok:
+            summary_lines.append("")
+            summary_lines.append("<b>Sent to:</b>")
+            summary_lines += [f"• {_fmt_user(m)}" for m in ok[:50]]
+            if len(ok) > 50:
+                summary_lines.append(f"…and {len(ok)-50} more")
+        if fail:
+            summary_lines.append("")
+            summary_lines.append("<b>Failed:</b>")
+            for m, r in fail[:50]:
+                summary_lines.append(f"• {_fmt_user(m)} — <code>{_escape(r)}</code>")
+            if len(fail) > 50:
+                summary_lines.append(f"…and {len(fail)-50} more")
 
-            try:
-                sent = await _safe_send(client, uid, msg)
-                if not sent:
-                    failed_list.append(f"• {_fmt_user(d)} <i>(send failed)</i>")
-                    continue
+        await cq.message.reply_text("\n".join(summary_lines), disable_web_page_preview=True)
 
-                members_coll.update_one(
-                    {"user_id": uid},
-                    {"$set": {"reminder_sent": True, "last_updated": datetime.now(timezone.utc)}},
-                )
-                sent_list.append(f"• {_fmt_user(d)}")
-            except Exception as e:
-                failed_list.append(f"• {_fmt_user(d)} <i>({e.__class__.__name__})</i>")
+        # detailed log to log group (if configured)
+        try:
+            await _log_to_group(app, "\n".join([
+                f"[Requirements] {title} run by {admin_id}",
+                f"Success={len(ok)} Failed={len(fail)}",
+                "Sent: " + ", ".join([str(m['user_id']) for m in ok]) if ok else "Sent: (none)",
+                "Failed: " + ", ".join([f"{m['user_id']}({r})" for m, r in fail]) if fail else "Failed: (none)",
+            ]))
+        except Exception:
+            pass
 
-        count = len(sent_list)
-        fail_count = len(failed_list)
+        # keep picker open and refreshed
+        new_text, new_kb = _render_pick(action, admin_id, page=int(pstate.get("page") or 0))
+        await cq.message.edit_text(new_text, reply_markup=new_kb, disable_web_page_preview=True)
 
-        await _log_event(client, f"Reminder sweep sent to {count} members by {user_id} (failed={fail_count}, skipped={skipped})")
-        await _log_long(client, "💌 <b>Reminder sweep — sent to</b>", sent_list)
-        if failed_list:
-            await _log_long(client, "❌ <b>Reminder sweep — failed</b>", failed_list)
-
-        await cq.answer(f"Sent={count} Failed={fail_count}", show_alert=True)
-        await _safe_edit_text(
-            cq.message,
-            text=f"💌 Reminder sweep complete.\n✅ Sent: {count}\n❌ Failed: {fail_count}",
-            reply_markup=_admin_kb(),
-            disable_web_page_preview=True,
-        )
+    @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
+    async def reqpanel_reminders(app: Client, cq: CallbackQuery):
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        admin_id = cq.from_user.id
+        text, kb = _render_pick("reminder", admin_id, page=0)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex("^reqpanel:final_warnings$"))
-    async def reqpanel_final_warnings_cb(client: Client, cq: CallbackQuery):
-        user_id = cq.from_user.id
-        if not _is_admin_or_model(user_id):
-            await cq.answer("Only Roni and models can send final warnings.", show_alert=True)
+    async def reqpanel_final_warnings(app: Client, cq: CallbackQuery):
+        if not await _must_be_owner_or_model_admin(app, cq):
             return
+        admin_id = cq.from_user.id
+        text, kb = _render_pick("final", admin_id, page=0)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
 
-        docs = members_coll.find(
-            {
-                "is_exempt": {"$ne": True},
-                "manual_spend": {"$lt": REQUIRED_MIN_SPEND},
-                "final_warning_sent": {"$ne": True},
-            }
-        )
+    @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):toggle:(\d+)$"))
+    async def reqpick_toggle(app: Client, cq: CallbackQuery):
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        action, uid_s = cq.data.split(":")[1], cq.data.split(":")[3]
+        admin_id = cq.from_user.id
+        st = _load_state(admin_id)
+        key = _pick_key(action, admin_id)
+        pstate = st.get(key) or {}
+        selected = set(pstate.get("selected") or [])
+        uid = int(uid_s)
+        if uid in selected:
+            selected.remove(uid)
+        else:
+            selected.add(uid)
+        pstate["selected"] = list(selected)
+        st[key] = pstate
+        _save_state(admin_id, st)
 
-        sent_list: List[str] = []
-        failed_list: List[str] = []
-        skipped = 0
+        text2, kb2 = _render_pick(action, admin_id, page=int(pstate.get("page") or 0))
+        await cq.message.edit_text(text2, reply_markup=kb2, disable_web_page_preview=True)
 
-        for d in docs:
-            uid = d.get("user_id")
-            if not uid:
-                continue
+    @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):page:(\d+)$"))
+    async def reqpick_page(app: Client, cq: CallbackQuery):
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        action = cq.data.split(":")[1]
+        page = int(cq.data.split(":")[3])
+        admin_id = cq.from_user.id
+        text2, kb2 = _render_pick(action, admin_id, page=page)
+        await cq.message.edit_text(text2, reply_markup=kb2, disable_web_page_preview=True)
 
-            if uid == OWNER_ID or uid in MODELS:
-                skipped += 1
-                continue
+    @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_selected$"))
+    async def reqpick_send_selected(app: Client, cq: CallbackQuery):
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        action = cq.data.split(":")[1]
+        await _send_dms_for_action(app, cq, action=action, only_selected=True)
 
-            name = d.get("first_name") or "there"
-            msg = random.choice(FINAL_WARNING_MSGS).format(name=name)
+    @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_all$"))
+    async def reqpick_send_all(app: Client, cq: CallbackQuery):
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        action = cq.data.split(":")[1]
+        await _send_dms_for_action(app, cq, action=action, only_selected=False)
 
-            try:
-                sent = await _safe_send(client, uid, msg)
-                if not sent:
-                    failed_list.append(f"• {_fmt_user(d)} <i>(send failed)</i>")
-                    continue
+    @app.on_callback_query(filters.regex("^reqpick:noop$"))
+    async def reqpick_noop(app: Client, cq: CallbackQuery):
+        await cq.answer()
 
-                members_coll.update_one(
-                    {"user_id": uid},
-                    {"$set": {"final_warning_sent": True, "last_updated": datetime.now(timezone.utc)}},
-                )
-                sent_list.append(f"• {_fmt_user(d)}")
-            except Exception as e:
-                failed_list.append(f"• {_fmt_user(d)} <i>({e.__class__.__name__})</i>")
-
-        count = len(sent_list)
-        fail_count = len(failed_list)
-
-        await _log_event(client, f"Final warnings sent to {count} members by {user_id} (failed={fail_count}, skipped={skipped})")
-        await _log_long(client, "⚠️ <b>Final warning sweep — sent to</b>", sent_list)
-        if failed_list:
-            await _log_long(client, "❌ <b>Final warning sweep — failed</b>", failed_list)
-
-        await cq.answer(f"Sent={count} Failed={fail_count}", show_alert=True)
-        await _safe_edit_text(
-            cq.message,
-            text=f"⚠️ Final-warning sweep complete.\n✅ Sent: {count}\n❌ Failed: {fail_count}",
-            reply_markup=_admin_kb(),
-            disable_web_page_preview=True,
-        )
