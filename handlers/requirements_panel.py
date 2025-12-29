@@ -78,7 +78,7 @@ else:
     ]
 
 LOG_GROUP_ID: Optional[int] = None
-for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL"):
+for key in ("SANCTU_LOG_GROUP_ID", "SANCTUARY_LOG_CHANNEL", "LOG_GROUP_ID"):
     if os.getenv(key):
         try:
             LOG_GROUP_ID = int(os.getenv(key))
@@ -210,6 +210,39 @@ def _display_name_for_doc(d: Dict[str, Any]) -> str:
     if username:
         return f"@{username}"
     return "Unknown"
+
+
+def _escape(s: str) -> str:
+    return str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+def _load_state(admin_id: int) -> Dict[str, Any]:
+    return STATE.get(admin_id, {})
+
+def _save_state(admin_id: int, data: Dict[str, Any]) -> None:
+    STATE[admin_id] = data
+
+async def _must_be_owner_or_model_admin(_: Client, cq: CallbackQuery) -> bool:
+    uid = cq.from_user.id
+    if not _is_admin_or_model(uid):
+        await cq.answer("Admins only 💜", show_alert=True)
+        return False
+    return True
+
+async def _try_send_dm(app: Client, user_id: int, template: str) -> Tuple[bool, str]:
+    try:
+        doc = _member_doc(user_id)
+        name = (doc.get("first_name") or doc.get("username") or "there").strip() or "there"
+        text = template.format(name=name)
+        await app.send_message(user_id, text, disable_web_page_preview=True)
+        return True, "ok"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+async def _log_to_group(app: Client, text: str) -> None:
+    if LOG_GROUP_ID is None:
+        return
+    await _safe_send(app, LOG_GROUP_ID, text)
+
 
 # ────────────── DM text templates ──────────────
 
@@ -1224,57 +1257,25 @@ def register(app: Client):
                 disable_web_page_preview=True,
             )
 
-def _fmt_user(d: Dict[str, Any]) -> str:
-    name = (d.get("first_name") or "Unknown").strip()
-    username = (d.get("username") or "").strip()
-    uid = d.get("user_id")
-    if username:
-        return f"{name} (@{username}) — <code>{uid}</code>"
-    return f"{name} — <code>{uid}</code>"
-
-async def _log_long(app: Client, title: str, lines: List[str]):
-    """Send a detailed list to the log group. Falls back to a .txt when too long."""
-    if LOG_GROUP_ID is None:
-        return
-    body = "\n".join(lines) if lines else "(none)"
-    text = f"[Requirements] {title}\n{body}"
-
-    # Telegram message limit ~4096; keep margin
-    if len(text) <= 3500:
-        await _safe_send(app, LOG_GROUP_ID, text)
-        return
-
-    plain = re.sub(r"<.*?>", "", text)
-    buf = io.BytesIO(plain.encode("utf-8"))
-    buf.name = "requirements_sweep.txt"
-    try:
-        await app.send_document(LOG_GROUP_ID, document=buf, caption=re.sub(r"<.*?>", "", f"[Requirements] {title}"))
-    except Exception:
-        await _safe_send(app, LOG_GROUP_ID, text[:3400] + "\n…(truncated)")
-
-
-# ────────────── Reminder sweeps ──────────────
-
-    
-
     # ────────────── Reminder / Final-warning DM picker (buttons only) ──────────────
     def _pick_key(action: str, admin_id: int) -> str:
         return f"pick:{action}:{admin_id}"
 
-    def _compute_targets(action: str):
+    def _compute_targets(action: str) -> List[Dict[str, Any]]:
         # action: "reminder" or "final"
         docs = list(members_coll.find({}))
-        targets = []
+        targets: List[Dict[str, Any]] = []
         for raw in docs:
-            md = _member_doc(raw)
-            if md.get("exempt"):
+            uid = raw.get("user_id")
+            if not uid:
                 continue
-            if md.get("manual_spend", 0) >= REQUIRED_MIN_SPEND:
+            md = _member_doc(int(uid))
+            if md.get("is_exempt"):
                 continue
-            # for reminders: only "behind" (not met) — same as above
+            if float(md.get("manual_spend", 0.0)) >= REQUIRED_MIN_SPEND:
+                continue
             targets.append(md)
-        # sort by spend asc then name
-        targets.sort(key=lambda m: (m.get("manual_spend", 0), (m.get("name") or "").lower()))
+        targets.sort(key=lambda m: (float(m.get("manual_spend", 0.0)), (m.get("first_name") or "").lower()))
         return targets
 
     def _render_pick(action: str, admin_id: int, *, page: int = 0):
@@ -1374,7 +1375,7 @@ async def _log_long(app: Client, title: str, lines: List[str]):
             sent, reason = await _try_send_dm(app, uid, msg)
             if sent:
                 ok.append(md)
-                members_coll.update_one({"_id": md["_id"]}, {"$set": {flag_field: True}})
+                members_coll.update_one({"user_id": uid}, {"$set": {flag_field: True}}, upsert=True)
             else:
                 fail.append((md, reason))
 
@@ -1481,4 +1482,38 @@ async def _log_long(app: Client, title: str, lines: List[str]):
     @app.on_callback_query(filters.regex("^reqpick:noop$"))
     async def reqpick_noop(app: Client, cq: CallbackQuery):
         await cq.answer()
+
+
+def _fmt_user(d: Dict[str, Any]) -> str:
+    name = (d.get("first_name") or "Unknown").strip()
+    username = (d.get("username") or "").strip()
+    uid = d.get("user_id")
+    if username:
+        return f"{name} (@{username}) — <code>{uid}</code>"
+    return f"{name} — <code>{uid}</code>"
+
+async def _log_long(app: Client, title: str, lines: List[str]):
+    """Send a detailed list to the log group. Falls back to a .txt when too long."""
+    if LOG_GROUP_ID is None:
+        return
+    body = "\n".join(lines) if lines else "(none)"
+    text = f"[Requirements] {title}\n{body}"
+
+    # Telegram message limit ~4096; keep margin
+    if len(text) <= 3500:
+        await _safe_send(app, LOG_GROUP_ID, text)
+        return
+
+    plain = re.sub(r"<.*?>", "", text)
+    buf = io.BytesIO(plain.encode("utf-8"))
+    buf.name = "requirements_sweep.txt"
+    try:
+        await app.send_document(LOG_GROUP_ID, document=buf, caption=re.sub(r"<.*?>", "", f"[Requirements] {title}"))
+    except Exception:
+        await _safe_send(app, LOG_GROUP_ID, text[:3400] + "\n…(truncated)")
+
+
+# ────────────── Reminder sweeps ──────────────
+
+    
 
