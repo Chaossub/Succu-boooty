@@ -51,7 +51,7 @@ MODEL_NAME_MAP: Dict[str, str] = {
     "savy": SAVY_NAME,
 }
 
-def _parse_id_list(val: str | None) -> Set[int]:
+def _parse_id_list(val: Optional[str]) -> Set[int]:
     if not val:
         return set()
     out: Set[int] = set()
