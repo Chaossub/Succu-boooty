@@ -79,6 +79,7 @@ def main():
     # Register EVERYTHING non-fatally (prevents Render restart-loop)
     _try_register("health")
     _try_register("panels")
+    _try_register("models_elsewhere")
 
     # Warmup /hi
     _try_register("hi")
