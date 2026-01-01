@@ -582,7 +582,14 @@ def register(app: Client):
 
         docs = list(members_coll.find(in_group_filter).sort("user_id", ASCENDING).limit(50))
         if not docs:
-            text = "<b>Member Status List</b>\n\nNo current members found. Try running a scan again."
+            last_scan = snap.get("last_scan") if snap else None
+            errs = (snap.get("errors") or []) if snap else []
+            text = "<b>Member Status List</b>\n\nNo current members found.\n"
+            if last_scan:
+                text += f"Last scan: {last_scan}\n"
+            text += "Try running Scan Group Members again.\n"
+            if errs:
+                text += "\nErrors from last scan:\n" + "\n".join([f"• {e}" for e in errs])
         else:
             out = ["<b>Member Status List (current members, first 50)</b>\n"]
             for d in docs:
@@ -1046,6 +1053,8 @@ def register(app: Client):
 
         now = datetime.now(timezone.utc)
 
+        errors: List[str] = []
+
         # Mark everyone we previously knew about in these groups as "not currently in group".
         # Then flip to True as we find current members during the scan.
         for gid in SANCTUARY_GROUP_IDS:
@@ -1087,12 +1096,13 @@ def register(app: Client):
                     total_in_group += 1
             except Exception as e:
                 log.warning("requirements_panel: failed scanning group %s: %s", gid, e)
+                errors.append(f"{gid}: {e}")
 
         # Record that a scan snapshot exists (used by list/reminder tools).
         try:
             meta_coll.update_one(
                 {"_id": "requirements_scan_snapshot"},
-                {"$set": {"last_scan": now, "groups": SANCTUARY_GROUP_IDS, "count": total_in_group}},
+                {"$set": {"last_scan": now, "groups": SANCTUARY_GROUP_IDS, "count": total_in_group, "errors": errors[:10]}},
                 upsert=True,
             )
         except Exception as e:
@@ -1102,7 +1112,8 @@ def register(app: Client):
         await cq.answer("Scan complete.", show_alert=False)
         await _safe_edit_text(
             cq.message,
-            text=(f"✅ Scan complete.\nIndexed or updated {total_indexed} members from Sanctuary group(s)."),
+            text=(f"✅ Scan complete.\nIndexed/updated: {total_indexed}\nMembers found: {total_in_group}"
+                  + (f"\n\n⚠️ Scan returned 0 members.\nMost common causes:\n• Wrong group ID in SANCTUARY_GROUP_IDS/SUCCUBUS_SANCTUARY\n• Bot isn’t in that group\n• Bot isn’t admin / can’t access member list\n\nErrors:\n" + "\n".join(errors[:5]) if total_in_group == 0 else "")),
             reply_markup=_admin_kb(),
             disable_web_page_preview=True,
         )
@@ -1551,7 +1562,5 @@ async def _log_long(app: Client, title: str, lines: List[str]):
     @app.on_callback_query(filters.regex("^reqpick:noop$"))
     async def reqpick_noop(app: Client, cq: CallbackQuery):
         await cq.answer()
-
-
 
 
