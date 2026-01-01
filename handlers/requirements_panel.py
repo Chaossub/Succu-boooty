@@ -1448,26 +1448,29 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
         # keep picker open and refreshed
         new_text, new_kb = _render_pick(action, admin_id, page=int(pstate.get("page") or 0))
-        await cq.message.edit_text(new_text, reply_markup=new_kb, disable_web_page_preview=True)
+        await _safe_edit(cq.message, new_text, reply_markup=new_kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
     async def reqpanel_reminders(app: Client, cq: CallbackQuery):
+        await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         admin_id = cq.from_user.id
         text, kb = _render_pick("reminder", admin_id, page=0)
-        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await _safe_edit(cq.message, text, reply_markup=kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex("^reqpanel:final_warnings$"))
     async def reqpanel_final_warnings(app: Client, cq: CallbackQuery):
+        await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         admin_id = cq.from_user.id
         text, kb = _render_pick("final", admin_id, page=0)
-        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+        await _safe_edit(cq.message, text, reply_markup=kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):toggle:(\d+)$"))
     async def reqpick_toggle(app: Client, cq: CallbackQuery):
+        await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action, uid_s = cq.data.split(":")[1], cq.data.split(":")[3]
@@ -1486,7 +1489,7 @@ async def _log_long(app: Client, title: str, lines: List[str]):
         _save_state(admin_id, st)
 
         text2, kb2 = _render_pick(action, admin_id, page=int(pstate.get("page") or 0))
-        await cq.message.edit_text(text2, reply_markup=kb2, disable_web_page_preview=True)
+        await _safe_edit(cq.message, text2, reply_markup=kb2, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):page:(\d+)$"))
     async def reqpick_page(app: Client, cq: CallbackQuery):
@@ -1496,10 +1499,11 @@ async def _log_long(app: Client, title: str, lines: List[str]):
         page = int(cq.data.split(":")[3])
         admin_id = cq.from_user.id
         text2, kb2 = _render_pick(action, admin_id, page=page)
-        await cq.message.edit_text(text2, reply_markup=kb2, disable_web_page_preview=True)
+        await _safe_edit(cq.message, text2, reply_markup=kb2, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_selected$"))
     async def reqpick_send_selected(app: Client, cq: CallbackQuery):
+        await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action = cq.data.split(":")[1]
@@ -1507,6 +1511,7 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_all$"))
     async def reqpick_send_all(app: Client, cq: CallbackQuery):
+        await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action = cq.data.split(":")[1]
