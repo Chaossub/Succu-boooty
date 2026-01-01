@@ -5,6 +5,7 @@ import logging
 import random
 import re
 import io
+import html
 from datetime import datetime, timezone
 from typing import List, Set, Dict, Any, Optional, Tuple
 
@@ -28,13 +29,21 @@ MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise RuntimeError("MONGODB_URI / MONGO_URI must be set for requirements_panel")
 
-mongo = MongoClient(MONGO_URI)
+# Keep Mongo timeouts short so a DB outage doesn't freeze the whole bot.
+mongo = MongoClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=int(os.getenv("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000")),
+    connectTimeoutMS=int(os.getenv("MONGO_CONNECT_TIMEOUT_MS", "5000")),
+)
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
 pending_custom_coll = db["requirements_pending_custom_spend"]  # legacy, now unused for buttons-only
 
-members_coll.create_index([("user_id", ASCENDING)], unique=True)
-pending_custom_coll.create_index([("owner_id", ASCENDING)], unique=True)
+try:
+    members_coll.create_index([("user_id", ASCENDING)], unique=True)
+    pending_custom_coll.create_index([("owner_id", ASCENDING)], unique=True)
+except Exception as e:
+    log.warning("requirements_panel: could not ensure Mongo indexes (continuing): %s", e)
 
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
@@ -92,6 +101,10 @@ REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20"))
 # Simple in-memory state for some flows
 STATE: Dict[int, Dict[str, Any]] = {}
 
+# Picker state (per-admin) for reminder/final-warning selection.
+# This does not need to persist across restarts; it's just UI state.
+PICKER_STATE: Dict[int, Dict[str, Any]] = {}
+
 # Pending manual-spend edits (buttons-only) per admin
 PENDING_SPEND: Dict[int, Dict[str, Any]] = {}
 PENDING_ATTRIB: Dict[int, Dict[str, Any]] = {}
@@ -129,11 +142,54 @@ async def _log_event(app: Client, text: str):
         return
     await _safe_send(app, LOG_GROUP_ID, f"[Requirements] {text}")
 
+
+def _escape(s: str) -> str:
+    """HTML-escape helper for safe display inside <code> blocks."""
+    return html.escape(str(s), quote=False)
+
+
+def _load_state(admin_id: int) -> Dict[str, Any]:
+    return PICKER_STATE.get(admin_id, {})
+
+
+def _save_state(admin_id: int, state: Dict[str, Any]) -> None:
+    PICKER_STATE[admin_id] = state
+
+
+async def _log_to_group(app: Client, text: str):
+    if LOG_GROUP_ID is None:
+        return
+    await _safe_send(app, LOG_GROUP_ID, text)
+
+
+async def _must_be_owner_or_model_admin(app: Client, cq: CallbackQuery) -> bool:
+    uid = cq.from_user.id
+    if _is_admin_or_model(uid):
+        return True
+    try:
+        await cq.answer("Only Roni and approved models can do that.", show_alert=True)
+    except Exception:
+        pass
+    return False
+
+
+async def _try_send_dm(app: Client, user_id: int, template: str) -> Tuple[bool, str]:
+    """Send a single DM; returns (sent_ok, reason_if_failed)."""
+    try:
+        md = _member_doc(user_id)
+        name = (md.get("first_name") or md.get("username") or "there").strip() or "there"
+        text = template.format(name=_escape(name))
+        await app.send_message(user_id, text, disable_web_page_preview=True)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
 def _member_doc(user_id: int) -> Dict[str, Any]:
     """
     Load a member doc and apply derived fields:
     - Owner & models are always effectively exempt from requirements
     """
+    # NOTE: Keep the raw Mongo _id around so callers can update safely if desired.
     doc = members_coll.find_one({"user_id": user_id}) or {}
     is_owner = user_id == OWNER_ID
     is_model = user_id in MODELS or is_owner
@@ -141,6 +197,7 @@ def _member_doc(user_id: int) -> Dict[str, Any]:
     effective_exempt = db_exempt or is_model
 
     return {
+        "_id": doc.get("_id"),
         "user_id": user_id,
         "first_name": doc.get("first_name", ""),
         "username": doc.get("username"),
@@ -1272,19 +1329,34 @@ async def _log_long(app: Client, title: str, lines: List[str]):
         return f"pick:{action}:{admin_id}"
 
     def _compute_targets(action: str):
-        # action: "reminder" or "final"
+        """Compute members who are behind requirements.
+
+        action: "reminder" or "final" (kept for future expansion)
+        """
         docs = list(members_coll.find({}))
-        targets = []
+        targets: List[Dict[str, Any]] = []
         for raw in docs:
-            md = _member_doc(raw)
-            if md.get("exempt"):
+            uid = raw.get("user_id")
+            if not isinstance(uid, int):
                 continue
-            if md.get("manual_spend", 0) >= REQUIRED_MIN_SPEND:
+
+            md = _member_doc(uid)
+
+            # Skip owner/models/exempt
+            if md.get("is_exempt"):
                 continue
-            # for reminders: only "behind" (not met) — same as above
+
+            # Skip if met minimum
+            if float(md.get("manual_spend", 0) or 0) >= REQUIRED_MIN_SPEND:
+                continue
+
             targets.append(md)
-        # sort by spend asc then name
-        targets.sort(key=lambda m: (m.get("manual_spend", 0), (m.get("name") or "").lower()))
+
+        # sort by spend asc then display name
+        targets.sort(key=lambda m: (
+            float(m.get("manual_spend", 0) or 0),
+            _display_name_for_doc(m).lower(),
+        ))
         return targets
 
     def _render_pick(action: str, admin_id: int, *, page: int = 0):
@@ -1384,7 +1456,11 @@ async def _log_long(app: Client, title: str, lines: List[str]):
             sent, reason = await _try_send_dm(app, uid, msg)
             if sent:
                 ok.append(md)
-                members_coll.update_one({"_id": md["_id"]}, {"$set": {flag_field: True}})
+                # Update by user_id (safe even if we didn't carry _id in state)
+                members_coll.update_one(
+                    {"user_id": uid},
+                    {"$set": {flag_field: True, "last_updated": datetime.now(timezone.utc)}},
+                )
             else:
                 fail.append((md, reason))
 
