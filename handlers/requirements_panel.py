@@ -1419,6 +1419,7 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
     @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
     async def reqpanel_reminders(app: Client, cq: CallbackQuery):
+    await cq.answer('⏳ Working…')
         await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
@@ -1428,6 +1429,7 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
     @app.on_callback_query(filters.regex("^reqpanel:final_warnings$"))
     async def reqpanel_final_warnings(app: Client, cq: CallbackQuery):
+    await cq.answer('⏳ Working…')
         await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
@@ -1471,6 +1473,7 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_selected$"))
     async def reqpick_send_selected(app: Client, cq: CallbackQuery):
+    await cq.answer('⏳ Working…')
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action = cq.data.split(":")[1]
@@ -1478,6 +1481,7 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_all$"))
     async def reqpick_send_all(app: Client, cq: CallbackQuery):
+    await cq.answer('⏳ Working…')
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action = cq.data.split(":")[1]
@@ -1486,4 +1490,5 @@ async def _log_long(app: Client, title: str, lines: List[str]):
     @app.on_callback_query(filters.regex("^reqpick:noop$"))
     async def reqpick_noop(app: Client, cq: CallbackQuery):
         await cq.answer()
+
 
