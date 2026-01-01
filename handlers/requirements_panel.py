@@ -28,15 +28,20 @@ MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise RuntimeError("MONGODB_URI / MONGO_URI must be set for requirements_panel")
 
-mongo = MongoClient(MONGO_URI)
+mongo = MongoClient(
+    MONGO_URI,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+    socketTimeoutMS=5000,
+)
+
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
 pending_custom_coll = db["requirements_pending_custom_spend"]  # legacy, now unused for buttons-only
-meta_coll = db["requirements_meta"]  # stores scan snapshots per group
+meta_coll = db["requirements_meta"]
 
 members_coll.create_index([("user_id", ASCENDING)], unique=True)
 pending_custom_coll.create_index([("owner_id", ASCENDING)], unique=True)
-meta_coll.create_index([("gid", ASCENDING)], unique=True)
 
 OWNER_ID = int(os.getenv("OWNER_ID", os.getenv("BOT_OWNER_ID", "6964994611")))
 
@@ -554,75 +559,61 @@ def register(app: Client):
             await cq.answer("Only Roni and models can view the full list.", show_alert=True)
             return
 
-        if SANCTUARY_GROUP_IDS:
-            gid = SANCTUARY_GROUP_IDS[0]
-            in_key = f"in_group.{gid}"
-            docs = list(members_coll.find({in_key: True}).sort("user_id", ASCENDING).limit(50))
-            if not docs:
-                text = "<b>Member Status List</b>\n\nI don't have an up-to-date group scan yet. Tap <b>Scan Group Members</b> first, then open this list again."
-            else:
-                lines = ["<b>Member Status List (first 50)</b>\n"]
-                for d in docs:
-                    uid = int(d.get("user_id", 0) or 0)
-                    if not uid:
-                        continue
-                    total = float(d.get("manual_spend", 0.0) or 0.0)
-                    db_exempt = bool(d.get("is_exempt", False))
-                    is_owner = uid == OWNER_ID
-                    is_model = uid in MODELS or is_owner
-                    effective_exempt = db_exempt or is_model
+        # Require a recent scan snapshot so we can filter to CURRENT members only.
+        snap = None
+        try:
+            snap = meta_coll.find_one({"_id": "requirements_scan_snapshot"})
+        except Exception as e:
+            log.warning("requirements_panel: failed reading scan snapshot meta: %s", e)
 
-                    if is_owner:
-                        status = "OWNER (EXEMPT)"
-                    elif is_model:
-                        status = "MODEL (EXEMPT)"
-                    elif effective_exempt:
-                        status = "EXEMPT"
-                    elif total >= REQUIRED_MIN_SPEND:
-                        status = "MET"
-                    else:
-                        status = "BEHIND"
+        if not snap or not snap.get("last_scan"):
+            text = (
+                "<b>Member Status List</b>\n\n"
+                "I don't have an up-to-date scan snapshot yet.\n"
+                "Tap <b>Scan Group Members</b> first, then open this list again."
+            )
+            await cq.answer()
+            await _safe_edit_text(cq.message, text=text, reply_markup=_admin_kb(), disable_web_page_preview=True)
+            return
 
-                    display_name = _display_name_for_doc(d)
-                    lines.append(f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})")
-                text = "\n".join(lines)
+        groups = snap.get("groups") or SANCTUARY_GROUP_IDS
+        # Union filter: show members that are currently in ANY configured Sanctuary group.
+        in_group_filter = {"$or": [{f"in_group.{gid}": True} for gid in groups]}
+
+        docs = list(members_coll.find(in_group_filter).sort("user_id", ASCENDING).limit(50))
+        if not docs:
+            text = "<b>Member Status List</b>\n\nNo current members found. Try running a scan again."
         else:
-            docs = list(members_coll.find().sort("user_id", ASCENDING).limit(50))
-            if not docs:
-                text = "<b>Member Status List</b>\n\nNo tracked members yet. Try running a scan first."
-            else:
-                lines = ["<b>Member Status List (first 50)</b>\n"]
-                for d in docs:
-                    uid = d["user_id"]
-                    total = float(d.get("manual_spend", 0.0))
-                    db_exempt = d.get("is_exempt", False)
-                    is_owner = uid == OWNER_ID
-                    is_model = uid in MODELS or is_owner
-                    effective_exempt = db_exempt or is_model
+            out = ["<b>Member Status List (current members, first 50)</b>\n"]
+            for d in docs:
+                uid = d["user_id"]
+                total = float(d.get("manual_spend", 0.0))
+                db_exempt = bool(d.get("is_exempt", False))
+                is_model = uid == OWNER_ID or uid in MODELS
+                if is_model:
+                    status = "MODEL (EXEMPT)"
+                elif db_exempt:
+                    status = "EXEMPT"
+                elif total >= REQUIRED_MIN_SPEND:
+                    status = "MET"
+                else:
+                    status = "BEHIND"
 
-                    if is_owner:
-                        status = "OWNER (EXEMPT)"
-                    elif is_model:
-                        status = "MODEL (EXEMPT)"
-                    elif effective_exempt:
-                        status = "EXEMPT"
-                    elif total >= REQUIRED_MIN_SPEND:
-                        status = "MET"
-                    else:
-                        status = "BEHIND"
+                display_name = _display_name_for_doc(d)
+                out.append(f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})")
+            text = "\n".join(out)
 
-                    display_name = _display_name_for_doc(d)
-                    lines.append(f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})")
-                text = "\n".join(lines)
-
+        await cq.answer()
         await _safe_edit_text(
             cq.message,
             text=text,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin")]]),
+            reply_markup=_admin_kb(),
             disable_web_page_preview=True,
         )
 
-@app.on_callback_query(filters.regex("^reqpanel:toggle_exempt$"))
+    # ────────────── Toggle Exempt (BUTTONS ONLY) ──────────────
+
+    @app.on_callback_query(filters.regex("^reqpanel:toggle_exempt$"))
     async def reqpanel_toggle_exempt_cb(_, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
@@ -1053,50 +1044,59 @@ def register(app: Client):
             await cq.answer("No Sanctuary group IDs configured.", show_alert=True)
             return
 
-        total_indexed = 0
         now = datetime.now(timezone.utc)
 
+        # Mark everyone we previously knew about in these groups as "not currently in group".
+        # Then flip to True as we find current members during the scan.
         for gid in SANCTUARY_GROUP_IDS:
-            # Mark everyone previously known in this group as not present (we'll flip back to True for those found)
             try:
-                members_coll.update_many({"groups": gid}, {"$set": {f"in_group.{gid}": False}})
+                members_coll.update_many(
+                    {"groups": gid},
+                    {"$set": {f"in_group.{gid}": False, "last_updated": now}},
+                )
             except Exception as e:
-                log.warning("requirements_panel: failed pre-mark for group %s: %s", gid, e)
+                log.warning("requirements_panel: pre-scan in_group reset failed for %s: %s", gid, e)
 
-            seen = 0
+        total_indexed = 0
+        total_in_group = 0
+
+        for gid in SANCTUARY_GROUP_IDS:
             try:
                 async for member in client.get_chat_members(gid):
                     if member.user.is_bot:
                         continue
-                    u = member.user
-                    username = (u.username or "").lower() if u.username else None
+
+                    uid = member.user.id
+                    doc = {
+                        "user_id": uid,
+                        "first_name": member.user.first_name or "",
+                        "last_name": member.user.last_name or "",
+                        "username": member.user.username,
+                        "last_updated": now,
+                    }
+
                     members_coll.update_one(
-                        {"user_id": u.id},
+                        {"user_id": uid},
                         {
-                            "$set": {
-                                "first_name": u.first_name or "",
-                                "username": username,
-                                "last_updated": now,
-                                f"in_group.{gid}": True,
-                            },
+                            "$set": doc | {f"in_group.{gid}": True},
                             "$addToSet": {"groups": gid},
                         },
                         upsert=True,
                     )
                     total_indexed += 1
-                    seen += 1
+                    total_in_group += 1
             except Exception as e:
                 log.warning("requirements_panel: failed scanning group %s: %s", gid, e)
 
-            # Store a scan snapshot marker
-            try:
-                meta_coll.update_one(
-                    {"gid": gid},
-                    {"$set": {"gid": gid, "last_scan": now, "seen": seen}},
-                    upsert=True,
-                )
-            except Exception as e:
-                log.warning("requirements_panel: failed updating scan meta for %s: %s", gid, e)
+        # Record that a scan snapshot exists (used by list/reminder tools).
+        try:
+            meta_coll.update_one(
+                {"_id": "requirements_scan_snapshot"},
+                {"$set": {"last_scan": now, "groups": SANCTUARY_GROUP_IDS, "count": total_in_group}},
+                upsert=True,
+            )
+        except Exception as e:
+            log.warning("requirements_panel: failed updating scan snapshot meta: %s", e)
 
         await _log_event(client, f"Scan complete by {user_id}: indexed or updated {total_indexed} members.")
         await cq.answer("Scan complete.", show_alert=False)
@@ -1107,8 +1107,7 @@ def register(app: Client):
             disable_web_page_preview=True,
         )
 
-    # ────────────── Scan + log status ──────────────
-@app.on_callback_query(filters.regex("^reqpanel:scan_log$"))
+    @app.on_callback_query(filters.regex("^reqpanel:scan_log$"))
     async def reqpanel_scan_log_cb(client: Client, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
@@ -1121,15 +1120,7 @@ def register(app: Client):
 
         # Scan members (same as scan button) and also track group membership
         total_indexed = 0
-        now = datetime.now(timezone.utc)
         for gid in SANCTUARY_GROUP_IDS:
-            # Mark previously-known members as not present; flip to True for those found in this scan
-            try:
-                members_coll.update_many({"groups": gid}, {"$set": {f"in_group.{gid}": False}})
-            except Exception as e:
-                log.warning("requirements_panel: failed pre-mark for group %s: %s", gid, e)
-
-            seen = 0
             try:
                 async for member in client.get_chat_members(gid):
                     if member.user.is_bot:
@@ -1142,29 +1133,18 @@ def register(app: Client):
                             "$set": {
                                 "first_name": u.first_name or "",
                                 "username": username,
-                                "last_updated": now,
-                                f"in_group.{gid}": True,
+                                "last_updated": datetime.now(timezone.utc),
                             },
                             "$addToSet": {"groups": gid},
                         },
                         upsert=True,
                     )
                     total_indexed += 1
-                    seen += 1
             except Exception as e:
                 log.warning("requirements_panel: failed scanning group %s: %s", gid, e)
 
-            try:
-                meta_coll.update_one(
-                    {"gid": gid},
-                    {"$set": {"gid": gid, "last_scan": now, "seen": seen}},
-                    upsert=True,
-                )
-            except Exception as e:
-                log.warning("requirements_panel: failed updating scan meta for %s: %s", gid, e)
-
-gid0 = SANCTUARY_GROUP_IDS[0]
-        docs = list(members_coll.find({f"in_group.{gid0}": True}))
+        # Summarize
+        docs = list(members_coll.find())
         total = len(docs)
         met = behind = exempt = 0
 
@@ -1343,42 +1323,21 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
     def _compute_targets(action: str):
         # action: "reminder" or "final"
-        query = {}
-        if SANCTUARY_GROUP_IDS:
-            gid0 = SANCTUARY_GROUP_IDS[0]
-            query = {f"in_group.{gid0}": True}
-
-        docs = list(members_coll.find(query))
+        docs = list(members_coll.find({}))
         targets = []
-        for d in docs:
-            uid = int(d.get("user_id", 0) or 0)
-            if not uid:
+        for raw in docs:
+            md = _member_doc(raw)
+            if md.get("exempt"):
                 continue
-
-            total = float(d.get("manual_spend", 0.0) or 0.0)
-            db_exempt = bool(d.get("is_exempt", False))
-            is_owner = uid == OWNER_ID
-            is_model = uid in MODELS or is_owner
-            effective_exempt = db_exempt or is_model
-            if effective_exempt:
+            if md.get("manual_spend", 0) >= REQUIRED_MIN_SPEND:
                 continue
-            if total >= REQUIRED_MIN_SPEND:
-                continue
-
-            targets.append({
-                "user_id": uid,
-                "first_name": d.get("first_name", "") or "",
-                "username": d.get("username"),
-                "manual_spend": total,
-                "name": _display_name_for_doc(d),
-                "exempt": False,
-            })
-
+            # for reminders: only "behind" (not met) — same as above
+            targets.append(md)
+        # sort by spend asc then name
         targets.sort(key=lambda m: (m.get("manual_spend", 0), (m.get("name") or "").lower()))
         return targets
 
-
-def _render_pick(action: str, admin_id: int, *, page: int = 0):
+    def _render_pick(action: str, admin_id: int, *, page: int = 0):
         st = _load_state(admin_id)
         key = _pick_key(action, admin_id)
         pstate = st.get(key) or {}
@@ -1592,5 +1551,7 @@ def _render_pick(action: str, admin_id: int, *, page: int = 0):
     @app.on_callback_query(filters.regex("^reqpick:noop$"))
     async def reqpick_noop(app: Client, cq: CallbackQuery):
         await cq.answer()
+
+
 
 
