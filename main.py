@@ -114,6 +114,7 @@ def main():
     _try_register("flyer_scheduler")
 
     _try_register("requirements_panel")
+    _try_register("requirements_messages")
     _try_register("kick_requirements")
 
     # Pass loop into schedulers if present (non-fatal)
