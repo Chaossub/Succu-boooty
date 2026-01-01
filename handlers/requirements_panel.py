@@ -1,6 +1,7 @@
 # handlers/requirements_panel.py
 
 import os
+import asyncio
 import logging
 import random
 import re
@@ -16,40 +17,6 @@ from pyrogram.types import (
     InlineKeyboardButton,
     Message,
 )
-# ----------------------------
-# Missing helper utilities (restored)
-# ----------------------------
-from html import escape as _html_escape
-
-_PICK_STATE = {}  # key: (chat_id, admin_id, mode) -> dict
-
-def _escape(s: str) -> str:
-    return _html_escape(str(s)) if s is not None else ""
-
-def _must_be_owner_or_model_admin(owner_id: int, model_admin_ids: set[int], user_id: int) -> bool:
-    return user_id == owner_id or user_id in (model_admin_ids or set())
-
-async def _log_to_group(app, log_group_id: int | None, text: str):
-    if not log_group_id:
-        return
-    try:
-        await app.send_message(log_group_id, text, disable_web_page_preview=True)
-    except Exception:
-        return
-
-async def _try_send_dm(app, user_id: int, text: str):
-    try:
-        await app.send_message(user_id, text, disable_web_page_preview=True)
-        return True, None
-    except Exception as e:
-        return False, str(e)
-
-def _load_state(chat_id: int, admin_id: int, mode: str):
-    return _PICK_STATE.get((chat_id, admin_id, mode), {"page": 0, "selected": set()})
-
-def _save_state(chat_id: int, admin_id: int, mode: str, state: dict):
-    _PICK_STATE[(chat_id, admin_id, mode)] = state
-
 from pyrogram.errors import MessageNotModified
 
 from pymongo import MongoClient, ASCENDING
@@ -62,7 +29,7 @@ MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise RuntimeError("MONGODB_URI / MONGO_URI must be set for requirements_panel")
 
-mongo = MongoClient(MONGO_URI)
+mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000, connectTimeoutMS=3000, socketTimeoutMS=3000)
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
 pending_custom_coll = db["requirements_pending_custom_spend"]  # legacy, now unused for buttons-only
@@ -1447,8 +1414,8 @@ async def _log_long(app: Client, title: str, lines: List[str]):
             pass
 
         # keep picker open and refreshed
-        new_text, new_kb = _render_pick(action, admin_id, page=int(pstate.get("page") or 0))
-        await _safe_edit(cq.message, new_text, reply_markup=new_kb, disable_web_page_preview=True)
+        new_text, new_kb = await asyncio.to_thread(_render_pick, action, admin_id, page=int(pstate.get("page") or 0))
+        await cq.message.edit_text(new_text, reply_markup=new_kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
     async def reqpanel_reminders(app: Client, cq: CallbackQuery):
@@ -1456,8 +1423,8 @@ async def _log_long(app: Client, title: str, lines: List[str]):
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         admin_id = cq.from_user.id
-        text, kb = _render_pick("reminder", admin_id, page=0)
-        await _safe_edit(cq.message, text, reply_markup=kb, disable_web_page_preview=True)
+        text, kb = await asyncio.to_thread(_render_pick, "reminder", admin_id, page=0)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex("^reqpanel:final_warnings$"))
     async def reqpanel_final_warnings(app: Client, cq: CallbackQuery):
@@ -1465,8 +1432,8 @@ async def _log_long(app: Client, title: str, lines: List[str]):
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         admin_id = cq.from_user.id
-        text, kb = _render_pick("final", admin_id, page=0)
-        await _safe_edit(cq.message, text, reply_markup=kb, disable_web_page_preview=True)
+        text, kb = await asyncio.to_thread(_render_pick, "final", admin_id, page=0)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):toggle:(\d+)$"))
     async def reqpick_toggle(app: Client, cq: CallbackQuery):
@@ -1488,22 +1455,22 @@ async def _log_long(app: Client, title: str, lines: List[str]):
         st[key] = pstate
         _save_state(admin_id, st)
 
-        text2, kb2 = _render_pick(action, admin_id, page=int(pstate.get("page") or 0))
-        await _safe_edit(cq.message, text2, reply_markup=kb2, disable_web_page_preview=True)
+        text2, kb2 = await asyncio.to_thread(_render_pick, action, admin_id, page=int(pstate.get("page") or 0))
+        await cq.message.edit_text(text2, reply_markup=kb2, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):page:(\d+)$"))
     async def reqpick_page(app: Client, cq: CallbackQuery):
+        await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action = cq.data.split(":")[1]
         page = int(cq.data.split(":")[3])
         admin_id = cq.from_user.id
-        text2, kb2 = _render_pick(action, admin_id, page=page)
-        await _safe_edit(cq.message, text2, reply_markup=kb2, disable_web_page_preview=True)
+        text2, kb2 = await asyncio.to_thread(_render_pick, action, admin_id, page=page)
+        await cq.message.edit_text(text2, reply_markup=kb2, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_selected$"))
     async def reqpick_send_selected(app: Client, cq: CallbackQuery):
-        await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action = cq.data.split(":")[1]
@@ -1511,7 +1478,6 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_all$"))
     async def reqpick_send_all(app: Client, cq: CallbackQuery):
-        await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action = cq.data.split(":")[1]
@@ -1520,3 +1486,4 @@ async def _log_long(app: Client, title: str, lines: List[str]):
     @app.on_callback_query(filters.regex("^reqpick:noop$"))
     async def reqpick_noop(app: Client, cq: CallbackQuery):
         await cq.answer()
+
