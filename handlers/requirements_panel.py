@@ -546,49 +546,89 @@ def register(app: Client):
     # ────────────── Admin-panel buttons ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:list$"))
-    async def reqpanel_list_cb(_, cq: CallbackQuery):
+    async def reqpanel_list_cb(client: Client, cq: CallbackQuery):
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
             await cq.answer("Only Roni and models can view the full list.", show_alert=True)
             return
 
-        docs = list(members_coll.find().sort("user_id", ASCENDING).limit(50))
+        if not SANCTUARY_GROUP_IDS:
+            await cq.answer("No Sanctuary group IDs configured.", show_alert=True)
+            return
+
+        gid = SANCTUARY_GROUP_IDS[0]  # Primary Sanctuary group for requirements
+        in_key = f"in_group.{gid}"
+        docs = list(members_coll.find({in_key: True}).sort("user_id", ASCENDING).limit(200))
+
         if not docs:
-            text = "<b>Member Status List</b>\n\nNo tracked members yet. Try running a scan first."
-        else:
-            lines = ["<b>Member Status List (first 50)</b>\n"]
-            for d in docs:
-                uid = d["user_id"]
-                total = float(d.get("manual_spend", 0.0))
-                db_exempt = d.get("is_exempt", False)
-                is_owner = uid == OWNER_ID
-                is_model = uid in MODELS or is_owner
-                effective_exempt = db_exempt or is_model
+            text = (
+                "<b>Member Status List</b>\n\n"
+                "I don’t have an up-to-date scan snapshot yet.\n"
+                "Tap <b>Scan Group Members</b> first, then open this list again."
+            )
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin")]])
+            await cq.answer()
+            await _safe_edit_text(cq.message, text=text, reply_markup=kb, disable_web_page_preview=True)
+            return
 
-                if is_owner:
-                    status = "OWNER (EXEMPT)"
-                elif is_model:
-                    status = "MODEL (EXEMPT)"
-                elif effective_exempt:
-                    status = "EXEMPT"
-                elif total >= REQUIRED_MIN_SPEND:
-                    status = "MET"
-                else:
-                    status = "BEHIND"
+        lines = [f"<b>Member Status List (first {min(50, len(docs))})</b>"]
+        shown = 0
+        behind_count = 0
+        met_count = 0
+        exempt_count = 0
 
-                display_name = _display_name_for_doc(d)
-                lines.append(f"• {display_name} (<code>{uid}</code>) – {status} (${total:.2f})")
-            text = "\n".join(lines)
+        for d in docs:
+            uid = int(d.get("user_id", 0) or 0)
+            if not uid:
+                continue
 
-        await cq.answer()
-        await _safe_edit_text(
-            cq.message,
-            text=text,
-            reply_markup=_admin_kb(),
-            disable_web_page_preview=True,
+            total = float(d.get("manual_spend", 0.0) or 0.0)
+            db_exempt = bool(d.get("is_exempt", False))
+            is_owner = uid == OWNER_ID
+            is_model = uid in MODELS or is_owner
+            effective_exempt = db_exempt or is_model
+
+            if is_owner:
+                status = "OWNER (EXEMPT)"
+            elif is_model:
+                status = "MODEL (EXEMPT)"
+            elif effective_exempt:
+                status = "EXEMPT"
+            elif total >= REQUIRED_MIN_SPEND:
+                status = "MET"
+            else:
+                status = "BEHIND"
+
+            if status == "BEHIND":
+                behind_count += 1
+            elif status == "MET":
+                met_count += 1
+            else:
+                exempt_count += 1
+
+            username = (d.get("username") or "").strip()
+            name = (d.get("first_name") or "Unknown").strip()
+            disp = f"@{username}" if username else name
+            lines.append(f"• {disp} ({uid}) — <b>{status}</b> (${total:,.2f})")
+
+            shown += 1
+            if shown >= 50:
+                break
+
+        lines.append("")
+        lines.append(f"<b>Requirement:</b> ${REQUIRED_MIN_SPEND:,.2f}")
+        lines.append(f"<b>Shown:</b> {shown} | <b>BEHIND:</b> {behind_count} | <b>MET:</b> {met_count} | <b>EXEMPT:</b> {exempt_count}")
+
+        text = "\n".join(lines)
+        kb = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("📡 Scan Group Members", callback_data="reqpanel:scan")],
+                [InlineKeyboardButton("⬅ Back", callback_data="reqpanel:admin")],
+            ]
         )
 
-    # ────────────── Toggle Exempt (BUTTONS ONLY) ──────────────
+        await cq.answer()
+        await _safe_edit_text(cq.message, text=text, reply_markup=kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex("^reqpanel:toggle_exempt$"))
     async def reqpanel_toggle_exempt_cb(_, cq: CallbackQuery):
@@ -1021,41 +1061,50 @@ def register(app: Client):
             await cq.answer("No Sanctuary group IDs configured.", show_alert=True)
             return
 
+        scan_id = datetime.now(timezone.utc).isoformat()
         total_indexed = 0
+
         for gid in SANCTUARY_GROUP_IDS:
             try:
                 async for member in client.get_chat_members(gid):
-                    if member.user.is_bot:
+                    if member.user and member.user.is_bot:
                         continue
                     u = member.user
-                    username = (u.username or "").lower() if u.username else None
+                    if not u:
+                        continue
+
                     members_coll.update_one(
                         {"user_id": u.id},
                         {
                             "$set": {
+                                "user_id": u.id,
                                 "first_name": u.first_name or "",
-                                "username": username,
+                                "username": (u.username or "").lower(),
                                 "last_updated": datetime.now(timezone.utc),
+                                f"in_group.{gid}": True,
+                                f"group_scan.{gid}": scan_id,
                             },
                             "$addToSet": {"groups": gid},
                         },
                         upsert=True,
                     )
                     total_indexed += 1
+
+                members_coll.update_many(
+                    {"groups": gid, f"group_scan.{gid}": {"$ne": scan_id}},
+                    {"$set": {f"in_group.{gid}": False}},
+                )
             except Exception as e:
                 log.warning("requirements_panel: failed scanning group %s: %s", gid, e)
 
-        await _log_event(client, f"Scan complete by {user_id}: indexed or updated {total_indexed} members.")
+        await _log_event(client, f"Scan complete by {user_id}: indexed/updated {total_indexed} members.")
         await cq.answer("Scan complete.", show_alert=False)
         await _safe_edit_text(
             cq.message,
-            text=(f"✅ Scan complete.\nIndexed or updated {total_indexed} members from Sanctuary group(s)."),
+            text=(f"✅ Scan complete.\nIndexed/updated {total_indexed} current members.\n\nNow tap <b>Member Status List</b> for the updated list."),
             reply_markup=_admin_kb(),
             disable_web_page_preview=True,
         )
-
-    
-    # ────────────── Scan + log status ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:scan_log$"))
     async def reqpanel_scan_log_cb(client: Client, cq: CallbackQuery):
@@ -1068,74 +1117,72 @@ def register(app: Client):
             await cq.answer("No Sanctuary group IDs configured.", show_alert=True)
             return
 
-        # Scan members (same as scan button) and also track group membership
+        scan_id = datetime.now(timezone.utc).isoformat()
         total_indexed = 0
+
         for gid in SANCTUARY_GROUP_IDS:
             try:
                 async for member in client.get_chat_members(gid):
-                    if member.user.is_bot:
+                    if member.user and member.user.is_bot:
                         continue
                     u = member.user
-                    username = (u.username or "").lower() if u.username else None
+                    if not u:
+                        continue
+
                     members_coll.update_one(
                         {"user_id": u.id},
                         {
                             "$set": {
+                                "user_id": u.id,
                                 "first_name": u.first_name or "",
-                                "username": username,
+                                "username": (u.username or "").lower(),
                                 "last_updated": datetime.now(timezone.utc),
+                                f"in_group.{gid}": True,
+                                f"group_scan.{gid}": scan_id,
                             },
                             "$addToSet": {"groups": gid},
                         },
                         upsert=True,
                     )
                     total_indexed += 1
+
+                members_coll.update_many(
+                    {"groups": gid, f"group_scan.{gid}": {"$ne": scan_id}},
+                    {"$set": {f"in_group.{gid}": False}},
+                )
             except Exception as e:
                 log.warning("requirements_panel: failed scanning group %s: %s", gid, e)
 
-        # Summarize
-        docs = list(members_coll.find())
-        total = len(docs)
-        met = behind = exempt = 0
-
+        primary_gid = SANCTUARY_GROUP_IDS[0]
+        docs = list(members_coll.find({f"in_group.{primary_gid}": True}))
+        behind = met = exempt = 0
         for d in docs:
-            uid = d.get("user_id")
-            if not uid:
-                continue
-            md = _member_doc(uid)
-            if md["is_exempt"]:
+            uid = int(d.get("user_id", 0) or 0)
+            total = float(d.get("manual_spend", 0.0) or 0.0)
+            db_exempt = bool(d.get("is_exempt", False))
+            is_owner = uid == OWNER_ID
+            is_model = uid in MODELS or is_owner
+            effective_exempt = db_exempt or is_model
+            if effective_exempt:
                 exempt += 1
-            elif md["manual_spend"] >= REQUIRED_MIN_SPEND:
+            elif total >= REQUIRED_MIN_SPEND:
                 met += 1
             else:
                 behind += 1
 
-        summary = (
-            "📊 <b>Sanctuary Requirements Scan</b>\n\n"
-            f"👥 Total members tracked: <b>{total}</b>\n"
-            f"✅ Requirements met: <b>{met}</b>\n"
-            f"⚠️ Behind: <b>{behind}</b>\n"
-            f"🟢 Exempt (models/owner/exempt): <b>{exempt}</b>\n\n"
-            f"📡 Indexed/updated this run: <b>{total_indexed}</b>\n"
-            f"💵 Minimum required: ${REQUIRED_MIN_SPEND:.2f}"
+        await _log_event(
+            client,
+            f"Scan+Log by {user_id}: indexed {total_indexed}. Requirement ${REQUIRED_MIN_SPEND:,.2f}. "
+            f"Current members (primary): {len(docs)} | BEHIND {behind} | MET {met} | EXEMPT {exempt}"
         )
 
-        await _log_event(client, f"Scan+log run by {user_id}: indexed {total_indexed} members. Met={met}, Behind={behind}, Exempt={exempt}.")
-        if LOG_GROUP_ID:
-            await _safe_send(client, LOG_GROUP_ID, summary)
-
-        await cq.answer("Scan & log complete ✅", show_alert=True)
+        await cq.answer("Scan & log complete.", show_alert=False)
         await _safe_edit_text(
             cq.message,
-            text="✅ Scan & log complete. Summary sent to the log group.",
+            text=(f"✅ Scan & log complete.\nIndexed/updated {total_indexed} current members.\nSummary sent to the log group."),
             reply_markup=_admin_kb(),
             disable_web_page_preview=True,
         )
-
-    # ────────────── DM-ready list (current group) ──────────────
-
-    
-    # ────────────── DM-ready list (pick group) ──────────────
 
     @app.on_callback_query(filters.regex("^reqpanel:dm_ready_group$"))
     async def reqpanel_dm_ready_group_cb(client: Client, cq: CallbackQuery):
@@ -1267,8 +1314,241 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
     
 
-    # ──────────────
+    # ────────────── Reminder / Final-warning DM picker (buttons only) ──────────────
+    def _pick_key(action: str, admin_id: int) -> str:
+        return f"pick:{action}:{admin_id}"
 
-    # NOTE: Reminder / Final-warning DM picker was moved to handlers/requirements_messages.py
-    # It is registered separately from main.py via _try_register("requirements_messages").
+    def _compute_targets(action: str):
+        # action: "reminder" or "final"
+        docs = list(members_coll.find({}))
+        targets = []
+        for raw in docs:
+            md = _member_doc(raw)
+            if md.get("exempt"):
+                continue
+            if md.get("manual_spend", 0) >= REQUIRED_MIN_SPEND:
+                continue
+            # for reminders: only "behind" (not met) — same as above
+            targets.append(md)
+        # sort by spend asc then name
+        targets.sort(key=lambda m: (m.get("manual_spend", 0), (m.get("name") or "").lower()))
+        return targets
+
+    def _render_pick(action: str, admin_id: int, *, page: int = 0):
+        st = _load_state(admin_id)
+        key = _pick_key(action, admin_id)
+        pstate = st.get(key) or {}
+        targets = pstate.get("targets") or _compute_targets(action)
+        selected = set(pstate.get("selected") or [])
+        per_page = 10
+        max_page = max(0, (len(targets) - 1) // per_page) if targets else 0
+        page = max(0, min(page, max_page))
+
+        pstate["targets"] = targets
+        pstate["selected"] = list(selected)
+        pstate["page"] = page
+        st[key] = pstate
+        _save_state(admin_id, st)
+
+        title = "💌 Send Reminders (Behind Only)" if action == "reminder" else "⚠️ Send Final Warnings (Not Met)"
+        lines = [
+            f"<b>{title}</b>",
+            f"Minimum required: <b>${REQUIRED_MIN_SPEND:.2f}</b>",
+            "",
+        ]
+        if not targets:
+            lines.append("✅ Nobody is behind right now.")
+        else:
+            lines.append(f"Behind members: <b>{len(targets)}</b>")
+            lines.append(f"Selected: <b>{len(selected)}</b>")
+            lines.append("")
+            lines.append("Tap members to toggle selection. Then choose <b>Send Selected</b> or <b>Send All</b>.")
+
+        kb_rows = []
+
+        # member buttons
+        start = page * per_page
+        end = start + per_page
+        for md in targets[start:end]:
+            uid = md["user_id"]
+            on = "✅" if uid in selected else "⬜️"
+            label = f"{on} {_fmt_user(md)} — ${md.get('manual_spend', 0):.2f}"
+            kb_rows.append([InlineKeyboardButton(label, callback_data=f"reqpick:{action}:toggle:{uid}")])
+
+        # paging
+        if targets and max_page > 0:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"reqpick:{action}:page:{page-1}"))
+            nav.append(InlineKeyboardButton(f"Page {page+1}/{max_page+1}", callback_data="reqpick:noop"))
+            if page < max_page:
+                nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"reqpick:{action}:page:{page+1}"))
+            kb_rows.append(nav)
+
+        # actions
+        kb_rows.append([
+            InlineKeyboardButton("✅ Send Selected", callback_data=f"reqpick:{action}:send_selected"),
+            InlineKeyboardButton("📣 Send All", callback_data=f"reqpick:{action}:send_all"),
+        ])
+        kb_rows.append([InlineKeyboardButton("⬅️ Back to Requirements Menu", callback_data="reqpanel:admin")])
+
+        return "\n".join(lines), InlineKeyboardMarkup(kb_rows)
+
+    async def _send_dms_for_action(app: Client, cq: CallbackQuery, *, action: str, only_selected: bool):
+        admin_id = cq.from_user.id
+        st = _load_state(admin_id)
+        key = _pick_key(action, admin_id)
+        pstate = st.get(key) or {}
+        targets = pstate.get("targets") or _compute_targets(action)
+        selected = set(pstate.get("selected") or [])
+
+        if not targets:
+            await cq.answer("Nobody is behind right now.", show_alert=True)
+            return
+
+        if only_selected:
+            send_list = [m for m in targets if m["user_id"] in selected]
+            if not send_list:
+                await cq.answer("Select at least one member first.", show_alert=True)
+                return
+        else:
+            send_list = targets
+
+        # quick progress note
+        await cq.answer("Sending…", show_alert=False)
+
+        ok = []
+        fail = []
+        for md in send_list:
+            uid = md["user_id"]
+            if action == "reminder":
+                msg = random.choice(REMINDER_MSGS)
+                flag_field = "reminder_sent"
+            else:
+                msg = random.choice(FINAL_WARNING_MSGS)
+                flag_field = "final_warning_sent"
+
+            sent, reason = await _try_send_dm(app, uid, msg)
+            if sent:
+                ok.append(md)
+                members_coll.update_one({"_id": md["_id"]}, {"$set": {flag_field: True}})
+            else:
+                fail.append((md, reason))
+
+        # summary to admin chat
+        title = "Reminders" if action == "reminder" else "Final Warnings"
+        summary_lines = [
+            f"<b>{title} sent</b>",
+            f"✅ Success: <b>{len(ok)}</b>",
+            f"❌ Failed: <b>{len(fail)}</b>",
+        ]
+        if ok:
+            summary_lines.append("")
+            summary_lines.append("<b>Sent to:</b>")
+            summary_lines += [f"• {_fmt_user(m)}" for m in ok[:50]]
+            if len(ok) > 50:
+                summary_lines.append(f"…and {len(ok)-50} more")
+        if fail:
+            summary_lines.append("")
+            summary_lines.append("<b>Failed:</b>")
+            for m, r in fail[:50]:
+                summary_lines.append(f"• {_fmt_user(m)} — <code>{_escape(r)}</code>")
+            if len(fail) > 50:
+                summary_lines.append(f"…and {len(fail)-50} more")
+
+        await cq.message.reply_text("\n".join(summary_lines), disable_web_page_preview=True)
+
+        # detailed log to log group (if configured)
+        try:
+            await _log_to_group(app, "\n".join([
+                f"[Requirements] {title} run by {admin_id}",
+                f"Success={len(ok)} Failed={len(fail)}",
+                "Sent: " + ", ".join([str(m['user_id']) for m in ok]) if ok else "Sent: (none)",
+                "Failed: " + ", ".join([f"{m['user_id']}({r})" for m, r in fail]) if fail else "Failed: (none)",
+            ]))
+        except Exception:
+            pass
+
+        # keep picker open and refreshed
+        new_text, new_kb = _render_pick(action, admin_id, page=int(pstate.get("page") or 0))
+        await cq.message.edit_text(new_text, reply_markup=new_kb, disable_web_page_preview=True)
+
+    @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
+    async def reqpanel_reminders(app: Client, cq: CallbackQuery):
+        # Always answer callback quickly (prevents Telegram spinner)
+        try:
+            await cq.answer()
+        except Exception:
+            pass
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        admin_id = cq.from_user.id
+        text, kb = _render_pick("reminder", admin_id, page=0)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+
+    @app.on_callback_query(filters.regex("^reqpanel:final_warnings$"))
+    async def reqpanel_final_warnings(app: Client, cq: CallbackQuery):
+        # Always answer callback quickly (prevents Telegram spinner)
+        try:
+            await cq.answer()
+        except Exception:
+            pass
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        admin_id = cq.from_user.id
+        text, kb = _render_pick("final", admin_id, page=0)
+        await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
+
+    @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):toggle:(\d+)$"))
+    async def reqpick_toggle(app: Client, cq: CallbackQuery):
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        action, uid_s = cq.data.split(":")[1], cq.data.split(":")[3]
+        admin_id = cq.from_user.id
+        st = _load_state(admin_id)
+        key = _pick_key(action, admin_id)
+        pstate = st.get(key) or {}
+        selected = set(pstate.get("selected") or [])
+        uid = int(uid_s)
+        if uid in selected:
+            selected.remove(uid)
+        else:
+            selected.add(uid)
+        pstate["selected"] = list(selected)
+        st[key] = pstate
+        _save_state(admin_id, st)
+
+        text2, kb2 = _render_pick(action, admin_id, page=int(pstate.get("page") or 0))
+        await cq.message.edit_text(text2, reply_markup=kb2, disable_web_page_preview=True)
+
+    @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):page:(\d+)$"))
+    async def reqpick_page(app: Client, cq: CallbackQuery):
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        action = cq.data.split(":")[1]
+        page = int(cq.data.split(":")[3])
+        admin_id = cq.from_user.id
+        text2, kb2 = _render_pick(action, admin_id, page=page)
+        await cq.message.edit_text(text2, reply_markup=kb2, disable_web_page_preview=True)
+
+    @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_selected$"))
+    async def reqpick_send_selected(app: Client, cq: CallbackQuery):
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        action = cq.data.split(":")[1]
+        await _send_dms_for_action(app, cq, action=action, only_selected=True)
+
+    @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_all$"))
+    async def reqpick_send_all(app: Client, cq: CallbackQuery):
+        if not await _must_be_owner_or_model_admin(app, cq):
+            return
+        action = cq.data.split(":")[1]
+        await _send_dms_for_action(app, cq, action=action, only_selected=False)
+
+    @app.on_callback_query(filters.regex("^reqpick:noop$"))
+    async def reqpick_noop(app: Client, cq: CallbackQuery):
+        await cq.answer()
+
+
+
 
