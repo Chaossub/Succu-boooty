@@ -50,7 +50,7 @@ def _parse_id_list(raw: str) -> Set[int]:
 SUPER_ADMINS = _parse_id_list(os.getenv("SUPER_ADMINS", ""))
 MODELS = _parse_id_list(os.getenv("MODELS", ""))
 
-REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "0") or "0")
+REQUIRED_MIN_SPEND = float(os.getenv("REQUIREMENTS_MIN_SPEND", "20") or "20")
 
 # Log group (optional)
 LOG_GROUP_ID: Optional[int] = None
@@ -198,7 +198,7 @@ def _compute_targets(chat_id: int) -> List[Dict[str, Any]]:
     if coll is None:
         return []
     try:
-        docs = list(coll.find({"chat_id": chat_id}))
+        docs = list(coll.find({"chat_id": chat_id, f"in_group.{chat_id}": True}))
     except Exception as e:
         log.warning("Mongo find failed (targets): %s", e)
         return []
