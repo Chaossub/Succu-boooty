@@ -1,7 +1,6 @@
 # handlers/requirements_panel.py
 
 import os
-import asyncio
 import logging
 import random
 import re
@@ -29,7 +28,7 @@ MONGO_URI = os.getenv("MONGODB_URI") or os.getenv("MONGO_URI")
 if not MONGO_URI:
     raise RuntimeError("MONGODB_URI / MONGO_URI must be set for requirements_panel")
 
-mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000, connectTimeoutMS=3000, socketTimeoutMS=3000)
+mongo = MongoClient(MONGO_URI)
 db = mongo["Succubot"]
 members_coll = db["requirements_members"]
 pending_custom_coll = db["requirements_pending_custom_spend"]  # legacy, now unused for buttons-only
@@ -396,6 +395,11 @@ def register(app: Client):
 # Owner / models tools panel
     @app.on_callback_query(filters.regex("^reqpanel:admin$"))
     async def reqpanel_admin_cb(_, cq: CallbackQuery):
+        # Always answer callback quickly (prevents Telegram spinner)
+        try:
+            await cq.answer()
+        except Exception:
+            pass
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
             await cq.answer("Only Roni and approved models can open this.", show_alert=True)
@@ -735,6 +739,11 @@ def register(app: Client):
 
     @app.on_callback_query(filters.regex("^reqpanel:add_spend$"))
     async def reqpanel_add_spend_cb(_, cq: CallbackQuery):
+        # Always answer callback quickly (prevents Telegram spinner)
+        try:
+            await cq.answer()
+        except Exception:
+            pass
         user_id = cq.from_user.id
         if not _is_admin_or_model(user_id):
             await cq.answer("Only Roni and models can add spend.", show_alert=True)
@@ -1414,32 +1423,37 @@ async def _log_long(app: Client, title: str, lines: List[str]):
             pass
 
         # keep picker open and refreshed
-        new_text, new_kb = await asyncio.to_thread(_render_pick, action, admin_id, page=int(pstate.get("page") or 0))
+        new_text, new_kb = _render_pick(action, admin_id, page=int(pstate.get("page") or 0))
         await cq.message.edit_text(new_text, reply_markup=new_kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex("^reqpanel:reminders$"))
     async def reqpanel_reminders(app: Client, cq: CallbackQuery):
-    await cq.answer('⏳ Working…')
-        await cq.answer()
+        # Always answer callback quickly (prevents Telegram spinner)
+        try:
+            await cq.answer()
+        except Exception:
+            pass
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         admin_id = cq.from_user.id
-        text, kb = await asyncio.to_thread(_render_pick, "reminder", admin_id, page=0)
+        text, kb = _render_pick("reminder", admin_id, page=0)
         await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex("^reqpanel:final_warnings$"))
     async def reqpanel_final_warnings(app: Client, cq: CallbackQuery):
-    await cq.answer('⏳ Working…')
-        await cq.answer()
+        # Always answer callback quickly (prevents Telegram spinner)
+        try:
+            await cq.answer()
+        except Exception:
+            pass
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         admin_id = cq.from_user.id
-        text, kb = await asyncio.to_thread(_render_pick, "final", admin_id, page=0)
+        text, kb = _render_pick("final", admin_id, page=0)
         await cq.message.edit_text(text, reply_markup=kb, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):toggle:(\d+)$"))
     async def reqpick_toggle(app: Client, cq: CallbackQuery):
-        await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action, uid_s = cq.data.split(":")[1], cq.data.split(":")[3]
@@ -1457,23 +1471,21 @@ async def _log_long(app: Client, title: str, lines: List[str]):
         st[key] = pstate
         _save_state(admin_id, st)
 
-        text2, kb2 = await asyncio.to_thread(_render_pick, action, admin_id, page=int(pstate.get("page") or 0))
+        text2, kb2 = _render_pick(action, admin_id, page=int(pstate.get("page") or 0))
         await cq.message.edit_text(text2, reply_markup=kb2, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):page:(\d+)$"))
     async def reqpick_page(app: Client, cq: CallbackQuery):
-        await cq.answer()
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action = cq.data.split(":")[1]
         page = int(cq.data.split(":")[3])
         admin_id = cq.from_user.id
-        text2, kb2 = await asyncio.to_thread(_render_pick, action, admin_id, page=page)
+        text2, kb2 = _render_pick(action, admin_id, page=page)
         await cq.message.edit_text(text2, reply_markup=kb2, disable_web_page_preview=True)
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_selected$"))
     async def reqpick_send_selected(app: Client, cq: CallbackQuery):
-    await cq.answer('⏳ Working…')
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action = cq.data.split(":")[1]
@@ -1481,7 +1493,6 @@ async def _log_long(app: Client, title: str, lines: List[str]):
 
     @app.on_callback_query(filters.regex(r"^reqpick:(reminder|final):send_all$"))
     async def reqpick_send_all(app: Client, cq: CallbackQuery):
-    await cq.answer('⏳ Working…')
         if not await _must_be_owner_or_model_admin(app, cq):
             return
         action = cq.data.split(":")[1]
